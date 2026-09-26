@@ -11,9 +11,12 @@
 //!
 //! * **Width.** The stamp is a varint; if the controller keeps it in 32 bits it wraps
 //!   after 49.7 days of uptime. A step back of more than half the 32-bit range, from
-//!   a value inside it, is read as a wrap.
+//!   a value inside it, is read as a wrap when the step forward it implies fits the
+//!   wall time that passed; otherwise it is a restart (below).
 //!   A stamp from just before the wrap that arrives just after it (streams are a
 //!   little out of step) belongs to the turn before, not to the next one.
+//!   Whether the IRC5 wraps at all is unmeasured: the cell's clock was at 3.7e9 ms on
+//!   2026-09-26 and reaches 2^32 about a week later if it is not restarted.
 //! * **Restarts.** A restarted controller's clock starts again from zero. The raw
 //!   stamp is kept as the controller sent it (that is what a recording's
 //!   `controller_ms` column promises), but the *timeline* the charts use is rebased
@@ -61,6 +64,9 @@ pub struct Timeline {
     /// Wall clock at a known timeline point, refreshed at every session start so the
     /// hover readout does not accumulate PC-versus-controller drift over hours.
     anchor: Option<(i64, SystemTime)>,
+    /// The next stamp replaces the anchor (a new session began). The old one serves
+    /// until then: the timeline runs on with the wall clock across the gap.
+    refresh_anchor: bool,
     /// (timeline ms from which it applies, offset): one entry per rebase, so a
     /// timeline point maps back to the controller's own clock exactly.
     segments: Vec<(i64, i64)>,
@@ -74,7 +80,7 @@ impl Default for Timeline {
 
 impl Timeline {
     pub fn new() -> Timeline {
-        Timeline { wraps: 0, last_raw: None, offset: 0, last_timeline: None, last_seen: None, origin: None, anchor: None, segments: Vec::new() }
+        Timeline { wraps: 0, last_raw: None, offset: 0, last_timeline: None, last_seen: None, origin: None, anchor: None, refresh_anchor: false, segments: Vec::new() }
     }
 
     /// The controller's clock (32-bit wraps undone) at a timeline point: what a
@@ -84,11 +90,18 @@ impl Timeline {
         t.saturating_sub(offset)
     }
 
+    /// Where the clock segment holding timeline point `t` begins (`i64::MIN` for the
+    /// first): points in one segment share one mapping back to the controller's
+    /// clock, and a new segment begins at every restart or jump.
+    pub fn segment_start(&self, t: i64) -> i64 {
+        self.segments.iter().rev().find(|(from, _)| t >= *from).map(|(from, _)| *from).unwrap_or(i64::MIN)
+    }
+
     /// A new session starts: the next stamp decides whether the controller's clock
     /// carried on (a reconnect) or started over (a restart). Nothing is lost here;
     /// the decision is made in [`Timeline::map`].
     pub fn session_start(&mut self) {
-        self.anchor = None;
+        self.refresh_anchor = true;
     }
 
     /// Map one stamp. `now` is when its frame arrived.
@@ -98,9 +111,15 @@ impl Timeline {
         let mut straggler = false;
         if let Some(last) = self.last_raw {
             let elapsed = self.last_seen.map(|t| now.saturating_duration_since(t)).unwrap_or(Duration::ZERO);
+            // Whether the controller's clock could have moved `step` ms forward in the
+            // wall time that passed.
+            let fits = |step: u64| u128::from(step) <= elapsed.as_millis() + elapsed.as_millis() / 10 + FORWARD_SLACK_MS;
             if raw < last {
                 let back = last - raw;
-                if last < WRAP && raw < WRAP && back > WRAP / 2 {
+                // A wrap only when the step forward it implies fits the time that
+                // passed: a restart of a controller whose clock was past 2^31 (the
+                // measured cell's was, at 42.9 days) looks the same otherwise.
+                if last < WRAP && raw < WRAP && back > WRAP / 2 && fits(WRAP - last + raw) {
                     self.wraps += 1;
                     wraps = self.wraps;
                     event = ClockEvent::Wrapped;
@@ -111,11 +130,12 @@ impl Timeline {
                 }
             } else {
                 let ahead = raw - last;
-                if self.wraps > 0 && last < WRAP && raw < WRAP && ahead > WRAP / 2 {
-                    // From just before the last wrap, arriving just after it.
+                // From just before the last wrap, arriving just after it: then it lies
+                // within the jitter behind the newest stamp, across the wrap.
+                if self.wraps > 0 && last < WRAP && raw < WRAP && ahead > WRAP / 2 && WRAP - ahead <= JITTER_MS {
                     wraps = self.wraps - 1;
                     straggler = true;
-                } else if u128::from(ahead) > elapsed.as_millis() + elapsed.as_millis() / 10 + FORWARD_SLACK_MS {
+                } else if !fits(ahead) {
                     self.rebase(raw, elapsed);
                     wraps = 0;
                     event = ClockEvent::Reset { from_raw: last, to_raw: raw };
@@ -135,10 +155,11 @@ impl Timeline {
         if self.origin.is_none() {
             self.origin = Some(t);
         }
-        if self.anchor.is_none() {
+        if self.anchor.is_none() || self.refresh_anchor {
             // The frame's arrival stands in for the sample's wall time: it is late
             // by the delivery latency, measured at tens of milliseconds at most.
             self.anchor = Some((t, SystemTime::now() - now.elapsed()));
+            self.refresh_anchor = false;
         }
         (unwrapped, t, event)
     }
@@ -148,10 +169,15 @@ impl Timeline {
     fn rebase(&mut self, raw: u64, elapsed: Duration) {
         // At least 1 ms on: the last point before the rebase keeps the old segment's
         // mapping back to the controller's clock.
-        let resume_at = self.last_timeline.unwrap_or(0).saturating_add((elapsed.as_millis().min(i64::MAX as u128) as i64).max(1));
+        let last = self.last_timeline.unwrap_or(0);
+        let resume_at = last.saturating_add((elapsed.as_millis().min(i64::MAX as u128) as i64).max(1));
         self.wraps = 0;
         self.offset = resume_at.saturating_sub(to_i64(raw));
-        self.segments.push((resume_at, self.offset));
+        // The new segment reaches back into the gap by up to the jitter, so another
+        // stream's stamp a tick behind the one that showed the restart maps with the
+        // new clock too; never back over the old segment's last point.
+        let from = resume_at.saturating_sub(JITTER_MS as i64).max(last.saturating_add(1)).min(resume_at);
+        self.segments.push((from, self.offset));
     }
 
     /// Timeline ms to chart seconds.
@@ -281,6 +307,105 @@ mod tests {
         assert_eq!((u, t, e), (WRAP - 4, (WRAP - 4) as i64, ClockEvent::None), "it belongs to the turn before");
         let (u, t, e) = tl.map(4, now);
         assert_eq!((u, t, e), (WRAP + 4, (WRAP + 4) as i64, ClockEvent::None), "and the clock carries on after the wrap");
+    }
+
+    #[test]
+    fn a_restart_past_half_the_32_bit_range_is_a_restart_not_a_wrap() {
+        // The measured cell's clock read 3,706,265,421 ms (42.9 days) on 2026-09-26:
+        // past 2^31. A restart then reads as a step back of more than half the 32-bit
+        // range, like a wrap; only the time that passed tells them apart (a wrap here
+        // would mean 6.8 days of controller time in two minutes).
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        tl.map(3_706_265_421, t0);
+        let (_, before, _) = tl.map(3_706_265_425, t0);
+        tl.session_start();
+        let later = t0 + Duration::from_secs(120);
+        let (u, t, e) = tl.map(90_000, later);
+        assert_eq!(e, ClockEvent::Reset { from_raw: 3_706_265_425, to_raw: 90_000 });
+        assert_eq!(u, 90_000, "the raw stamp is kept as sent, not moved a turn ahead");
+        assert_eq!(t, before + 120_000, "the timeline resumes after the two minutes that passed");
+        let (u, t2, e) = tl.map(90_004, later);
+        assert_eq!((u, t2, e), (90_004, t + 4, ClockEvent::None));
+    }
+
+    #[test]
+    fn a_wrap_after_a_long_absence_is_still_a_wrap() {
+        // Disconnected for a minute across the wrap: the step the wrap implies (61 s)
+        // fits the minute that passed.
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        tl.map(WRAP - 1_000, t0);
+        let (u, _, e) = tl.map(60_000, t0 + Duration::from_secs(61));
+        assert_eq!((u, e), (WRAP + 60_000, ClockEvent::Wrapped));
+    }
+
+    #[test]
+    fn one_garbled_stamp_inside_the_32_bit_range_cannot_throw_the_timeline_ahead() {
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        tl.map(1000, t0);
+        tl.map(1004, t0);
+        let (_, t, e) = tl.map(3_000_000_000, t0);
+        assert!(matches!(e, ClockEvent::Reset { .. }), "{e:?}");
+        assert!(t <= 1004 + 10, "the timeline leapt to {t}");
+        // The next real stamp is not a 32-bit wrap from the garbled one.
+        let (u, t2, e2) = tl.map(1008, t0 + Duration::from_millis(4));
+        assert_eq!(u, 1008, "the raw stamp was moved a turn ahead ({e2:?})");
+        assert!((1004..=2100).contains(&t2), "the timeline went to {t2} ({e2:?})");
+        let (_, t3, e3) = tl.map(1012, t0 + Duration::from_millis(8));
+        assert_eq!((t3, e3), (t2 + 4, ClockEvent::None));
+    }
+
+    #[test]
+    fn after_a_wrap_a_big_jump_forward_is_rebased_not_taken_for_a_straggler() {
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        tl.map(WRAP - 4, t0);
+        let (_, tw, e) = tl.map(0, t0);
+        assert_eq!(e, ClockEvent::Wrapped);
+        // A different clock (another controller at the address, or a set clock),
+        // far more than half a turn ahead of the last stamp.
+        let later = t0 + Duration::from_secs(60);
+        let (_, t1, e1) = tl.map(3_000_000_000, later);
+        assert!(matches!(e1, ClockEvent::Reset { .. }), "{e1:?}");
+        assert!(t1 > tw, "the timeline went back: {t1} after {tw}");
+        let (_, t2, e2) = tl.map(3_000_000_004, later + Duration::from_millis(4));
+        assert_eq!((t2, e2), (t1 + 4, ClockEvent::None), "and it carries on from there, so the store accepts the samples");
+    }
+
+    #[test]
+    fn the_wall_clock_stays_known_while_reconnecting() {
+        // A snapshot saved between a reconnect's TCP connect and its first sample
+        // (which can take a minute of starved retries) still maps its rows to the
+        // wall clock; the next stamp then refreshes the anchor.
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        tl.map(1000, t0);
+        tl.session_start();
+        assert!(tl.wall(1000).is_some(), "no wall clock between the connect and the first sample");
+        tl.map(9000, t0 + Duration::from_secs(8));
+        assert_eq!(tl.anchor().map(|a| a.0), Some(9000), "the anchor is refreshed at the new session's first stamp");
+    }
+
+    #[test]
+    fn a_stamp_a_little_behind_a_restart_maps_to_the_new_clock() {
+        // Streams are a tick out of step (the cell's drive-side ones run one behind),
+        // so right after a restart another stream's stamp can be just below the one
+        // that showed it.
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        tl.map(500_000, t0);
+        tl.map(500_004, t0);
+        let later = t0 + Duration::from_secs(90);
+        let (_, t, e) = tl.map(10_004, later);
+        assert!(matches!(e, ClockEvent::Reset { .. }), "{e:?}");
+        let (u, t_lag, e) = tl.map(10_000, later);
+        assert_eq!((u, e), (10_000, ClockEvent::None));
+        assert_eq!(t_lag, t - 4);
+        assert_eq!(tl.controller_ms(t_lag), 10_000, "mapped back with the old clock's offset");
+        assert_eq!(tl.controller_ms(t), 10_004);
+        assert_eq!(tl.segment_start(t_lag), tl.segment_start(t), "both in the new clock's segment");
     }
 
     #[test]

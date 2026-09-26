@@ -178,7 +178,7 @@ fn record_save_last_and_slow_log_write_their_folders() {
     for e in std::fs::read_dir(&rec).unwrap() {
         let loaded = spy_core::recording::read(&e.unwrap().path()).unwrap();
         assert!(loaded.meta.complete);
-        assert!(loaded.data["4002/ROB_1/1"].iter().all(|&(_, v)| v == 101.0));
+        assert!(loaded.data["4002/ROB_1/J1"].iter().all(|&(_, v)| v == 101.0));
         kinds.push(format!("{:?}", loaded.meta.kind));
     }
     kinds.sort();

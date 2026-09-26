@@ -131,7 +131,15 @@ pub enum Defect {
     CountMismatch,
     /// An int sample outside int32. Dropped with its record.
     IntRange,
+    /// A timestamp of [`MAX_STAMP_MS`] or more: no controller has been up that long.
+    /// Dropped with its record.
+    ImplausibleStamp,
 }
+
+/// Timestamps are the controller's uptime in milliseconds (3.7e9 on the measured
+/// cell after 42.9 days); 2^40 is 35 years. A stamp beyond it is garbage, and as a
+/// session's first stamp it would set the chart timeline's origin.
+pub const MAX_STAMP_MS: u64 = 1 << 40;
 
 impl std::fmt::Display for Defect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,6 +151,7 @@ impl std::fmt::Display for Defect {
             Defect::BadMessage => f.write_str("malformed sample record"),
             Defect::CountMismatch => f.write_str("a sample record's stamps and values disagree in number"),
             Defect::IntRange => f.write_str("an integer sample outside int32"),
+            Defect::ImplausibleStamp => f.write_str("a timestamp beyond any controller's uptime"),
         }
     }
 }
@@ -339,6 +348,9 @@ fn decode_message(kind: ValueKind, msg: &[u8]) -> Result<Record, Defect> {
     let stream = u32::try_from(stream).map_err(|_| Defect::BadMessage)?;
     if stamps.len() != values.len() {
         return Err(Defect::CountMismatch);
+    }
+    if stamps.iter().any(|&s| s >= MAX_STAMP_MS) {
+        return Err(Defect::ImplausibleStamp);
     }
     Ok(Record { stream, kind, stamps, values })
 }
@@ -606,6 +618,22 @@ mod tests {
         // Two stream ids.
         let (_, d) = run(&payload(&[(1, vec![0x08, 0x01, 0x08, 0x02])], None, true));
         assert_eq!(d, vec![Defect::BadMessage]);
+    }
+
+    #[test]
+    fn a_timestamp_beyond_any_uptime_drops_its_record() {
+        // A stamp near 2^64 as the first one of a session would pin the chart timeline
+        // at its end for good; one of 35 years' uptime is no controller's clock.
+        let good = float_msg(1, &[3_706_265_421, 3_706_265_425], &[1.0, 2.0]);
+        let bad = float_msg(2, &[3_706_265_421, u64::MAX], &[1.0, 2.0]);
+        let (r, d) = run(&payload(&[(1, bad), (1, good.clone())], None, true));
+        assert_eq!(d, vec![Defect::ImplausibleStamp]);
+        assert_eq!(r.len(), 1, "the good record after it survives");
+        assert_eq!(r[0].stream, 1);
+        let (r, d) = run(&payload(&[(1, float_msg(3, &[MAX_STAMP_MS], &[1.0]))], None, true));
+        assert!(r.is_empty() && d == vec![Defect::ImplausibleStamp], "{d:?}");
+        let (r, d) = run(&payload(&[(1, float_msg(3, &[MAX_STAMP_MS - 1], &[1.0]))], None, true));
+        assert!(r.len() == 1 && d.is_empty(), "{d:?}");
     }
 
     #[test]

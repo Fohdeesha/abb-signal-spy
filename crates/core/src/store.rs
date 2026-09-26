@@ -34,17 +34,26 @@ pub struct ChannelKey {
 }
 
 impl ChannelKey {
-    /// Stable text id, used in recordings: `4002/ROB_1/2`. No commas, quotes or
-    /// spaces, so it needs no quoting in a CSV.
+    /// Stable text id, used in recordings: `4002/ROB_1/J2` (signal / mechanical unit /
+    /// joint, counted from 1). No commas, quotes or spaces, so it needs no quoting in
+    /// a CSV. A signal that is not per joint still names the axis it was asked for.
     pub fn id(&self) -> String {
-        format!("{}/{}/{}", self.signal, self.unit, self.axis.one_based())
+        format!("{}/{}/J{}", self.signal, self.unit, self.axis.one_based())
     }
 
+    /// Reads [`ChannelKey::id`], and the bare axis number (`4002/ROB_1/2`) that
+    /// recordings made before 2026-09-27 wrote.
     pub fn parse_id(s: &str) -> Option<ChannelKey> {
         let mut it = s.split('/');
         let signal = it.next()?.parse().ok()?;
         let unit = MechUnit::new(it.next()?).ok()?;
-        let axis = Axis::new(it.next()?.parse().ok()?)?;
+        let a = it.next()?;
+        let a = a.strip_prefix('J').unwrap_or(a);
+        // Digits only: `parse` would take a sign ("J+2").
+        if a.is_empty() || !a.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let axis = Axis::new(a.parse().ok()?)?;
         if it.next().is_some() {
             return None;
         }
@@ -123,6 +132,12 @@ impl Ring {
     /// Index of the first sample at or after `t`.
     pub fn lower_bound(&self, t: i64) -> usize {
         self.t.partition_point(|&x| x < t)
+    }
+
+    /// The newest sample at or before `t`, found by search (not by walking the ring).
+    pub fn at_or_before(&self, t: i64) -> Option<(i64, f64)> {
+        let i = self.lower_bound(t.saturating_add(1));
+        (i > 0).then(|| (self.t[i - 1], self.v[i - 1]))
     }
 
     /// Samples with `from <= t < to`, in order.
@@ -241,6 +256,9 @@ impl Channel {
 #[derive(Debug, Default)]
 pub struct Store {
     channels: RwLock<Vec<Arc<Channel>>>,
+    /// Counts [`Store::clear`]s: a reader keeping anything derived from the history
+    /// (statistics since a reset, markers on its clock) starts afresh when it moves.
+    epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Store {
@@ -286,9 +304,16 @@ impl Store {
         self.channels.write().unwrap_or_else(|e| e.into_inner()).retain(|c| &c.key != key);
     }
 
-    /// Forget every channel's history.
+    /// Forget every channel's history (another controller: its clock and values
+    /// have nothing to do with the last one's).
     pub fn clear(&self) {
         self.channels.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Changes whenever the history is cleared.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Newest timeline ms across all channels.
@@ -308,9 +333,17 @@ mod tests {
     #[test]
     fn key_ids_round_trip() {
         let k = key();
-        assert_eq!(k.id(), "4002/ROB_1/2");
-        assert_eq!(ChannelKey::parse_id(&k.id()), Some(k));
+        // The joint spelled out, so nobody reads the axis as zero-based (the wire's is).
+        assert_eq!(k.id(), "4002/ROB_1/J2");
+        assert_eq!(ChannelKey::parse_id(&k.id()), Some(k.clone()));
+        // Recordings made before 2026-09-27 (the cell's among them) wrote the bare number.
+        assert_eq!(ChannelKey::parse_id("4002/ROB_1/2"), Some(k));
+        assert_eq!(ChannelKey::parse_id("4002/ROB_1/J0"), None);
+        assert_eq!(ChannelKey::parse_id("4002/ROB_1/JJ2"), None);
+        assert_eq!(ChannelKey::parse_id("4002/ROB_1/J"), None);
         assert_eq!(ChannelKey::parse_id("4002/ROB_1/0"), None);
+        assert_eq!(ChannelKey::parse_id("4002/ROB_1/J+2"), None);
+        assert_eq!(ChannelKey::parse_id("4002/ROB_1/+2"), None);
         assert_eq!(ChannelKey::parse_id("4002/ROB 1/1"), None);
         assert_eq!(ChannelKey::parse_id("4002/ROB_1/1/9"), None);
     }

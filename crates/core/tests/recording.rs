@@ -79,23 +79,23 @@ fn a_full_recording_reads_back_exactly() {
     assert_eq!(back.meta.anchors.len(), 1);
     assert!(back.meta.label == "dip test" && st.dir.to_string_lossy().ends_with("dip test"));
 
-    let torque = &back.data["4002/ROB_1/1"];
+    let torque = &back.data["4002/ROB_1/J1"];
     assert!(torque.len() > 250, "{} rows in 1.5 s", torque.len());
     assert!(torque.iter().all(|&(_, v)| v == 101.0), "a value changed on its way to disk");
     assert!(torque.windows(2).all(|w| w[1].0 - w[0].0 == 4), "controller_ms is not the 4 ms clock");
-    let ints = &back.data["4002/ROB_1/1"].len().min(back.data["9888/ROB_1/1"].len());
+    let ints = &back.data["4002/ROB_1/J1"].len().min(back.data["9888/ROB_1/J1"].len());
     assert!(*ints > 30);
-    assert!(back.data["9888/ROB_1/1"].iter().all(|&(_, v)| v == -1.0));
+    assert!(back.data["9888/ROB_1/J1"].iter().all(|&(_, v)| v == -1.0));
     let total: usize = back.data.values().map(|v| v.len()).sum();
     assert_eq!(total as u64, back.meta.rows_written);
 
     // The description of every channel, including what the controller said.
-    let ch = back.meta.channels.iter().find(|c| c.id == "4002/ROB_1/1").unwrap();
+    let ch = back.meta.channels.iter().find(|c| c.id == "4002/ROB_1/J1").unwrap();
     assert_eq!(ch.stream_id, Some(215));
     assert_eq!(ch.sample_ms, Some(4.032));
     assert_eq!(ch.value_type, Some(ValueKind::Float));
     assert_eq!(ch.name, "signal 4002");
-    assert_eq!(back.meta.channels.iter().find(|c| c.id == "9888/ROB_1/1").unwrap().value_type, Some(ValueKind::Int));
+    assert_eq!(back.meta.channels.iter().find(|c| c.id == "9888/ROB_1/J1").unwrap().value_type, Some(ValueKind::Int));
     // The string event is written as quoted text.
     let csv = std::fs::read_to_string(st.dir.join("data.csv")).unwrap();
     assert!(csv.starts_with("controller_ms,channel,value\n"));
@@ -114,16 +114,16 @@ fn the_slow_log_aggregates_per_interval() {
     let back = recording::read(&st.dir).unwrap();
     assert_eq!(back.meta.kind, Kind::Slow);
     assert_eq!(back.meta.interval_ms, Some(100));
-    let rows = &back.data["4002/ROB_1/2"];
+    let rows = &back.data["4002/ROB_1/J2"];
     assert!((10..=15).contains(&rows.len()), "{} intervals in 1.3 s", rows.len());
     assert!(rows.iter().all(|&(_, mean)| mean == 102.0));
     assert!(rows.iter().all(|&(t, _)| t % 100 == 0), "intervals are aligned to the controller clock");
     // count column: 25 samples per full 100 ms interval at a 4 ms tick.
     let text = std::fs::read_to_string(st.dir.join("slow.csv")).unwrap();
-    let counts: Vec<u64> = text.lines().skip(1).filter(|l| l.contains("4002/ROB_1/2")).map(|l| l.split(',').nth(2).unwrap().parse().unwrap()).collect();
+    let counts: Vec<u64> = text.lines().skip(1).filter(|l| l.contains("4002/ROB_1/J2")).map(|l| l.split(',').nth(2).unwrap().parse().unwrap()).collect();
     assert!(counts[1..counts.len() - 1].iter().all(|&c| c == 25), "{counts:?}");
     // 4000 ramps (t % 1000 * 0.001 + 10): its min and max differ within an interval.
-    let ramp: Vec<Vec<f64>> = text.lines().skip(1).filter(|l| l.contains("4000/ROB_1/1")).map(|l| l.split(',').skip(3).map(|x| x.parse().unwrap()).collect()).collect();
+    let ramp: Vec<Vec<f64>> = text.lines().skip(1).filter(|l| l.contains("4000/ROB_1/J1")).map(|l| l.split(',').skip(3).map(|x| x.parse().unwrap()).collect()).collect();
     assert!(ramp.iter().any(|r| r[2] > r[1]), "min/max must span the interval");
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -145,7 +145,7 @@ fn save_the_last_seconds_from_history() {
         assert!((120..=130).contains(&d.len()), "{} rows for 0.5 s of {}", d.len(), k);
     }
     // controller_ms is the controller's clock, not the chart's timeline.
-    let last = back.data["4002/ROB_1/1"].last().unwrap().0;
+    let last = back.data["4002/ROB_1/J1"].last().unwrap().0;
     let now = fake.clock_ms() as i64;
     assert!((now - last).abs() < 1000, "snapshot time {last} vs controller {now}");
     // Time order across channels.
@@ -175,7 +175,7 @@ fn a_recording_carries_on_across_a_reconnect() {
     assert_eq!(back.meta.events.last().map(|e| e.kind.as_str()), Some("disconnected"), "{:?}", back.meta.events);
     assert!(back.meta.events.iter().filter(|e| e.kind == "connected").count() >= 1);
     assert_eq!(back.meta.anchors.len(), 2, "one wall-clock anchor per connection");
-    let d = &back.data["4002/ROB_1/1"];
+    let d = &back.data["4002/ROB_1/J1"];
     // The outage is a hole in controller time, not filled in.
     assert!(d.windows(2).any(|w| w[1].0 - w[0].0 > 20));
     let _ = std::fs::remove_dir_all(&base);
@@ -195,12 +195,12 @@ fn strings_with_commas_quotes_and_line_breaks_read_back_whole() {
     assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
     let back = recording::read(&st.dir).unwrap();
     assert!(back.bad_rows.is_empty(), "{:?}", back.bad_rows);
-    let texts = &back.text["9873/ROB_1/1"];
+    let texts = &back.text["9873/ROB_1/J1"];
     assert!(texts.len() >= 3, "{texts:?}");
     assert!(texts.iter().all(|(_, v)| v.starts_with("line one\r\nline \"two\", ")), "{texts:?}");
-    let torque = &back.data["4002/ROB_1/1"];
+    let torque = &back.data["4002/ROB_1/J1"];
     assert!(torque.len() > 200 && torque.iter().all(|&(_, v)| v == 101.0), "a string row bled into the numbers");
-    assert!(!back.data.contains_key("9873/ROB_1/1"));
+    assert!(!back.data.contains_key("9873/ROB_1/J1"));
     assert_eq!((texts.len() + torque.len()) as u64, back.meta.rows_written);
     let _ = std::fs::remove_dir_all(&base);
 }

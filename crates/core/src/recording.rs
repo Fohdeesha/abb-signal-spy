@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -49,7 +49,9 @@ use crate::timeline::Timeline;
 use crate::util::{local_stamp, wall_iso};
 
 pub const FORMAT: &str = "abb-signal-spy-recording";
-pub const VERSION: u32 = 1;
+/// 2 (2026-09-27): channel ids name the joint (`4002/ROB_1/J2`, was `4002/ROB_1/2`),
+/// and every anchor says the first row it maps.
+pub const VERSION: u32 = 2;
 /// Events the recorder may fall behind by before samples are lost.
 pub const QUEUE: usize = 65_536;
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
@@ -111,6 +113,10 @@ pub struct EventEntry {
 pub struct Anchor {
     pub controller_ms: i64,
     pub utc: String,
+    /// The first data row (counted from 0, header not counted) this anchor maps; it
+    /// applies until the next anchor's row. Absent in format 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -227,7 +233,14 @@ fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
     let body = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())? + "\n";
     let tmp = dir.join("recording.json.tmp");
     let fin = dir.join("recording.json");
-    std::fs::write(&tmp, body).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    // On disk before the rename: after a power cut the renamed file could otherwise
+    // be empty, and the whole recording then unreadable.
+    let write = || -> std::io::Result<()> {
+        let mut f = File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()
+    };
+    write().map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &fin).map_err(|e| format!("cannot replace {}: {e}", fin.display()))
 }
 
@@ -272,6 +285,9 @@ fn csv_number(v: f64, kind: ValueKind) -> String {
 pub enum RecState {
     Recording,
     Finished,
+    /// Closed properly by the recorder itself, for the reason given (the controller
+    /// behind the address changed).
+    Ended(String),
     Failed(String),
 }
 
@@ -363,7 +379,7 @@ impl Recorder {
         let thread = std::thread::Builder::new()
             .name("recorder".into())
             .spawn(move || {
-                let mut w = Writer { dir, out, meta, infos, tap, rx, status: st2, slow: HashMap::new(), interval: interval_ms.map(i64::from), bytes: header.len() as u64, need_anchor: true, seen_lost: (0, 0) };
+                let mut w = Writer { dir, out, meta, infos, tap, rx, status: st2, slow: HashMap::new(), interval: interval_ms.map(i64::from), bytes: header.len() as u64, need_anchor: true, segment_break: false, ended: None, seen_lost: (0, 0) };
                 w.run();
             })
             .map_err(|e| format!("cannot start the recorder thread: {e}"))?;
@@ -449,6 +465,13 @@ struct Writer {
     /// the first after every reconnect (a restarted controller's clock is new), and
     /// the first after any loss (the lost events may have included a reconnect).
     need_anchor: bool,
+    /// The clock the open slow-log intervals were counted on has ended (a reconnect
+    /// or a reset): they are written before the next anchor, so its row does not
+    /// claim them.
+    segment_break: bool,
+    /// Why the recorder closed itself: the controller behind the address changed, and
+    /// nothing more may be filed as this recording's.
+    ended: Option<String>,
     /// The tap's loss counters (samples, events) last looked at.
     seen_lost: (u64, u64),
 }
@@ -490,6 +513,9 @@ impl Writer {
                     // The session is gone; nothing more will come.
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
+                if self.ended.is_some() {
+                    break;
+                }
                 if last_flush.elapsed() >= FLUSH_EVERY {
                     last_flush = Instant::now();
                     self.note_losses();
@@ -506,8 +532,12 @@ impl Writer {
             }
             // Write what was already queued when the stop came, and no more: the
             // session keeps feeding the tap until this thread lets go of it, so
-            // "until empty" could chase a live feed for as long as it runs.
+            // "until empty" could chase a live feed for as long as it runs. After
+            // the controller changed, what is queued is the other one's.
             for _ in 0..QUEUE {
+                if self.ended.is_some() {
+                    break;
+                }
                 let Ok(ev) = self.tap.rx.try_recv() else { break };
                 match ev {
                     TapEvent::Samples(b) => {
@@ -531,7 +561,10 @@ impl Writer {
         s.lost = self.meta.samples_lost;
         s.bytes = self.bytes;
         s.state = match (result, meta_result) {
-            (Ok(()), Ok(())) => RecState::Finished,
+            (Ok(()), Ok(())) => match self.ended.take() {
+                Some(why) => RecState::Ended(why),
+                None => RecState::Finished,
+            },
             (Err(e), _) | (_, Err(e)) => RecState::Failed(e),
         };
     }
@@ -572,8 +605,25 @@ impl Writer {
         let (kind, text) = match mark {
             Mark::Connected { target, system_id } => {
                 self.need_anchor = true;
+                self.segment_break = true;
+                let target = target.to_string();
+                // Another controller: a cable moved to the next robot at the same
+                // service address, or a reconnect that reached a different one. Its
+                // samples must not continue this recording under the same channel ids.
+                let other = match (&self.meta.system_id, &system_id) {
+                    (Some(was), Some(now)) if was != now => Some(format!("the controller at {target} is a different one (system {now}; this recording is of system {was})")),
+                    _ if !self.meta.controller.is_empty() && self.meta.controller != target => Some(format!("the program connected to {target}; this recording is of {}", self.meta.controller)),
+                    _ => None,
+                };
+                if let Some(why) = other {
+                    self.meta.notes = format!("{}Closed when {why}.", if self.meta.notes.is_empty() { String::new() } else { format!("{} ", self.meta.notes) });
+                    self.ended = Some(format!("{why}. The recording was closed there"));
+                }
                 if self.meta.system_id.is_none() {
                     self.meta.system_id = system_id.clone();
+                }
+                if self.meta.controller.is_empty() {
+                    self.meta.controller = target.clone();
                 }
                 ("connected", format!("connected to {target}{}", system_id.map(|s| format!(" (system {s})")).unwrap_or_default()))
             }
@@ -588,6 +638,7 @@ impl Writer {
             Mark::ClockReset { from_raw, to_raw } => {
                 // A clock that restarted or jumped: the old anchor no longer maps it.
                 self.need_anchor = true;
+                self.segment_break = true;
                 if to_raw < from_raw {
                     ("clock_reset", format!("controller clock went back from {from_raw} to {to_raw} ms (a restart)"))
                 } else {
@@ -604,6 +655,9 @@ impl Writer {
             return Ok(());
         }
         let id = b.key.id();
+        if self.need_anchor && std::mem::take(&mut self.segment_break) {
+            self.flush_slow()?;
+        }
         {
             let first = b.raw_ms[0] as i64;
             let last = b.raw_ms[n - 1] as i64;
@@ -616,7 +670,7 @@ impl Writer {
                 self.need_anchor = false;
                 // When the frame arrived, not when this thread got to it: with a
                 // backlog those differ by the backlog.
-                self.meta.anchors.push(Anchor { controller_ms: first, utc: wall_iso(b.arrived) });
+                self.meta.anchors.push(Anchor { controller_ms: first, utc: wall_iso(b.arrived), row: Some(self.meta.rows_written) });
             }
         }
         if let Some(interval) = self.interval {
@@ -732,18 +786,26 @@ pub fn write_snapshot(
     let io = |e: std::io::Error| format!("writing {} failed: {e}", path.display());
     out.write_all(b"controller_ms,channel,value\n").map_err(io)?;
     let ids: Vec<String> = keys.iter().map(|k| k.id()).collect();
-    for &(t, idx, v) in &rows {
+    let mut segment: Option<i64> = None;
+    for (row, &(t, idx, v)) in rows.iter().enumerate() {
         let kind = meta.channels[idx].value_type.unwrap_or(ValueKind::Float);
         let c = timeline.controller_ms(t);
+        // One anchor per clock segment, at its first row: across a restart the
+        // controller's clock starts again, and each side needs its own mapping. The
+        // chart timeline runs on with the wall clock across the gap, so it gives both.
+        let seg = timeline.segment_start(t);
+        if segment != Some(seg) {
+            segment = Some(seg);
+            if let Some(wall) = timeline.wall(t) {
+                meta.anchors.push(Anchor { controller_ms: c, utc: wall_iso(wall), row: Some(row as u64) });
+            }
+        }
         writeln!(out, "{c},{},{}", ids[idx], csv_number(v, kind)).map_err(io)?;
         let ch = &mut meta.channels[idx];
         ch.first_controller_ms.get_or_insert(c);
         ch.last_controller_ms = Some(c);
     }
     out.flush().map_err(io)?;
-    if let Some(wall) = timeline.wall(newest) {
-        meta.anchors.push(Anchor { controller_ms: timeline.controller_ms(newest), utc: wall_iso(wall) });
-    }
     meta.rows_written = rows.len() as u64;
     meta.complete = true;
     meta.ended_utc = Some(wall_iso(SystemTime::now()));
@@ -769,12 +831,21 @@ pub struct Loaded {
 /// time.
 pub fn read(dir: &Path) -> Result<Loaded, String> {
     let meta_text = std::fs::read_to_string(dir.join("recording.json")).map_err(|e| format!("cannot read recording.json: {e}"))?;
-    let meta: Meta = serde_json::from_str(crate::util::strip_bom(&meta_text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
+    let mut meta: Meta = serde_json::from_str(crate::util::strip_bom(&meta_text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
     if meta.format != FORMAT {
         return Err("recording.json is not an ABB Signal Spy recording".into());
     }
     if meta.version > VERSION {
         return Err(format!("recording format {} is newer than this program ({VERSION})", meta.version));
+    }
+    // Every channel under the id this program writes now, whichever form the file has
+    // (format 1 wrote the bare axis number); an id that does not parse stays as is.
+    let mut ids: HashMap<String, String> = HashMap::new();
+    let mut canonical = |id: &str| -> String {
+        ids.entry(id.to_string()).or_insert_with(|| ChannelKey::parse_id(id).map(|k| k.id()).unwrap_or_else(|| id.to_string())).clone()
+    };
+    for c in &mut meta.channels {
+        c.id = canonical(&c.id);
     }
     let file = if meta.kind == Kind::Slow { "slow.csv" } else { "data.csv" };
     let f = File::open(dir.join(file)).map_err(|e| format!("cannot read {file}: {e}"))?;
@@ -805,10 +876,11 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
             continue;
         };
         let (v, quoted) = if meta.kind == Kind::Slow { (&fields[3].0, false) } else { (&fields[2].0, fields[2].1) };
+        let ch = canonical(ch);
         if quoted {
-            text.entry(ch.clone()).or_default().push((t, v.clone()));
+            text.entry(ch).or_default().push((t, v.clone()));
         } else {
-            data.entry(ch.clone()).or_default().push((t, v.parse::<f64>().unwrap_or(f64::NAN)));
+            data.entry(ch).or_default().push((t, v.parse::<f64>().unwrap_or(f64::NAN)));
         }
     }
     if let Some(e) = rows.error {
@@ -846,9 +918,13 @@ impl<R: std::io::BufRead> CsvRows<R> {
         let mut quoted = false;
         let mut in_quotes = false;
         let mut bytes = Vec::new();
+        let mut row_bytes = 0usize;
         loop {
             bytes.clear();
-            match self.r.read_until(b'\n', &mut bytes) {
+            // Bounded: a line with no end (a damaged or foreign file) is read no
+            // further than MAX_ROW, then skipped to its end.
+            let room = (MAX_ROW + 1).saturating_sub(row_bytes);
+            match (&mut self.r).take(room as u64).read_until(b'\n', &mut bytes) {
                 Ok(0) if self.line + 1 == start => return None,
                 // The file ends inside a row: cut short.
                 Ok(0) => return Some(Err(start)),
@@ -857,6 +933,13 @@ impl<R: std::io::BufRead> CsvRows<R> {
                     self.error = Some(format!("reading line {start} failed: {e}"));
                     return None;
                 }
+            }
+            row_bytes += bytes.len();
+            if row_bytes > MAX_ROW {
+                if bytes.last() != Some(&b'\n') {
+                    self.skip_line();
+                }
+                return Some(Err(start));
             }
             let text = String::from_utf8_lossy(&bytes);
             let mut chars = text.chars().peekable();
@@ -889,8 +972,26 @@ impl<R: std::io::BufRead> CsvRows<R> {
                 fields.push((field, quoted));
                 return Some(Ok((start, fields)));
             }
-            if field.len() > MAX_ROW {
-                return Some(Err(start));
+        }
+    }
+
+    /// Discard the rest of an over-long line, a buffer at a time.
+    fn skip_line(&mut self) {
+        loop {
+            let (n, done) = match self.r.fill_buf() {
+                Ok([]) => return,
+                Ok(buf) => match buf.iter().position(|&b| b == b'\n') {
+                    Some(i) => (i + 1, true),
+                    None => (buf.len(), false),
+                },
+                Err(e) => {
+                    self.error = Some(format!("reading line {} failed: {e}", self.line + 1));
+                    return;
+                }
+            };
+            self.r.consume(n);
+            if done {
+                return;
             }
         }
     }
@@ -948,7 +1049,7 @@ mod tests {
     }
 
     fn batch(t: u64, n: usize) -> TapEvent {
-        let key = ChannelKey::parse_id("4002/ROB_1/1").unwrap();
+        let key = ChannelKey::parse_id("4002/ROB_1/J1").unwrap();
         TapEvent::Samples(crate::session::SampleBatch {
             key,
             kind: ValueKind::Float,
@@ -1051,7 +1152,7 @@ mod tests {
         assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
         let back = read(&dir).unwrap();
         assert_eq!(back.meta.markers.len(), 2);
-        assert_eq!(back.data["4002/ROB_1/1"].len(), 6);
+        assert_eq!(back.data["4002/ROB_1/J1"].len(), 6);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1083,6 +1184,172 @@ mod tests {
         let at: Vec<i64> = back.meta.anchors.iter().map(|a| a.controller_ms).collect();
         assert_eq!(at, vec![1000, 900_000]);
         assert!(back.meta.events.iter().any(|e| e.kind == "clock_reset" && e.text.contains("forward")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn connected(system: &str) -> TapEvent {
+        TapEvent::Mark { wall: SystemTime::now(), mark: Mark::Connected { target: crate::session::Target { host: "192.168.125.1".into(), port: 5515 }, system_id: Some(system.into()) } }
+    }
+
+    #[test]
+    fn a_different_controller_behind_the_address_ends_the_recording() {
+        // Every IRC5's service port is 192.168.125.1: a cable moved from one robot to
+        // the next reconnects to a different controller at the same address.
+        let base = temp("other");
+        let (tx, tap) = manual_tap(64);
+        let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "192.168.125.1:5515", Some("{A}".into()), Vec::new()).unwrap();
+        tx.send(batch(1000, 3)).unwrap();
+        tx.send(connected("{A}")).unwrap();
+        tx.send(batch(2000, 3)).unwrap();
+        tx.send(connected("{B}")).unwrap();
+        tx.send(batch(3000, 3)).unwrap();
+        assert!((0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            matches!(rec.status().state, RecState::Ended(_))
+        }), "{:?}", rec.status().state);
+        let st = rec.stop();
+        let RecState::Ended(why) = &st.state else { panic!("{:?}", st.state) };
+        assert!(why.contains("{A}") && why.contains("{B}"), "{why}");
+        let back = read(&st.dir).unwrap();
+        assert!(back.meta.complete, "closed properly, not cut short");
+        assert_eq!(back.meta.system_id.as_deref(), Some("{A}"));
+        assert_eq!(back.data["4002/ROB_1/J1"].iter().map(|r| r.0).collect::<Vec<_>>(), vec![1000, 1004, 1008, 2000, 2004, 2008], "nothing of the second controller's");
+        assert!(back.meta.notes.contains("{B}"), "{}", back.meta.notes);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_recording_begun_without_a_system_id_takes_the_first_one_it_sees() {
+        let base = temp("noid");
+        let (tx, tap) = manual_tap(64);
+        let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "192.168.125.1:5515", None, Vec::new()).unwrap();
+        tx.send(connected("{A}")).unwrap();
+        tx.send(batch(1000, 3)).unwrap();
+        tx.send(connected("{A}")).unwrap();
+        tx.send(batch(2000, 3)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let st = rec.stop();
+        assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
+        assert_eq!(read(&st.dir).unwrap().meta.system_id.as_deref(), Some("{A}"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn anchors_say_which_rows_they_map() {
+        // After a restart the controller's clock starts again, so the same
+        // controller_ms can occur on both sides: the anchor that applies to a row is
+        // the last one at or before it in the file, not the nearest in value.
+        let base = temp("rows");
+        let (tx, tap) = manual_tap(64);
+        let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "t", None, Vec::new()).unwrap();
+        tx.send(batch(900_000, 3)).unwrap();
+        tx.send(TapEvent::Mark { wall: SystemTime::now(), mark: Mark::ClockReset { from_raw: 900_008, to_raw: 5000 } }).unwrap();
+        tx.send(batch(5000, 2)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let back = read(&rec.stop().dir).unwrap();
+        let rows: Vec<(i64, Option<u64>)> = back.meta.anchors.iter().map(|a| (a.controller_ms, a.row)).collect();
+        assert_eq!(rows, vec![(900_000, Some(0)), (5000, Some(3))]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_slow_log_closes_its_open_intervals_at_a_restart() {
+        // The interval open when the clock restarted belongs to the old clock: it is
+        // written before the new anchor, so the anchor's row does not claim it.
+        let base = temp("slowreset");
+        let (tx, tap) = manual_tap(64);
+        let rec = Recorder::start_with(tap, &base, "", Some(100), &HashMap::new(), "t", None, Vec::new()).unwrap();
+        tx.send(batch(900_000, 3)).unwrap();
+        tx.send(TapEvent::Mark { wall: SystemTime::now(), mark: Mark::ClockReset { from_raw: 900_008, to_raw: 5000 } }).unwrap();
+        tx.send(batch(5000, 3)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let st = rec.stop();
+        let text = std::fs::read_to_string(st.dir.join("slow.csv")).unwrap();
+        let starts: Vec<&str> = text.lines().skip(1).map(|l| l.split(',').next().unwrap()).collect();
+        assert_eq!(starts, vec!["900000", "5000"], "{text}");
+        let back = read(&st.dir).unwrap();
+        let rows: Vec<(i64, Option<u64>)> = back.meta.anchors.iter().map(|a| (a.controller_ms, a.row)).collect();
+        assert_eq!(rows, vec![(900_000, Some(0)), (5000, Some(1))]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_recording_from_before_the_joint_ids_reads_back_under_them() {
+        // The cell's recordings of 2026-09-26 wrote 4002/ROB_1/2; this program now
+        // writes 4002/ROB_1/J2. Both read back the same.
+        let dir = temp("v1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut meta = Meta::new(Kind::Full, "", "192.0.2.77:5515", None);
+        meta.version = 1;
+        let mut e = entry(&ChannelKey::parse_id("4002/ROB_1/2").unwrap(), None);
+        e.id = "4002/ROB_1/2".into();
+        meta.channels.push(e);
+        meta.anchors.push(Anchor { controller_ms: 10, utc: "2026-09-26T08:47:20.523Z".into(), row: None });
+        write_meta(&dir, &meta).unwrap();
+        std::fs::write(dir.join("data.csv"), "controller_ms,channel,value\n10,4002/ROB_1/2,1.5\n14,4002/ROB_1/2,2.5\n18,not/a/channel,3\n").unwrap();
+        let back = read(&dir).unwrap();
+        assert_eq!(back.data["4002/ROB_1/J2"], vec![(10, 1.5), (14, 2.5)]);
+        assert_eq!(back.meta.channels[0].id, "4002/ROB_1/J2");
+        assert_eq!(back.data["not/a/channel"], vec![(18, 3.0)], "an id it cannot parse is kept as written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_without_an_end_is_one_bad_row() {
+        // 50 MB with no newline (a crash can leave a run of zero bytes in a file):
+        // one bad row, read a bounded piece at a time and skipped to its end, and the
+        // rows after it read as usual.
+        struct Runaway {
+            left: usize,
+            tail: std::io::Cursor<&'static [u8]>,
+        }
+        impl std::io::Read for Runaway {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.left == 0 {
+                    return self.tail.read(buf);
+                }
+                let n = buf.len().min(self.left);
+                buf[..n].fill(0);
+                self.left -= n;
+                Ok(n)
+            }
+        }
+        let r = Runaway { left: 50 << 20, tail: std::io::Cursor::new(b"\n7,4002/ROB_1/J1,1.5\n") };
+        let mut rows = CsvRows { r: std::io::BufReader::new(r), line: 0, error: None };
+        assert!(matches!(rows.next_row(), Some(Err(1))), "a runaway line is a bad row");
+        let next = rows.next_row();
+        assert!(matches!(&next, Some(Ok((_, f))) if f.len() == 3 && f[0].0 == "7"), "{next:?}");
+        assert!(rows.next_row().is_none() && rows.error.is_none());
+    }
+
+    #[test]
+    fn a_snapshot_across_a_restart_anchors_each_clock() {
+        // "Save the last N seconds" right after a controller restart: the rows before
+        // it are on the old clock and those after on the new one, each with its own
+        // anchor at its first row.
+        let store = Store::new();
+        let key = ChannelKey::parse_id("4002/ROB_1/J1").unwrap();
+        let ch = store.channel(&key, 4.0);
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        for i in 0..5 {
+            let (_, t, _) = tl.map(500_000 + 4 * i, t0);
+            ch.lock().push(t, 1.0);
+        }
+        let later = t0 + Duration::from_secs(20);
+        for i in 0..3 {
+            let (_, t, _) = tl.map(10_000 + 4 * i, later);
+            ch.lock().push(t, 2.0);
+        }
+        let base = temp("snapreset");
+        let (dir, rows) = write_snapshot(&base, "", &store, &tl, std::slice::from_ref(&key), &HashMap::new(), 60.0, "t", None).unwrap();
+        assert_eq!(rows, 8);
+        let back = read(&dir).unwrap();
+        let a: Vec<(i64, Option<u64>)> = back.meta.anchors.iter().map(|a| (a.controller_ms, a.row)).collect();
+        assert_eq!(a, vec![(500_000, Some(0)), (10_000, Some(5))]);
+        let utc = |i: usize| crate::util::parse_iso(&back.meta.anchors[i].utc).unwrap();
+        let gap = utc(1).duration_since(utc(0)).unwrap().as_secs_f64();
+        assert!((19.9..20.1).contains(&gap), "the anchors are {gap} s apart; 20 s passed");
         let _ = std::fs::remove_dir_all(&base);
     }
 
