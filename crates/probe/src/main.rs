@@ -9,12 +9,13 @@ use std::net::ToSocketAddrs;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use spy_core::discovery;
 use spy_core::log::LogBook;
 use spy_core::request::{Axis, MechUnit};
-use spy_core::session::{AskPolicy, ChannelState, Options, Phase, Session, Target, ROBAPI_PORT};
+use spy_core::sample::ValueKind;
+use spy_core::session::{AskPolicy, ChannelState, Options, Phase, SampleBatch, Session, Tap, TapEvent, Target, ROBAPI_PORT};
 use spy_core::store::{ChannelKey, Store};
 
 const USAGE: &str = "\
@@ -275,22 +276,61 @@ fn last_text(s: &Session, k: &ChannelKey) -> Option<String> {
     r.last().map(|(_, v)| format!("{v}"))
 }
 
-fn steps_histogram(s: &Session, k: &ChannelKey) -> BTreeMap<i64, usize> {
-    let mut h = BTreeMap::new();
-    if let Some(c) = s.store().get(k) {
-        let r = c.lock();
-        let pts: Vec<i64> = r.range(i64::MIN, i64::MAX).map(|(t, _)| t).collect();
-        for w in pts.windows(2) {
-            *h.entry(w[1] - w[0]).or_insert(0) += 1;
+/// Stamp steps and arrival waits over a whole run, from a tap that sees every sample.
+/// (Read from the store, as it was, they covered only its last ten minutes of history:
+/// a 20-minute cell run reported half its steps as if they were all.)
+#[derive(Default)]
+struct RunStats {
+    /// Per channel: the previous timeline stamp, and step (ms) -> count.
+    steps: BTreeMap<ChannelKey, (Option<i64>, BTreeMap<i64, usize>)>,
+    last_arrival: Option<SystemTime>,
+    /// The longest wait between sample frames, and how many waits passed 100 ms: what
+    /// the session's liveness check (300 ms of silence) has to stay clear of.
+    max_wait: Duration,
+    waits_over_100ms: u64,
+}
+
+impl RunStats {
+    fn feed(&mut self, b: &SampleBatch) {
+        let e = self.steps.entry(b.key.clone()).or_default();
+        for &t in &b.timeline_ms {
+            if let Some(p) = e.0 {
+                *e.1.entry(t - p).or_insert(0) += 1;
+            }
+            e.0 = Some(t);
+        }
+        if let Some(prev) = self.last_arrival
+            && let Ok(w) = b.arrived.duration_since(prev)
+        {
+            self.max_wait = self.max_wait.max(w);
+            if w > Duration::from_millis(100) {
+                self.waits_over_100ms += 1;
+            }
+        }
+        self.last_arrival = Some(self.last_arrival.map_or(b.arrived, |p| p.max(b.arrived)));
+    }
+
+    fn drain(&mut self, tap: &Tap) {
+        while let Ok(ev) = tap.rx.try_recv() {
+            if let TapEvent::Samples(b) = ev {
+                self.feed(&b);
+            }
         }
     }
-    h
+
+    fn steps_of(&self, k: &ChannelKey) -> BTreeMap<i64, usize> {
+        self.steps.get(k).map(|(_, h)| h.clone()).unwrap_or_default()
+    }
 }
 
 fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
     let seconds = if a.seconds > 0.0 { a.seconds } else { 5.0 };
     let (s, log) = new_session(AskPolicy::Remote);
     let mut tail = LogTail { next: 0, tag: "log" };
+    // Every sample, for the summary's step and wait counts (a 12-channel run at 250/s
+    // drained every 20 ms needs about 60 places).
+    let tap = s.tap(1 << 16);
+    let mut run = RunStats::default();
     s.set_channels(keys.clone());
     println!("connecting to {t} ...");
     s.connect(t);
@@ -302,6 +342,7 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
     let mut next_line = Instant::now() + Duration::from_secs(1);
     while start.elapsed().as_secs_f64() < seconds && !interrupted() {
         tail.pump(&log);
+        run.drain(&tap);
         if matches!(s.status().phase, Phase::Stopped { .. }) {
             break;
         }
@@ -334,10 +375,10 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
         }
     }
     let st = s.status().clone();
+    run.drain(&tap);
     println!();
     println!("summary ({:.1} s):", start.elapsed().as_secs_f64());
     for c in &st.channels {
-        let steps = steps_histogram(&s, &c.key);
         // The state as it was while streaming (after the teardown every channel waits).
         let was = live.channels.iter().find(|l| l.key == c.key).map(|l| &l.state).unwrap_or(&c.state);
         let state = match was {
@@ -345,21 +386,31 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
             ChannelState::Refused { text, .. } => format!("REFUSED: {text}"),
             other => format!("{other:?}"),
         };
+        // A string signal is an event, sent now and then: its spacing says nothing.
+        let spacing = if c.kind == Some(ValueKind::String) {
+            format!("events {}", c.samples)
+        } else {
+            format!("samples {}  gaps {}  stamp steps (ms: count) {:?}", c.samples, c.gaps, run.steps_of(&c.key))
+        };
         println!(
-            "  {}  {}  type {}  reported {} ms  samples {}  gaps {}  stamp steps (ms: count) {:?}",
+            "  {}  {}  type {}  reported {} ms  {}",
             c.key,
             state,
             c.kind.map(|k| k.label()).unwrap_or("-"),
             c.sample_ms.map(|v| v.to_string()).unwrap_or("-".into()),
-            c.samples,
-            c.gaps,
-            steps
+            spacing
         );
     }
+    println!(
+        "  longest wait between sample frames {:.0} ms  waits over 100 ms {}  samples the summary missed {}",
+        run.max_wait.as_secs_f64() * 1000.0,
+        run.waits_over_100ms,
+        tap.dropped.load(Ordering::Relaxed)
+    );
     let k = &st.counters;
     println!(
-        "  frames {}  sample frames {}  samples {}  AYA answered {}  foreign records {}  foreign subscription {}  defects {:?}  no-trailer {}",
-        k.frames, k.sample_frames, k.samples, k.ayas, k.foreign_records, k.foreign_subscription, k.defects, k.no_trailer
+        "  frames {}  sample frames {}  samples {}  AYA answered {}  foreign records {}  foreign subscription {}  liveness checks {}  defects {:?}  no-trailer {}",
+        k.frames, k.sample_frames, k.samples, k.ayas, k.foreign_records, k.foreign_subscription, k.liveness_checks, k.defects, k.no_trailer
     );
     // Phase 0 check 1: where the samples came (service 8 at offset 16 on the RW6 VC).
     println!("  sample frames by service {:?}  protobuf marker at offset {:?}  unexpected frames {}", k.sample_services, k.marker_offsets, k.unexpected_frames);
@@ -571,5 +622,36 @@ fn main() -> ExitCode {
             eprintln!("{e}\n\n{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spy_core::session::BatchValues;
+
+    fn batch(key: &ChannelKey, stamps: &[i64], arrived_ms: u64) -> SampleBatch {
+        SampleBatch {
+            key: key.clone(),
+            kind: ValueKind::Float,
+            raw_ms: stamps.iter().map(|&t| t as u64).collect(),
+            timeline_ms: stamps.to_vec(),
+            values: BatchValues::Number(vec![0.0; stamps.len()]),
+            arrived: SystemTime::UNIX_EPOCH + Duration::from_millis(arrived_ms),
+        }
+    }
+
+    #[test]
+    fn every_step_of_a_run_is_counted_across_batches() {
+        let k = ChannelKey { signal: 6000, unit: MechUnit::new("ROB_1").unwrap(), axis: Axis::new(1).unwrap() };
+        let mut r = RunStats::default();
+        r.feed(&batch(&k, &[0, 4], 1000));
+        // A 5 ms step across a batch boundary (the IRC5's 4.032 ms tick), then a frame
+        // that waited 246 ms.
+        r.feed(&batch(&k, &[8, 13], 1004));
+        r.feed(&batch(&k, &[17], 1250));
+        assert_eq!(r.steps_of(&k), BTreeMap::from([(4, 3), (5, 1)]));
+        assert_eq!(r.max_wait, Duration::from_millis(246));
+        assert_eq!(r.waits_over_100ms, 1);
     }
 }

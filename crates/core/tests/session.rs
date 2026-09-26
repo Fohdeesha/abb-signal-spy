@@ -10,7 +10,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use spy_core::fake::{Behaviour, FakeController, SignalDef, SignalSource};
+use spy_core::fake::{Behaviour, FakeController, IdPools, SignalDef, SignalSource};
 use spy_core::log::LogBook;
 use spy_core::request::{Axis, Command, Define, MechUnit};
 use spy_core::sample::{self, Record, RecordValues, ValueKind};
@@ -830,6 +830,37 @@ fn the_pendant_reconnecting_is_not_blamed_for_a_takeover() {
     let reason = stopped_reason(&a);
     assert!(!reason.contains("192.168.126.10"), "the pendant was blamed: {reason}");
     assert!(reason.contains("taken InfoStream"), "{reason}");
+}
+
+#[test]
+fn the_irc5s_stream_id_pools_change_nothing() {
+    // The real IRC5 numbers streams from three pools (s24 item 4): 259 down, its
+    // drive-side signals from 17 down, text from 260 up. Nothing may lean on the VC's
+    // 215 and 233.
+    let mut beh = Behaviour::default();
+    beh.id_pools = IdPools::Irc5;
+    let fake = FakeController::start(beh).unwrap();
+    let a = spawn(opts());
+    let dc = key(5027, "ROB_1", 1);
+    let tq = key(4002, "ROB_1", 1);
+    let wo = key(9872, "ROB_1", 1);
+    a.set_channels(vec![dc.clone(), tq.clone(), wo.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, &[dc.clone(), tq.clone()])), "{:?}\n{}", phase(&a), log_text(&a));
+    assert_eq!(state(&a, &dc), Some(ChannelState::Defined { stream: 17 }));
+    assert_eq!(state(&a, &tq), Some(ChannelState::Defined { stream: 259 }));
+    assert_eq!(state(&a, &wo), Some(ChannelState::Defined { stream: 260 }));
+    assert!(last(&a, &dc).is_some_and(|v| (v - 356.7).abs() < 0.01), "{:?}", last(&a, &dc));
+    assert_eq!(last(&a, &tq), Some(101.0));
+    // A takeover on these ids is still caught: the newcomer's ROB_2 DC link is handed
+    // 17, this program's ROB_1 DC link's id.
+    let mut b = OtherTool::connect(&fake, Duration::from_millis(20));
+    b.send(Command::UndefineAll);
+    b.send(Command::Define(Define { channel: 0, signal: 5027, unit: MechUnit::new("ROB_2").unwrap(), axis: Axis::new(1).unwrap() }));
+    assert_eq!(fake.streams().first().map(|s| (s.0, s.2.clone())), Some((17, "ROB_2".to_string())));
+    b.send(Command::StartStream);
+    assert!(wait_for(3000, || matches!(phase(&a), Phase::Stopped { .. })), "{:?}\n{}", phase(&a), log_text(&a));
+    assert!(history(&a, &dc).iter().all(|v| (v - 356.7).abs() < 0.01), "ROB_2's DC link was shown as ROB_1's");
 }
 
 #[test]

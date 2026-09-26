@@ -11,7 +11,8 @@
 //! * stream ids assigned controller-wide: the highest free id from 215 down, so a
 //!   freed id is handed out again at once (measured 2026-09-25: an undefined 214 went
 //!   to the very next define, and after another client's StreamUndefineAll its
-//!   defines got 215 and 214, the ids the first client had been streaming on)
+//!   defines got 215 and 214, the ids the first client had been streaming on); or,
+//!   with [`IdPools::Irc5`], the real IRC5's three pools (s24 item 4)
 //! * sample frames on service 8, cause 1, txn 0, one sample per stream per frame,
 //!   24 ms signals every sixth tick, integer signals as `LogsrvIntMsg`
 //! * ONE subscription id for every client, and single tenancy: every sample frame
@@ -53,8 +54,27 @@ pub const SYSTEM_ID: &str = "{00000000-FA4E-4000-8000-000000000001}";
 pub const SUBSCRIPTION_ID: u32 = 155_974_524;
 pub const FIRST_STREAM_ID: u32 = 215;
 pub const FIRST_TEXT_STREAM_ID: u32 = 233;
-/// Text streams the VC gave before answering -50348 "no channel available".
+/// Text streams the VC gave before answering -50348 "no channel available". (The
+/// IRC5's text pool size is unmeasured; the fake uses the same bound.)
 pub const TEXT_POOL: usize = 4;
+
+/// How a controller numbers its streams (tunemaster-testsignals.md s23 item 11, s24
+/// item 4). Freed ids are handed out again at once in every pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IdPools {
+    /// The RW6 VC: 215 down; text from 233 up.
+    #[default]
+    Vc,
+    /// The real IRC5: 259 down; the drive-side signals the VC does not have from 17
+    /// down; text from 260 up.
+    Irc5,
+}
+
+/// Signals the IRC5 numbered from its second pool, from 17 down (s24 item 4).
+pub const IRC5_DRIVE_POOL_SIGNALS: [u32; 34] = [
+    1188, 1531, 1887, 2332, 2772, 3680, 3896, 5027, 5722, 6093, 6740, 7000, 7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008,
+    7009, 7010, 7011, 7012, 7013, 7014, 7015, 7040, 7041, 7042, 7043, 7044, 7045, 9834,
+];
 const OK: u32 = 0x0004_8000;
 const FAIL: u32 = 0xC004_FFFE;
 
@@ -133,6 +153,8 @@ struct Stream {
     unit: String,
     axis0: u32,
     sample_ms: f64,
+    /// From the text pool.
+    text: bool,
 }
 
 struct Conn {
@@ -185,6 +207,8 @@ pub struct Behaviour {
     /// keepalives) is kept back, then delivered in order when this is cleared, as TCP
     /// delivers after a hiccup. The controller carries on meanwhile.
     pub hold_delivery: bool,
+    /// How stream ids are numbered: the VC's way or the IRC5's.
+    pub id_pools: IdPools,
 }
 
 impl Default for Behaviour {
@@ -228,6 +252,7 @@ impl Default for Behaviour {
             extra_clients: Vec::new(),
             refuse_next: HashMap::new(),
             hold_delivery: false,
+            id_pools: IdPools::Vc,
         }
     }
 }
@@ -730,25 +755,38 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
                 return r;
             }
             let is_text = matches!(def.source, SignalSource::Text(_));
+            let no_channel = |signal| {
+                let mut r = refuse(-50348);
+                r.2 = Some(signal);
+                r
+            };
+            let pools = st.behaviour.id_pools;
+            let first_text = if pools == IdPools::Irc5 { 260 } else { FIRST_TEXT_STREAM_ID };
+            // Each numeric pool: (its top, its bottom). The IRC5's main pool stops above
+            // its second one, which a dozen channels never come near.
+            let (top, bottom) = match pools {
+                IdPools::Vc => (FIRST_STREAM_ID, 1),
+                IdPools::Irc5 if IRC5_DRIVE_POOL_SIGNALS.contains(&signal) => (17, 1),
+                IdPools::Irc5 => (259, 18),
+            };
             let id = if is_text {
-                let in_use = st.streams.keys().filter(|&&id| id >= FIRST_TEXT_STREAM_ID).count();
-                if in_use >= TEXT_POOL {
-                    let mut r = refuse(-50348);
-                    r.2 = Some(signal);
-                    return r;
+                if st.streams.values().filter(|s| s.text).count() >= TEXT_POOL {
+                    return no_channel(signal);
                 }
                 // The lowest free: the VC gave 233 to 221, and later to 9872 and to
-                // 9875 once it was free again (typed-vc-rw6.txt).
-                (FIRST_TEXT_STREAM_ID..).find(|id| !st.streams.contains_key(id)).unwrap_or(FIRST_TEXT_STREAM_ID)
+                // 9875 once it was free again (typed-vc-rw6.txt); the IRC5 260 up.
+                match (first_text..).find(|id| !st.streams.contains_key(id)) {
+                    Some(id) => id,
+                    None => return no_channel(signal),
+                }
             } else {
-                let Some(id) = (1..=FIRST_STREAM_ID).rev().find(|id| !st.streams.contains_key(id)) else {
-                    let mut r = refuse(-50348);
-                    r.2 = Some(signal);
-                    return r;
-                };
-                id
+                // The highest free, from the pool's top down.
+                match (bottom..=top).rev().find(|id| !st.streams.contains_key(id)) {
+                    Some(id) => id,
+                    None => return no_channel(signal),
+                }
             };
-            st.streams.insert(id, Stream { id, owner: conn, signal, unit, axis0, sample_ms: def.sample_ms });
+            st.streams.insert(id, Stream { id, owner: conn, signal, unit, axis0, sample_ms: def.sample_ms, text: is_text });
             if let Some(c) = st.conns.get_mut(&conn) {
                 c.defined = true;
             }
