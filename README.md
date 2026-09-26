@@ -1,0 +1,84 @@
+# ABB Signal Spy
+
+A Windows app for reading, charting and recording the motion test signals an ABB IRC5 robot controller
+streams over its RobAPI InfoStream interface: motor currents and voltages, torques, the DC-link voltage,
+resolver angles, joint and motor positions and speeds, and several hundred more.
+
+It only reads. It never commands motion, never writes RAPID, configuration or I/O, and never takes
+mastership.
+
+Not affiliated with or endorsed by ABB. ABB and IRC5 are trademarks of ABB.
+
+**Status:** first usable version, in testing. Tested against RobotStudio's RobotWare 6 virtual
+controller and an in-process stand-in for the protocol. Not yet run against a real IRC5 (the earlier
+tools this work grew out of have been).
+
+## Using it
+
+1. **Connect.** A real IRC5 answers on port 5515: type its address and press Connect. A RobotStudio
+   virtual controller picks a new port every time it starts: open **List** and pick it there.
+2. **One program at a time.** A controller streams test signals to one program at a time. A second
+   program is not refused; the two break each other's streams, and the controller can even hand the
+   second program's signals to the first under the first one's channel numbers. Close TuneMaster's
+   signal logging and RobotStudio's signal tools first. When other programs are connected, ABB Signal
+   Spy names them and asks before taking over. If another program takes the stream while it runs, it
+   stops and says so, before showing anything that could be the other program's signals, and it does
+   not take the stream back. If the network drops, it reconnects by itself; a controller can keep
+   sending to the broken connection for a while, so it tries for about a minute before giving up.
+3. **Add channels.** Pick a signal in the catalogue and press Add. The dialog asks only what that signal
+   needs: the robot, the axis, or nothing. Up to 12 channels.
+4. **Read and chart.** Values show as a 150 ms mean; charts show every sample. Space pauses the charts
+   so you can scroll back through the last 10 minutes. A value that stops updating is dimmed and marked
+   STALE, never shown as live. Angles are in degrees; click the unit to switch to radians.
+5. **Record.** REC records every sample. *Save last* saves the last seconds from memory, for when
+   something has just happened and nothing was recording. *Slow log* records count, mean, min and max
+   per interval, for runs of hours. M drops a marker.
+6. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
+   on the same network.
+
+The built-in catalogue was measured on an IRB 2600 with RobotWare 6.16. Another robot or RobotWare
+version may use other numbers; the controller's refusal is shown per channel, and a catalogue file for
+another controller can be loaded (Catalogue menu).
+
+Settings live in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe` when a `settings.json` is
+already there. `--connect HOST[:PORT]` connects at startup.
+
+## Recordings
+
+Each recording is a folder under `Documents\TestSignals`:
+
+- `data.csv`: `controller_ms,channel,value`, one row per sample. `controller_ms` is the controller's own
+  clock; `channel` is `signal/unit/axis`, for example `4002/ROB_1/2`.
+- `slow.csv` (slow logs): `controller_ms,channel,count,mean,min,max`, one row per channel per interval.
+- `recording.json`: the controller, each channel's name, units and sample time, the wall-clock time at
+  each connection, reconnects and controller restarts, markers, and whether any samples were lost.
+
+String signals (the work object, the tool's name, a program position) are written quoted, and may
+contain commas, quotes and line breaks; any CSV reader, pandas included, reads them correctly.
+
+```python
+import json, pandas as pd
+meta = json.load(open("recording.json"))
+df = pd.read_csv("data.csv")
+wide = df.pivot_table(index="controller_ms", columns="channel", values="value")
+```
+
+## Console probe
+
+`signal-spy-probe` is the command-line side: `list` finds local virtual controllers, `hello` shows a
+controller's connected clients, `stream` records statistics for a set of signals, `typed` reports the
+record type of a list of numbers, `selftest` runs against a built-in stand-in. It tears its streams
+down on Ctrl+C.
+
+## Building
+
+Rust 1.95 or later, on Windows with the MSVC toolchain:
+
+```
+cargo build --release
+cargo test --workspace
+```
+
+The workspace has three crates: `crates/core` (the protocol, decoder, session, store, catalogue and
+recorder, with no user interface), `crates/app` (the window, egui) and `crates/probe` (the console
+tool). The catalogue in `catalogue/` is generated from the research data.

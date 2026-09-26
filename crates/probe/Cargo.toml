@@ -1,0 +1,19 @@
+[package]
+name = "signal-spy-probe"
+description = "Console probe for ABB Signal Spy: list local virtual controllers, handshake, stream, re-read signal types, check tenancy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "signal-spy-probe"
+path = "src/main.rs"
+
+[dependencies]
+# The fake controller is for the self-test only; it binds loopback, on a port the
+# OS picks, and never runs unless asked for.
+signal-spy-core = { path = "../core", features = ["fake"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

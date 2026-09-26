@@ -1,0 +1,30 @@
+[package]
+name = "signal-spy-core"
+description = "RobAPI InfoStream client, typed sample decoder, channel store and recorder for ABB Signal Spy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "spy_core"
+
+[features]
+# The in-process fake controller (tests, the probe's self-test, demos). It
+# listens on loopback only and is never built into the app unless asked for.
+fake = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+signal-spy-core = { path = ".", features = ["fake"] }
