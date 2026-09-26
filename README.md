@@ -10,8 +10,7 @@ mastership.
 Not affiliated with or endorsed by ABB. ABB and IRC5 are trademarks of ABB.
 
 **Status:** first usable version, in testing. Tested against RobotStudio's RobotWare 6 virtual
-controller and an in-process stand-in for the protocol. Not yet run against a real IRC5 (the earlier
-tools this work grew out of have been).
+controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, RobotWare 6.16).
 
 ## Using it
 
@@ -23,13 +22,17 @@ tools this work grew out of have been).
    signal logging and RobotStudio's signal tools first. When other programs are connected, ABB Signal
    Spy names them and asks before taking over. If another program takes the stream while it runs, it
    stops and says so, before showing anything that could be the other program's signals, and it does
-   not take the stream back. If the network drops, it reconnects by itself; a controller can keep
-   sending to the broken connection for a while, so it tries for about a minute before giving up.
+   not take the stream back. If the network drops, it reconnects by itself: it first waits for the
+   controller to let go of the broken connection (about 16 s), and it never takes the stream from a
+   program that connected meanwhile (it asks, or stops and says why). If the controller at the address
+   turns out to be a different one (a cable moved to the next robot), it stops rather than carry on.
 3. **Add channels.** Pick a signal in the catalogue and press Add. The dialog asks only what that signal
    needs: the robot, the axis, or nothing. Up to 12 channels.
-4. **Read and chart.** Values show as a 150 ms mean; charts show every sample. Space pauses the charts
-   so you can scroll back through the last 10 minutes. A value that stops updating is dimmed and marked
-   STALE, never shown as live. Angles are in degrees; click the unit to switch to radians.
+4. **Read and chart.** Values show as a 150 ms mean (for a joint speed that pads between its values
+   with zeros, the mean of the values it reports; for an angle within one turn, the mean on the circle);
+   charts show every sample. Space pauses the charts so you can scroll back through the last 10 minutes.
+   A value that stops updating is dimmed and marked STALE, never shown as live. Angles are in degrees;
+   click the unit to switch to radians.
 5. **Record.** REC records every sample. *Save last* saves the last seconds from memory, for when
    something has just happened and nothing was recording. *Slow log* records count, mean, min and max
    per interval, for runs of hours. M drops a marker.
@@ -49,10 +52,14 @@ Each recording is a folder under `Documents\TestSignals`, named for the local da
 started, for example `2026-09-26_04-47-20 dc dip`:
 
 - `data.csv`: `controller_ms,channel,value`, one row per sample. `controller_ms` is the controller's own
-  clock; `channel` is `signal/unit/axis`, for example `4002/ROB_1/2`.
+  clock; `channel` is `signal/unit/joint`, for example `4002/ROB_1/J2` (torque, ROB_1, joint 2).
+  Recordings made before 2026-09-27 wrote `4002/ROB_1/2`; this program reads both.
 - `slow.csv` (slow logs): `controller_ms,channel,count,mean,min,max`, one row per channel per interval.
-- `recording.json`: the controller, each channel's name, units and sample time, the wall-clock time (UTC)
-  at each connection, reconnects and controller restarts, markers, and whether any samples were lost.
+- `recording.json`: the controller and its system id, each channel's name, units and sample time,
+  reconnects and controller restarts, markers, and whether any samples were lost. `anchors` map the
+  controller's clock to UTC: each applies from its `row` (the first data row it maps, counted from 0)
+  until the next anchor's, so rows on both sides of a controller restart map correctly. If the
+  controller behind the address changes during a recording, the recording is closed there and says so.
 
 String signals (the work object, the tool's name, a program position) are written quoted, and may
 contain commas, quotes and line breaks; any CSV reader, pandas included, reads them correctly.

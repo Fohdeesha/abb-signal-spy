@@ -1,0 +1,9 @@
+# The C runtime linked into the exe: a single portable .exe (decision E5) must not
+# need the Visual C++ redistributable installed, which a clean field laptop often lacks.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# The Windows 7 build (tools/build_win7.ps1, nightly, tier-3 target).
+[target.x86_64-win7-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+

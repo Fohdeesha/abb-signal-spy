@@ -37,9 +37,16 @@ pub fn default_record_dir() -> PathBuf {
     documents().join("TestSignals")
 }
 
+// From ole32.dll, which has it on every Windows: windows-sys names combase.dll, which
+// Windows 7 does not have, and an exe importing it does not start there.
+#[cfg(windows)]
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoTaskMemFree(pv: *const std::ffi::c_void);
+}
+
 #[cfg(windows)]
 fn documents() -> PathBuf {
-    use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
     // The known-folder call follows a Documents folder redirected elsewhere (to
     // OneDrive, or a network share), which %USERPROFILE%\Documents does not.
@@ -52,12 +59,12 @@ fn documents() -> PathBuf {
                 len += 1;
             }
             let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
-            CoTaskMemFree(p.cast());
+            CoTaskMemFree(p.cast_const().cast());
             if !s.is_empty() {
                 return PathBuf::from(s);
             }
         } else if !p.is_null() {
-            CoTaskMemFree(p.cast());
+            CoTaskMemFree(p.cast_const().cast());
         }
     }
     fallback_documents()

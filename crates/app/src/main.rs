@@ -69,9 +69,14 @@ fn main() {
     let connect = connect_arg();
 
     // wgpu (DirectX 12) first; if it cannot start, OpenGL: a remote desktop session
-    // or a PC without a usable graphics driver should still get a window.
+    // or a PC without a usable graphics driver should still get a window. The
+    // Windows 7 build has OpenGL only.
     let mut errors = Vec::new();
-    for renderer in [eframe::Renderer::Wgpu, eframe::Renderer::Glow] {
+    #[cfg(feature = "dx12")]
+    let renderers = [eframe::Renderer::Wgpu, eframe::Renderer::Glow];
+    #[cfg(not(feature = "dx12"))]
+    let renderers = [eframe::Renderer::Glow];
+    for renderer in renderers {
         let dir = data_dir.clone();
         let connect = connect.clone();
         let result = eframe::run_native(
