@@ -58,14 +58,28 @@ impl SpyApp {
         !st.channels.iter().any(|s| s.key == c.key && matches!(s.state, spy_core::session::ChannelState::Refused { .. }))
     }
 
-    fn lanes(&self, st: &spy_core::session::Status) -> Vec<u32> {
-        let mut v: Vec<u32> = Vec::new();
+    /// The charts to draw: one per lane and display unit, in the channels' order. A
+    /// lane whose channels show different units (one switched to radians, or a hand-
+    /// edited settings file) becomes one chart per unit: a shared axis in two units
+    /// would mislead. `charted` is decided once per frame, since a channel's record
+    /// type can change under it (its first sample) between two looks.
+    pub(crate) fn lanes(&self, charted: &[bool]) -> Vec<(u32, String)> {
+        let mut v: Vec<(u32, String)> = Vec::new();
         for (i, c) in self.chans.iter().enumerate() {
-            if self.charted(i, st) && !v.contains(&c.lane) {
-                v.push(c.lane);
+            if !charted[i] {
+                continue;
+            }
+            let lane = (c.lane, self.units_of(i));
+            if !v.contains(&lane) {
+                v.push(lane);
             }
         }
         v
+    }
+
+    fn units_of(&self, i: usize) -> String {
+        let c = &self.chans[i];
+        view::display(self.catalogue.get(c.key.signal), c.radians).units
     }
 
     pub fn charts(&mut self, ui: &mut egui::Ui) {
@@ -89,24 +103,24 @@ impl SpyApp {
         let x_max = tl.seconds(end_ms);
         let x_min = x_max - self.window_s;
         let live = self.paused_at.is_none();
-        let lanes = self.lanes(&st);
+        let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, &st)).collect();
+        let lanes = self.lanes(&charted);
         if lanes.is_empty() {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Nothing to chart: the channels are text signals or were refused (see the table).").weak()));
             return;
         }
         let stats_h = if self.cursors_on { 26.0 * (self.chans.len() as f32 + 2.0) } else { 0.0 };
         let lane_h = ((ui.available_height() - stats_h) / lanes.len() as f32 - 22.0).max(80.0);
-        let connected = st.phase.is_connected();
+        let connected = view::session_live(&st.phase);
         let mut clicked_a: Option<f64> = None;
         let mut clicked_b: Option<f64> = None;
         let mut visible_x = (x_min, x_max);
 
         egui::ScrollArea::vertical().id_salt("lanes").auto_shrink([false, false]).max_height(ui.available_height() - stats_h).show(ui, |ui| {
             for lane in &lanes {
-                let members: Vec<usize> = (0..self.chans.len()).filter(|&i| self.chans[i].lane == *lane && self.charted(i, &st)).collect();
-                let first = &self.chans[members[0]];
-                let sig0 = self.catalogue.get(first.key.signal);
-                let disp = view::display(sig0, first.radians);
+                let members: Vec<usize> = (0..self.chans.len()).filter(|&i| charted[i] && self.chans[i].lane == lane.0 && self.units_of(i) == lane.1).collect();
+                let Some(&first_i) = members.first() else { continue };
+                let first = &self.chans[first_i];
                 let title = if members.len() == 1 {
                     view::label(&self.catalogue, &first.key)
                 } else {
@@ -115,14 +129,14 @@ impl SpyApp {
                 let locked = self.lane_lock.get(lane).copied();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&title).small().strong());
-                    ui.label(RichText::new(format!("[{}]", disp.units)).small().weak());
+                    ui.label(RichText::new(format!("[{}]", lane.1)).small().weak());
                     if members.iter().any(|&i| self.catalogue.get(self.chans[i].key.signal).is_some_and(|s| s.has(flag::FROZEN))) {
                         theme::badge(ui, "FROZEN", theme::WARN, "Holds the last RAPID path position; does not move while EGM drives the robot.");
                     }
                     let mut lock = locked.is_some();
                     if ui.toggle_value(&mut lock, "🔒").on_hover_text("Lock this chart's vertical scale").changed() {
                         if lock {
-                            self.lane_lock.insert(*lane, (f64::NAN, f64::NAN));
+                            self.lane_lock.insert(lane.clone(), (f64::NAN, f64::NAN));
                         } else {
                             self.lane_lock.remove(lane);
                         }
@@ -130,8 +144,9 @@ impl SpyApp {
                 });
 
                 let tl2 = tl.clone();
-                let units = disp.units.clone();
-                let mut plot = Plot::new(("lane", *lane))
+                let units = lane.1.clone();
+                let min_span = min_span(&units);
+                let mut plot = Plot::new(("lane", lane.0, &lane.1))
                     .height(lane_h)
                     .link_axis("x-link", [true, false])
                     .link_cursor("x-link", [true, false])
@@ -179,20 +194,16 @@ impl SpyApp {
                     for (key, color, factor, hold, _, name) in &chans {
                         let Some(ch) = store.get(key) else { continue };
                         let ring = ch.lock();
-                        let mut held = f64::NAN;
-                        let segs = ring.decimate(from, to, px, |v| {
-                            let v = if *hold {
-                                if v != 0.0 {
-                                    held = v;
-                                    v
-                                } else {
-                                    held
-                                }
-                            } else {
-                                v
-                            };
-                            v * factor
-                        });
+                        // A zero-filled signal's padding, undone for at most the hold
+                        // time: a longer run of zeros is a stop and is drawn as zero.
+                        // Primed from just before the window, so its left edge is right.
+                        let mut zh = view::ZeroHold::new(ring.sample_ms);
+                        if *hold {
+                            for (_, v) in ring.range(from - view::ZERO_HOLD_MS.ceil() as i64 - 1, from) {
+                                zh.apply(v);
+                            }
+                        }
+                        let segs = ring.decimate(from, to, px, |v| (if *hold { zh.apply(v) } else { v }) * factor);
                         drop(ring);
                         for (si, seg) in segs.iter().enumerate() {
                             let mut pts: Vec<[f64; 2]> = Vec::with_capacity(seg.len() * 2);
@@ -245,7 +256,7 @@ impl SpyApp {
                     }
                     let (y0, y1) = match locked {
                         Some((a, bb)) if a.is_finite() && bb.is_finite() => (a, bb),
-                        _ if ymin.is_finite() => autoscale(ymin, ymax),
+                        _ if ymin.is_finite() => autoscale(ymin, ymax, min_span),
                         _ => (-1.0, 1.0),
                     };
                     pu.set_plot_bounds_y(y0..=y1);
@@ -334,15 +345,10 @@ impl SpyApp {
                 _ => ui.label("Click a chart to place cursor A, right-click for B   (statistics of the visible window)"),
             };
         });
-        let at = |key: &ChannelKey, x: f64| -> Option<f64> {
+        let at = |key: &ChannelKey, reading: view::Reading, x: f64| -> Option<f64> {
             let ch = self.session.store().get(key)?;
             let r = ch.lock();
-            let t = origin + (x * 1000.0).round() as i64;
-            let i = r.lower_bound(t + 1);
-            if i == 0 {
-                return None;
-            }
-            r.range(i64::MIN, t + 1).last().map(|(_, v)| v)
+            view::value_at(&r, reading, origin + (x * 1000.0).round() as i64)
         };
         egui::Grid::new("cursor-stats").striped(true).num_columns(8).show(ui, |ui| {
             for h in ["channel", "at A", "at B", "B − A", "mean", "min", "max", "std dev"] {
@@ -350,15 +356,18 @@ impl SpyApp {
             }
             ui.end_row();
             for c in &self.chans {
-                let d = view::display(self.catalogue.get(c.key.signal), c.radians);
-                let va = a.and_then(|x| at(&c.key, x)).map(|v| v * d.factor);
-                let vb = b.and_then(|x| at(&c.key, x)).map(|v| v * d.factor);
+                let sig = self.catalogue.get(c.key.signal);
+                let d = view::display(sig, c.radians);
+                let reading = view::reading(sig);
+                let va = a.and_then(|x| at(&c.key, reading, x)).map(|v| v * d.factor);
+                let vb = b.and_then(|x| at(&c.key, reading, x)).map(|v| v * d.factor);
                 let s = match self.session.store().get(&c.key) {
                     Some(ch) => {
                         let r = ch.lock();
                         let from = origin + (range.0 * 1000.0).floor() as i64;
                         let to = origin + (range.1 * 1000.0).ceil() as i64 + 1;
-                        range_stats(r.range(from, to).map(|(_, v)| v * d.factor))
+                        let s = view::window_stats(&r, reading, from, to);
+                        RangeStats { n: s.n, mean: s.mean * d.factor, min: s.min * d.factor, max: s.max * d.factor, sd: s.sd * d.factor }
                     }
                     None => RangeStats::default(),
                 };
@@ -378,18 +387,46 @@ impl SpyApp {
     }
 }
 
-/// The vertical range for data spanning `lo..hi`: an 8% margin, and for a constant
-/// (or all but constant) signal a band around it wide enough to read, rather than
-/// a range of 1e-9 whose axis labels are all zeros.
-pub fn autoscale(lo: f64, hi: f64) -> (f64, f64) {
+/// The vertical range for data spanning `lo..hi`: an 8% margin; for a constant (or
+/// all but constant) signal a band around it wide enough to read, rather than a range
+/// of 1e-9 whose axis labels are all zeros; and never tighter than `min_span`, so a
+/// still joint's dither of a ten-thousandth of a degree does not fill the chart and
+/// look like violent motion (seen on the cell; the operator's decision, 2026-09-26).
+pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
     let mag = lo.abs().max(hi.abs());
     let span = hi - lo;
     if span <= mag * 1e-6 + 1e-12 {
         let c = (lo + hi) / 2.0;
-        let half = (c.abs() * 0.05).max(1.0);
+        let half = (c.abs() * 0.05).max(1.0).max(min_span / 2.0);
+        return (c - half, c + half);
+    }
+    if span < min_span {
+        let c = (lo + hi) / 2.0;
+        let half = min_span * 1.08 / 2.0;
         return (c - half, c + half);
     }
     (lo - span * 0.08, hi + span * 0.08)
+}
+
+/// The smallest vertical span a chart autoscales to, per display unit: small enough
+/// for any real motion or change to fill most of the chart, large enough that the
+/// noise of a signal at rest shows as the thin line it is. Unknown units: none.
+pub fn min_span(units: &str) -> f64 {
+    match units.trim() {
+        "deg" => 0.01,
+        "rad" => 0.01_f64.to_radians(),
+        "deg/s" => 0.1,
+        "rad/s" => 0.1_f64.to_radians(),
+        "deg/s2" => 1.0,
+        "rad/s2" | "rad/s^2" => 1.0_f64.to_radians(),
+        "V" | "Nm" => 1.0,
+        "A" => 0.1,
+        "m" => 0.0001,
+        "m/s" => 0.001,
+        "fraction" | "0..1" | "quaternion" => 0.01,
+        "0 or 1" | "count" | "index" => 1.0,
+        _ => 0.0,
+    }
 }
 
 fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str) -> Option<String> {
@@ -421,12 +458,34 @@ mod tests {
 
     #[test]
     fn a_flat_signal_gets_a_readable_band() {
-        assert_eq!(autoscale(0.0, 0.0), (-1.0, 1.0));
-        let (a, b) = autoscale(356.7, 356.7);
+        assert_eq!(autoscale(0.0, 0.0, 0.0), (-1.0, 1.0));
+        let (a, b) = autoscale(356.7, 356.7, 1.0);
         assert!((a - 338.865).abs() < 1e-9 && (b - 374.535).abs() < 1e-9);
-        let (a, b) = autoscale(7.6757e-7, 7.6757e-7);
+        let (a, b) = autoscale(7.6757e-7, 7.6757e-7, 0.0);
         assert!(a < -0.99 && b > 0.99);
-        let (a, b) = autoscale(10.0, 20.0);
+        let (a, b) = autoscale(10.0, 20.0, 1.0);
         assert_eq!((a, b), (9.2, 20.8));
+    }
+
+    #[test]
+    fn a_still_joints_dither_does_not_fill_its_chart() {
+        // On the cell a joint at rest dithered by about a ten-thousandth of a degree,
+        // and the chart scaled that to its full height.
+        let (lo, hi) = (45.0 - 0.0001, 45.0 + 0.0001);
+        let (a, b) = autoscale(lo, hi, min_span("deg"));
+        assert!(b - a >= 0.01, "a span of {} deg", b - a);
+        assert!((hi - lo) / (b - a) < 0.05, "the dither fills {:.0}% of the chart", 100.0 * (hi - lo) / (b - a));
+        assert!(a < lo && b > hi, "centred on the data");
+        // Real motion still fills it.
+        let (a, b) = autoscale(40.0, 50.0, min_span("deg"));
+        assert!((a, b) == (39.2, 50.8));
+        // Every unit the built-in catalogue shows gets a span, bar the unitless.
+        let cat = spy_core::catalogue::Catalogue::builtin();
+        for s in &cat.signals {
+            let u = view::display(Some(s), false).units;
+            if !["", "-", "text"].contains(&u.as_str()) {
+                assert!(min_span(&u) > 0.0, "no minimum span for \"{u}\" ({})", s.number);
+            }
+        }
     }
 }

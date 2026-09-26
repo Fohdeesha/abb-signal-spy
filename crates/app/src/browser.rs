@@ -383,18 +383,20 @@ impl SpyApp {
                 let unit = MechUnit::new(&d.unit).unwrap_or_else(|_| MechUnit::new("ROB_1").unwrap());
                 let key = |signal: u32, axis: u8| ChannelKey { signal, unit: unit.clone(), axis: Axis::new(axis).unwrap_or(Axis::new(1).unwrap()) };
                 let enabled = unit_ok && free > 0;
-                if ui.add_enabled(enabled, egui::Button::new(RichText::new("Add").strong())).clicked() {
+                // A greyed-out button says why.
+                let why_not = |n: usize| if !unit_ok { "Type a mechanical unit name first (like ROB_1).".to_string() } else { format!("Needs {n} free channel(s); {free} of {MAX_CHANNELS} free. Remove a channel first.") };
+                if ui.add_enabled(enabled, egui::Button::new(RichText::new("Add").strong())).on_disabled_hover_text(why_not(1)).clicked() {
                     let axis = if select == Select::Axis { d.axis } else { 1 };
                     to_add = Some((vec![key(d.signal, axis)], false));
                 }
-                if select == Select::Axis && ui.add_enabled(unit_ok && free >= 6, egui::Button::new("Add all six axes")).on_hover_text("Six channels, overlaid in one chart").clicked() {
+                if select == Select::Axis && ui.add_enabled(unit_ok && free >= 6, egui::Button::new("Add all six axes")).on_hover_text("Six channels, overlaid in one chart").on_disabled_hover_text(why_not(6)).clicked() {
                     to_add = Some(((1..=6).map(|a| key(d.signal, a)).collect(), true));
                 }
                 // A loaded catalogue could claim joint 6 for signal 3: then there is
                 // no block, rather than an underflow.
                 if select == Select::Number
                     && let Some(base) = sig.as_ref().and_then(|s| s.joint).and_then(|j| d.signal.checked_sub(u32::from(j.max(1) - 1))).filter(|b| *b > 0 && b.checked_add(5).is_some())
-                    && ui.add_enabled(unit_ok && free >= 6, egui::Button::new(format!("Add the block {}-{}", base, base + 5))).on_hover_text("All six joints, overlaid in one chart").clicked()
+                    && ui.add_enabled(unit_ok && free >= 6, egui::Button::new(format!("Add the block {}-{}", base, base + 5))).on_hover_text("All six joints, overlaid in one chart").on_disabled_hover_text(why_not(6)).clicked()
                 {
                     to_add = Some(((base..base + 6).map(|n| key(n, 1)).collect(), true));
                 }

@@ -3,7 +3,7 @@
 
 use spy_core::catalogue::{self, Catalogue, Select, Signal};
 use spy_core::session::{ChannelState, ChannelStatus};
-use spy_core::store::ChannelKey;
+use spy_core::store::{ChannelKey, Ring};
 
 /// The unit a channel is shown in and the factor from its native unit.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +21,133 @@ pub fn display(sig: Option<&Signal>, radians: bool) -> Display {
         Some((deg, k)) if !radians => Display { units: deg.to_string(), factor: k, wraps },
         _ => Display { units: s.units.clone(), factor: 1.0, wraps },
     }
+}
+
+/// How a channel's samples are read for its value, its statistics and its chart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    Plain,
+    /// Pads between the values it reports with exact zeros (the joint speeds
+    /// 6010-6015 and 6030-6035). A zero within [`ZERO_HOLD_MS`] of a reported value is
+    /// padding and stands for that value; a longer run of zeros is a real zero, the
+    /// joint at rest.
+    ZeroFilled,
+    /// An angle reduced to one turn, in radians (0..2pi): averaged on the circle, so
+    /// a value dithering across the 2pi-to-0 jump does not average to half a turn.
+    Wrapping,
+}
+
+pub fn reading(sig: Option<&Signal>) -> Reading {
+    match sig {
+        Some(s) if s.has(catalogue::flag::ZERO_FILLED) => Reading::ZeroFilled,
+        Some(s) if s.has(catalogue::flag::WRAPPING) && catalogue::angle_unit(&s.units).is_some() => Reading::Wrapping,
+        _ => Reading::Plain,
+    }
+}
+
+/// How long a zero-filled signal's padding may run. Measured on the cell (2026-09-02
+/// motion data, all twelve joint-speed signals, every joint moving): the longest run
+/// of padding zeros inside motion was 11 samples, 44 ms. Twice that and more; a joint
+/// that stops reads 0 within it.
+pub const ZERO_HOLD_MS: f64 = 100.0;
+
+/// The F3 readout window.
+pub const READOUT_MS: i64 = 150;
+
+/// Below this spread (the mean resultant length of the angles in the window) a
+/// wrapping angle is moving too fast for an average to mean anything: the newest
+/// sample is shown instead. 0.99 is a spread of about 8 degrees.
+const STEADY_ANGLE: f64 = 0.99;
+
+/// Undoes a zero-filled signal's padding, sample by sample in time order.
+#[derive(Debug, Clone, Copy)]
+pub struct ZeroHold {
+    held: f64,
+    zeros: u32,
+    max: u32,
+}
+
+impl ZeroHold {
+    pub fn new(sample_ms: f64) -> ZeroHold {
+        let ms = if sample_ms.is_finite() && sample_ms > 0.1 { sample_ms } else { 4.032 };
+        ZeroHold { held: 0.0, zeros: 0, max: (ZERO_HOLD_MS / ms).ceil() as u32 }
+    }
+
+    pub fn apply(&mut self, v: f64) -> f64 {
+        if !v.is_finite() {
+            return v;
+        }
+        if v != 0.0 {
+            self.held = v;
+            self.zeros = 0;
+            return v;
+        }
+        self.zeros = self.zeros.saturating_add(1);
+        if self.zeros > self.max {
+            self.held = 0.0;
+        }
+        self.held
+    }
+}
+
+/// The last `window_ms` of a ring as the signal means it, oldest first: padding
+/// undone for a zero-filled signal (with the hold primed from before the window).
+fn read_window(ring: &Ring, r: Reading, from: i64, to: i64) -> Vec<f64> {
+    match r {
+        Reading::ZeroFilled => {
+            let mut hold = ZeroHold::new(ring.sample_ms);
+            let prime = from - ZERO_HOLD_MS.ceil() as i64 - 1;
+            ring.range(prime, to).filter_map(|(t, v)| {
+                let x = hold.apply(v);
+                (t >= from).then_some(x)
+            }).collect()
+        }
+        _ => ring.range(from, to).map(|(_, v)| v).collect(),
+    }
+}
+
+/// The value a card shows, in the native unit: the mean of the last 150 ms (F3).
+/// Padding undone for a zero-filled signal; the mean on the circle for a wrapping
+/// angle, or its newest sample when it turns too fast to average.
+pub fn readout(ring: &Ring, r: Reading) -> Option<f64> {
+    let (last_t, _) = ring.last()?;
+    let v: Vec<f64> = read_window(ring, r, last_t - READOUT_MS, last_t + 1).into_iter().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    if r == Reading::Wrapping {
+        let (s, c) = v.iter().fold((0.0, 0.0), |(s, c), a| (s + a.sin(), c + a.cos()));
+        let spread = (s * s + c * c).sqrt() / v.len() as f64;
+        if spread < STEADY_ANGLE {
+            return v.last().copied();
+        }
+        return Some(s.atan2(c).rem_euclid(std::f64::consts::TAU));
+    }
+    Some(v.iter().sum::<f64>() / v.len() as f64)
+}
+
+/// The value at timeline point `t` as the signal means it (the last sample at or
+/// before it, padding undone), for the cursors.
+pub fn value_at(ring: &Ring, r: Reading, t: i64) -> Option<f64> {
+    let (at, v) = ring.at_or_before(t)?;
+    match r {
+        Reading::ZeroFilled => read_window(ring, r, at, at + 1).last().copied(),
+        _ => Some(v),
+    }
+}
+
+/// Statistics of a stretch as the signal means it, in the native unit: padding
+/// undone; for a wrapping angle the mean and standard deviation on the circle.
+pub fn window_stats(ring: &Ring, r: Reading, from: i64, to: i64) -> crate::charts::RangeStats {
+    let v = read_window(ring, r, from, to);
+    let mut s = crate::charts::range_stats(v.iter().copied());
+    if r == Reading::Wrapping && s.n > 0 {
+        let (sn, cs) = v.iter().filter(|x| x.is_finite()).fold((0.0, 0.0), |(a, b), x| (a + x.sin(), b + x.cos()));
+        let len = ((sn * sn + cs * cs).sqrt() / s.n as f64).clamp(1e-12, 1.0);
+        s.mean = sn.atan2(cs).rem_euclid(std::f64::consts::TAU);
+        s.sd = (-2.0 * len.ln()).sqrt();
+    }
+    s
 }
 
 /// A number with sensible precision: about six significant figures, scientific for
@@ -125,6 +252,17 @@ impl Health {
     }
 }
 
+/// A text event by the catalogue: typed as a string, or flagged as an event.
+pub fn is_text(s: &Signal) -> bool {
+    s.value_type.as_deref() == Some("string") || s.has(catalogue::flag::EVENT)
+}
+
+/// Whether a session in this phase can have a live channel: connected, and not on
+/// its way out (nothing arriving then is filed).
+pub fn session_live(phase: &spy_core::session::Phase) -> bool {
+    phase.is_connected() && *phase != spy_core::session::Phase::TearingDown
+}
+
 pub fn health(st: Option<&ChannelStatus>, connected: bool, sig: Option<&Signal>, loopback: bool) -> Health {
     let physical = sig.is_some_and(|s| s.has(catalogue::flag::PHYSICAL));
     let event = sig.is_some_and(|s| s.has(catalogue::flag::EVENT)) || st.is_some_and(|c| c.kind == Some(spy_core::sample::ValueKind::String));
@@ -135,7 +273,9 @@ pub fn health(st: Option<&ChannelStatus>, connected: bool, sig: Option<&Signal>,
         ChannelState::NoReply => Health::NoReply,
         _ if !connected => Health::NotConnected,
         ChannelState::Waiting | ChannelState::Defining => Health::Waiting,
-        ChannelState::Defined { .. } if event && c.samples == 0 => Health::NoEventYet,
+        // Nothing on this connection yet (its stream is defined afresh at every
+        // connect): any text shown is from before, and may have changed meanwhile.
+        ChannelState::Defined { .. } if event && c.last_arrival.is_none() => Health::NoEventYet,
         ChannelState::Defined { .. } if event => Health::Live,
         ChannelState::Defined { .. } if c.stale || c.last_arrival.is_none() => {
             if physical && loopback { Health::NotOnVc } else { Health::Stale }
@@ -182,6 +322,131 @@ mod tests {
         let line = log_line(&e);
         assert!(line.starts_with(&local_time(wall)[..8]), "{line} / {}", local_time(wall));
         assert!(line.ends_with("  x"), "{line}");
+    }
+
+    fn ring(values: &[f64]) -> Ring {
+        let mut r = Ring::new(4.0);
+        for (i, &v) in values.iter().enumerate() {
+            r.push(i as i64 * 4, v);
+        }
+        r
+    }
+
+    #[test]
+    fn a_zero_filled_speed_reads_its_reported_values_not_the_padding() {
+        // The measured shape (2026-09-02, 6010 moving): values with runs of one to
+        // three padding zeros between them.
+        let v = 0.0262;
+        let pattern: Vec<f64> = (0..200).map(|i| if [0, 1, 4, 5, 8].contains(&(i % 10)) { v } else { 0.0 }).collect();
+        let r = ring(&pattern);
+        let got = readout(&r, Reading::ZeroFilled).unwrap();
+        assert!((got - v).abs() < 1e-12, "{got}: the padding zeros were averaged in");
+        // Read plainly, the same samples say half the speed: what the card showed.
+        assert!(readout(&r, Reading::Plain).unwrap() < v * 0.6);
+    }
+
+    #[test]
+    fn a_zero_filled_speed_reads_zero_once_the_joint_stops() {
+        let mut values = vec![0.5; 100];
+        values.extend(vec![0.0; 75]); // 300 ms at rest
+        let r = ring(&values);
+        assert_eq!(readout(&r, Reading::ZeroFilled), Some(0.0), "a stopped joint must not keep its last speed");
+        // The chart's hold lets go after the hold time too: a flat line at the last
+        // speed forever was the old behaviour.
+        let mut h = ZeroHold::new(4.0);
+        let out: Vec<f64> = values.iter().map(|&x| h.apply(x)).collect();
+        assert_eq!(out[100], 0.5, "padding right after a value is held");
+        assert_eq!(out[100 + 24], 0.5, "held for the hold time (25 zeros of 4 ms)");
+        assert_eq!(out[100 + 25], 0.0, "and not beyond it");
+        assert_eq!(*out.last().unwrap(), 0.0);
+        // A true value of zero amid motion is a sample like any other: the next
+        // non-zero value is shown at once.
+        let mut h = ZeroHold::new(4.0);
+        assert_eq!([1.0, 0.0, -2.0, 0.0].map(|x| h.apply(x)), [1.0, 1.0, -2.0, -2.0]);
+    }
+
+    #[test]
+    fn a_resolver_angle_averages_on_the_circle() {
+        use std::f64::consts::TAU;
+        // Dithering across the 2pi-to-0 jump: the plain mean is half a turn off.
+        let dither: Vec<f64> = (0..60).map(|i| if i % 2 == 0 { TAU - 0.001 } else { 0.001 }).collect();
+        let r = ring(&dither);
+        let got = readout(&r, Reading::Wrapping).unwrap();
+        assert!(got < 1e-6 || TAU - got < 1e-6, "{got}");
+        assert!((readout(&r, Reading::Plain).unwrap() - std::f64::consts::PI).abs() < 0.01, "the old readout");
+        // Steady elsewhere: the mean.
+        let r = ring(&[1.0, 1.02, 0.98, 1.0]);
+        assert!((readout(&r, Reading::Wrapping).unwrap() - 1.0).abs() < 1e-3);
+        // Turning several times within the window: no average means anything; the
+        // newest sample is shown.
+        let spinning: Vec<f64> = (0..38).map(|i| (i as f64 * 1.3).rem_euclid(TAU)).collect();
+        assert_eq!(readout(&ring(&spinning), Reading::Wrapping), spinning.last().copied());
+        // And the statistics of a stretch, on the circle too.
+        let s = window_stats(&ring(&dither), Reading::Wrapping, 0, 1000);
+        assert!(s.mean < 1e-6 || TAU - s.mean < 1e-6, "{}", s.mean);
+        assert!(s.sd < 0.01, "{}", s.sd);
+    }
+
+    #[test]
+    fn the_cursor_value_of_a_zero_filled_signal_is_not_a_padding_zero() {
+        let r = ring(&[0.3, 0.0, 0.0, 0.4, 0.0]);
+        assert_eq!(value_at(&r, Reading::ZeroFilled, 8), Some(0.3));
+        assert_eq!(value_at(&r, Reading::ZeroFilled, 17), Some(0.4));
+        assert_eq!(value_at(&r, Reading::Plain, 8), Some(0.0));
+        assert_eq!(value_at(&r, Reading::Plain, -1), None);
+    }
+
+    fn status(state: ChannelState, samples: u64, arrived: bool, stale: bool, kind: Option<spy_core::sample::ValueKind>) -> ChannelStatus {
+        ChannelStatus {
+            key: ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(1).unwrap() },
+            state,
+            sample_ms: Some(4.032),
+            kind,
+            samples,
+            last_arrival: arrived.then(std::time::Instant::now),
+            rate: 0.0,
+            gaps: 0,
+            stale,
+        }
+    }
+
+    #[test]
+    fn only_a_current_sample_is_live() {
+        let cat = Catalogue::builtin();
+        let torque = cat.get(4002);
+        let def = ChannelState::Defined { stream: 215 };
+        assert_eq!(health(Some(&status(def.clone(), 10, true, false, None)), true, torque, false), Health::Live);
+        assert_eq!(health(Some(&status(def.clone(), 10, true, true, None)), true, torque, false), Health::Stale);
+        assert_eq!(health(Some(&status(def.clone(), 10, false, false, None)), true, torque, false), Health::Stale, "defined on this connection, nothing yet");
+        assert_eq!(health(Some(&status(def.clone(), 10, true, false, None)), false, torque, false), Health::NotConnected);
+        assert_eq!(health(None, true, torque, false), Health::NotConnected);
+        assert_eq!(health(Some(&status(ChannelState::Waiting, 0, false, false, None)), true, torque, false), Health::Waiting);
+        let dc = cat.get(5027);
+        assert_eq!(health(Some(&status(def.clone(), 0, false, true, None)), true, dc, true), Health::NotOnVc);
+    }
+
+    #[test]
+    fn nothing_is_live_while_disconnecting() {
+        use spy_core::session::Phase;
+        assert!(session_live(&Phase::Streaming) && session_live(&Phase::SettingUp));
+        assert!(!session_live(&Phase::TearingDown), "nothing arriving then is filed");
+        assert!(!session_live(&Phase::Idle));
+        let cat = Catalogue::builtin();
+        let s = status(ChannelState::Defined { stream: 215 }, 10, true, false, None);
+        assert_eq!(health(Some(&s), session_live(&Phase::TearingDown), cat.get(4002), false), Health::NotConnected);
+    }
+
+    #[test]
+    fn a_text_event_from_before_a_reconnect_is_not_live() {
+        // 9875 sent nothing at StartStream on the cell: after a reconnect the text on
+        // the card is the old connection's, and may have changed meanwhile.
+        let cat = Catalogue::builtin();
+        let seg = cat.get(9875);
+        let def = ChannelState::Defined { stream: 260 };
+        let text = Some(spy_core::sample::ValueKind::String);
+        assert_eq!(health(Some(&status(def.clone(), 3, false, false, text)), true, seg, false), Health::NoEventYet);
+        assert_eq!(health(Some(&status(def.clone(), 3, true, false, text)), true, seg, false), Health::Live);
+        assert_eq!(health(Some(&status(def, 0, false, false, None)), true, seg, false), Health::NoEventYet);
     }
 
     #[test]

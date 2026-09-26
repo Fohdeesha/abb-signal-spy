@@ -34,20 +34,36 @@ pub struct ChanView {
     pub stats: Stats,
 }
 
-/// min / max / mean since the last reset, in the native unit.
+/// min / max / mean since the last reset, in the native unit, of the samples as the
+/// signal means them (a zero-filled signal's padding undone; see [`view::Reading`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Stats {
     pub n: u64,
     pub sum: f64,
     pub min: f64,
     pub max: f64,
+    /// For a wrapping angle's mean, taken on the circle.
+    pub sum_sin: f64,
+    pub sum_cos: f64,
+    /// A zero-filled signal's padding, undone across frames.
+    pub hold: Option<view::ZeroHold>,
     /// Newest timeline ms already counted.
     pub upto: i64,
 }
 
 impl Default for Stats {
     fn default() -> Stats {
-        Stats { n: 0, sum: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY, upto: i64::MIN }
+        Stats { n: 0, sum: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY, sum_sin: 0.0, sum_cos: 0.0, hold: None, upto: i64::MIN }
+    }
+}
+
+impl Stats {
+    /// The mean since reset, in the native unit.
+    pub fn mean(&self, r: view::Reading) -> Option<f64> {
+        if self.n == 0 {
+            return None;
+        }
+        Some(if r == view::Reading::Wrapping { self.sum_sin.atan2(self.sum_cos).rem_euclid(std::f64::consts::TAU) } else { self.sum / self.n as f64 })
     }
 }
 
@@ -78,6 +94,8 @@ pub struct AddDialog {
 pub struct SpyApp {
     pub ctx: egui::Context,
     pub session: Session,
+    /// When to ask before taking InfoStream (the product: `Remote`).
+    pub ask: AskPolicy,
     pub log: Arc<LogBook>,
     pub catalogue: Catalogue,
     pub settings: Settings,
@@ -85,6 +103,8 @@ pub struct SpyApp {
     pub settings_dirty: Option<Instant>,
     pub chans: Vec<ChanView>,
     pub next_lane: u32,
+    /// The store's epoch the statistics were counted in.
+    pub store_epoch: u64,
 
     pub host_input: String,
     pub port_input: String,
@@ -108,7 +128,8 @@ pub struct SpyApp {
     pub cursor_a: Option<f64>,
     pub cursor_b: Option<f64>,
     pub markers: Vec<Marker>,
-    pub lane_lock: HashMap<u32, (f64, f64)>,
+    /// A chart's locked vertical scale, by (lane, display unit): see `charts::lanes`.
+    pub lane_lock: HashMap<(u32, String), (f64, f64)>,
 
     pub recorder: Option<Recorder>,
     pub slow: Option<Recorder>,
@@ -165,9 +186,14 @@ impl SpyApp {
             }
         }
         log.info(format!("ABB Signal Spy {} started. Settings: {}", env!("CARGO_PKG_VERSION"), settings_path.display()));
-        if let Some(n) = note {
-            log.warn(n);
-        }
+        // An internal error last time (the panic hook's crash.txt): said once, with
+        // the file kept under a name of its own for a report.
+        let crash = data_dir.join("crash.txt");
+        let crash_note = crash.is_file().then(|| {
+            let kept = data_dir.join(format!("crash-{}.txt", spy_core::util::local_stamp(std::time::SystemTime::now())));
+            let kept = if std::fs::rename(&crash, &kept).is_ok() { kept } else { crash.clone() };
+            format!("ABB Signal Spy hit an internal error last time. What happened is in {}: please include that file when reporting it.", kept.display())
+        });
 
         let (catalogue, cat_note) = match &settings.catalogue_file {
             Some(p) => match Catalogue::load(p) {
@@ -193,6 +219,7 @@ impl SpyApp {
         let mut app = SpyApp {
             ctx,
             session,
+            ask,
             log,
             catalogue,
             settings,
@@ -200,6 +227,7 @@ impl SpyApp {
             settings_dirty: None,
             chans: Vec::new(),
             next_lane: 1,
+            store_epoch: 0,
             host_input,
             port_input,
             name_input: String::new(),
@@ -263,6 +291,13 @@ impl SpyApp {
             }
         }
         app.sync_channels();
+        // On screen, not only in the log: something the person wrote was not used.
+        if let Some(n) = note {
+            app.toast(Level::Warn, n);
+        }
+        if let Some(n) = crash_note {
+            app.toast(Level::Warn, n);
+        }
         // The guide opens by itself once, on the first run; afterwards it is in Help.
         app.show_guide = first_run;
         app
@@ -302,7 +337,10 @@ impl SpyApp {
                 self.session.store().remove(&ch.key);
             }
         }
-        self.session.set_channels(keys);
+        // Text events send only on a change: the session is told which they are, so
+        // their silence before a first record is not reported as a fault.
+        let text: Vec<ChannelKey> = keys.iter().filter(|k| self.catalogue.get(k.signal).is_some_and(view::is_text)).cloned().collect();
+        self.session.set_channels_expecting_text(keys, text);
         for (i, c) in self.chans.iter_mut().enumerate() {
             c.color = chan_color(i);
         }
@@ -344,6 +382,20 @@ impl SpyApp {
     pub fn connect(&mut self) {
         match self.parse_target() {
             Ok(t) => {
+                // The connection worker stopped after an internal error (its status
+                // says so): a request to it would go nowhere, so Connect starts a new
+                // one, on the same history. A recording fed by the old one has ended.
+                if !self.session.is_running() {
+                    for r in [self.recorder.take(), self.slow.take()].into_iter().flatten() {
+                        let s = r.stop();
+                        self.toast(Level::Warn, format!("Recording finished when the connection worker was restarted: {}", s.dir.display()));
+                    }
+                    self.log.warn("The connection worker had stopped after an internal error; starting a new one.");
+                    let c = self.ctx.clone();
+                    let store = self.session.store().clone();
+                    self.session = Session::spawn(Options { ask: self.ask, ..Options::default() }, self.log.clone(), store, Arc::new(move || c.request_repaint()));
+                    self.sync_channels();
+                }
                 // Another controller: a running recording must not carry on with a
                 // second controller's samples under the same channel names, and
                 // markers placed on the first one's clock mean nothing on the next.
@@ -967,16 +1019,17 @@ impl SpyApp {
         }
         self.phone_built = Instant::now();
         let st = self.session.status().clone();
-        let connected = st.phase.is_connected();
+        let connected = view::session_live(&st.phase);
         let mut chans = Vec::new();
         for c in &self.chans {
             let sig = self.catalogue.get(c.key.signal);
             let cs = st.channels.iter().find(|x| x.key == c.key);
             let h = view::health(cs, connected, sig, st.loopback);
             let d = view::display(sig, c.radians);
+            let reading = view::reading(sig);
             let value = self.session.store().get(&c.key).and_then(|ch| {
                 let r = ch.lock();
-                if r.kind == Some(spy_core::sample::ValueKind::String) { r.last_text.clone() } else { r.recent_mean(150).map(|v| view::fmt(v * d.factor)) }
+                if r.kind == Some(spy_core::sample::ValueKind::String) { r.last_text.clone() } else { view::readout(&r, reading).map(|v| view::fmt(v * d.factor)) }
             });
             chans.push(serde_json::json!({
                 "name": view::label(&self.catalogue, &c.key),
@@ -1082,6 +1135,23 @@ impl Drop for SpyApp {
 
 #[cfg(test)]
 mod tests {
+    use super::{view, Stats};
+
+    #[test]
+    fn a_wrapping_angles_mean_since_reset_is_taken_on_the_circle() {
+        let mut s = Stats::default();
+        for a in [std::f64::consts::TAU - 0.01, 0.01, std::f64::consts::TAU - 0.02, 0.02] {
+            s.n += 1;
+            s.sum += a;
+            s.sum_sin += a.sin();
+            s.sum_cos += a.cos();
+        }
+        let m = s.mean(view::Reading::Wrapping).unwrap();
+        assert!(m < 1e-9 || std::f64::consts::TAU - m < 1e-9, "{m}");
+        assert!((s.mean(view::Reading::Plain).unwrap() - std::f64::consts::PI).abs() < 1e-9);
+        assert_eq!(Stats::default().mean(view::Reading::Plain), None);
+    }
+
     #[test]
     fn short_ids_never_split_a_character() {
         assert_eq!(super::short_id("{12345678-9ABC-4DEF-8123-456789ABCDEF}"), "{12345678…}");

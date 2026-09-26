@@ -38,20 +38,41 @@ impl SpyApp {
     /// Fold the samples that arrived since the last frame into each channel's
     /// since-reset statistics.
     pub fn update_stats(&mut self) {
+        // The session started the history afresh (a different controller, at another
+        // address or behind the same one): statistics, markers and cursors on the
+        // old clock mean nothing now, and the old `upto` would hide the new samples.
+        let epoch = self.session.store().epoch();
+        if epoch != self.store_epoch {
+            self.store_epoch = epoch;
+            for c in &mut self.chans {
+                c.stats = Stats::default();
+            }
+            self.markers.clear();
+            self.cursor_a = None;
+            self.cursor_b = None;
+            self.paused_at = None;
+        }
         for c in &mut self.chans {
             let Some(ch) = self.session.store().get(&c.key) else { continue };
+            let reading = view::reading(self.catalogue.get(c.key.signal));
             let r = ch.lock();
             let from = if c.stats.upto == i64::MIN { i64::MIN } else { c.stats.upto + 1 };
             let mut last = c.stats.upto;
+            let hold = c.stats.hold.get_or_insert_with(|| view::ZeroHold::new(r.sample_ms));
+            let mut hold = *hold;
             for (t, v) in r.range(from, i64::MAX) {
                 last = t;
+                let v = if reading == view::Reading::ZeroFilled { hold.apply(v) } else { v };
                 if v.is_finite() {
                     c.stats.n += 1;
                     c.stats.sum += v;
                     c.stats.min = c.stats.min.min(v);
                     c.stats.max = c.stats.max.max(v);
+                    c.stats.sum_sin += v.sin();
+                    c.stats.sum_cos += v.cos();
                 }
             }
+            c.stats.hold = Some(hold);
             c.stats.upto = last;
         }
     }
@@ -77,7 +98,7 @@ impl SpyApp {
             return;
         }
         let st = self.session.status().clone();
-        let connected = st.phase.is_connected();
+        let connected = view::session_live(&st.phase);
         let mut remove = None;
         let mut changed = false;
         let lanes: Vec<(u32, String)> = {
@@ -96,13 +117,14 @@ impl SpyApp {
                 let cs = st.channels.iter().find(|c| c.key == key).cloned();
                 let h = view::health(cs.as_ref(), connected, sig.as_ref(), st.loopback);
                 let d = view::display(sig.as_ref(), self.chans[i].radians);
+                let reading = view::reading(sig.as_ref());
                 let (value, is_text) = match self.session.store().get(&key) {
                     Some(ch) => {
                         let r = ch.lock();
                         if r.kind == Some(spy_core::sample::ValueKind::String) {
                             (r.last_text.clone(), true)
                         } else {
-                            (r.recent_mean(150).map(|v| view::fmt(v * d.factor)), false)
+                            (view::readout(&r, reading).map(|v| view::fmt(v * d.factor)), false)
                         }
                     }
                     None => (None, false),
@@ -184,7 +206,12 @@ impl SpyApp {
                         if !h.is_live() {
                             text = text.weak();
                         }
-                        ui.label(text);
+                        let how = match reading {
+                            view::Reading::Plain => "The mean of the last 150 ms. The charts are raw.",
+                            view::Reading::ZeroFilled => "The mean of the last 150 ms of the values this signal reports. It pads between them with exact zeros, which are left out; a run of zeros longer than 0.1 s is a real zero (the joint at rest). The recording keeps every sample as sent.",
+                            view::Reading::Wrapping => "The mean of the last 150 ms taken on the circle (an angle within one turn), or the newest sample while it turns too fast to average.",
+                        };
+                        ui.label(text).on_hover_text(how);
                         if !is_text {
                             if sig.as_ref().is_some_and(|s| s.is_angle()) {
                                 if ui.small_button(&d.units).on_hover_text("Click to switch degrees / radians").clicked() {
@@ -203,7 +230,7 @@ impl SpyApp {
                         let s = self.chans[i].stats;
                         ui.horizontal_wrapped(|ui| {
                             let f = |x: f64| if x.is_finite() { view::fmt(x * d.factor) } else { "--".into() };
-                            let mean = if s.n > 0 { s.sum / s.n as f64 } else { f64::NAN };
+                            let mean = s.mean(reading).unwrap_or(f64::NAN);
                             ui.label(RichText::new(format!("min {}  max {}  mean {}", f(s.min), f(s.max), f(mean))).small().monospace());
                         });
                     }

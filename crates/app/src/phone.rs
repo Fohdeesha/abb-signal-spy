@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 const MAX_REQUEST: usize = 8 * 1024;
 const MAX_CONNECTIONS: usize = 16;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
+/// The whole request must arrive within this, however slowly its bytes trickle in:
+/// sixteen clients sending a byte every few seconds must not hold the view shut.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+/// Ports tried after the one asked for, when it is taken by another program.
+const PORT_TRIES: u16 = 10;
 
 /// The snapshot the window publishes: a JSON body and when it was built.
 #[derive(Default)]
@@ -26,29 +31,41 @@ pub struct Snapshot {
 
 pub struct PhoneServer {
     pub addr: SocketAddr,
+    /// Where a phone reaches it, worked out once when it starts (a name lookup is
+    /// too slow to repeat every frame).
+    pub urls: Vec<String>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl PhoneServer {
-    /// Listen on every interface on `port` (0 picks one; the tests use that).
+    /// Listen on every interface on `port`, or, if another program has it, on the
+    /// first free one of the next few (0 picks any; the tests use that).
     pub fn start(port: u16, snapshot: Arc<Mutex<Snapshot>>) -> Result<PhoneServer, String> {
-        let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                format!("port {port} is already in use by another program; choose another")
-            } else {
-                format!("cannot listen on port {port}: {e}")
+        let tries = if port == 0 { 1 } else { PORT_TRIES };
+        let mut last = String::new();
+        for p in (0..tries).filter_map(|i| port.checked_add(i)) {
+            match TcpListener::bind(("0.0.0.0", p)) {
+                Ok(l) => return PhoneServer::serve_on(l, snapshot, REQUEST_DEADLINE),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => last = format!("ports {port} to {p} are all in use by other programs"),
+                Err(e) => return Err(format!("cannot listen on port {p}: {e}")),
             }
-        })?;
+        }
+        Err(last)
+    }
+
+    fn serve_on(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, deadline: Duration) -> Result<PhoneServer, String> {
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
+        let names = own_names();
         let thread = std::thread::Builder::new()
             .name("phone-view".into())
-            .spawn(move || accept_loop(listener, snapshot, stop2))
+            .spawn(move || accept_loop(listener, snapshot, stop2, names, deadline))
             .map_err(|e| format!("cannot start the phone view: {e}"))?;
-        Ok(PhoneServer { addr, stop, thread: Some(thread) })
+        let urls = local_addresses().iter().map(|a| format!("http://{a}:{}/", addr.port())).collect();
+        Ok(PhoneServer { addr, urls, stop, thread: Some(thread) })
     }
 
     pub fn port(&self) -> u16 {
@@ -65,7 +82,7 @@ impl Drop for PhoneServer {
     }
 }
 
-fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<AtomicBool>) {
+fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<AtomicBool>, names: Arc<Vec<String>>, deadline: Duration) {
     let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -76,9 +93,9 @@ fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<
                     continue;
                 }
                 active.fetch_add(1, Ordering::SeqCst);
-                let (snap, act) = (snapshot.clone(), active.clone());
+                let (snap, act, names) = (snapshot.clone(), active.clone(), names.clone());
                 let spawned = std::thread::Builder::new().name("phone-conn".into()).spawn(move || {
-                    let _ = serve(stream, &snap);
+                    let _ = serve(stream, &snap, &names, deadline);
                     act.fetch_sub(1, Ordering::SeqCst);
                 });
                 if spawned.is_err() {
@@ -103,14 +120,53 @@ fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8], head_only:
     s.flush()
 }
 
-fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>) -> std::io::Result<()> {
+/// The names this PC answers to: its computer name, which a person might type, and
+/// `localhost`. With IP literals, the only `Host` a request may carry: a page on
+/// another site that gets a browser to resolve its own name to this PC (DNS
+/// rebinding) sends that site's name, and is turned away.
+fn own_names() -> Arc<Vec<String>> {
+    let mut v = vec!["localhost".to_string()];
+    if let Ok(n) = std::env::var("COMPUTERNAME") {
+        v.push(n.to_ascii_lowercase());
+    }
+    Arc::new(v)
+}
+
+/// Whether a request's `Host` names this PC. Absent (HTTP/1.0) is accepted.
+fn host_ok(host: Option<&str>, names: &[String]) -> bool {
+    let Some(h) = host else { return true };
+    let h = h.trim();
+    // An IPv6 literal is bracketed, with the port after: "[fe80::1]:8090".
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((ip, _)) => return ip.parse::<std::net::Ipv6Addr>().is_ok(),
+            None => return false,
+        }
+    } else {
+        h.rsplit_once(':').map_or(h, |(n, port)| if port.bytes().all(|b| b.is_ascii_digit()) { n } else { h })
+    };
+    // The computer name alone or with a local suffix ("mypc.lan", "mypc.local").
+    let name = name.to_ascii_lowercase();
+    name.parse::<std::net::Ipv4Addr>().is_ok() || names.iter().any(|n| name == *n || name.strip_prefix(n.as_str()).is_some_and(|rest| rest.starts_with('.')))
+}
+
+fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &[String], deadline: Duration) -> std::io::Result<()> {
     s.set_nonblocking(false)?;
-    s.set_read_timeout(Some(IO_TIMEOUT))?;
     s.set_write_timeout(Some(IO_TIMEOUT))?;
+    let end = Instant::now() + deadline;
     let mut req = Vec::with_capacity(1024);
     let mut buf = [0u8; 1024];
     loop {
-        let n = s.read(&mut buf)?;
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return respond(&mut s, "408 Request Timeout", "text/plain", b"too slow\n", false);
+        }
+        s.set_read_timeout(Some(left.min(IO_TIMEOUT)))?;
+        let n = match s.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+            Err(e) => return Err(e),
+        };
         if n == 0 {
             return Ok(());
         }
@@ -133,6 +189,11 @@ fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>) -> std::io::Result<()> {
     if method != "GET" && !head {
         // Read-only: there is nothing to POST to.
         return respond(&mut s, "405 Method Not Allowed", "text/plain", b"read-only\n", false);
+    }
+    let text = String::from_utf8_lossy(&req);
+    let host = text.lines().skip(1).take_while(|l| !l.is_empty()).find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("host")).map(|(_, v)| v.trim().to_string()));
+    if !host_ok(host.as_deref(), names) {
+        return respond(&mut s, "421 Misdirected Request", "text/plain", b"not this PC's name\n", false);
     }
     let path = path.split('?').next().unwrap_or("");
     match path {
@@ -242,7 +303,7 @@ mod tests {
         let snap = Arc::new(Mutex::new(Snapshot::default()));
         let srv = PhoneServer::start(0, snap.clone()).unwrap();
         let p = srv.port();
-        let page = get(p, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        let page = get(p, &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n"));
         assert!(page.starts_with("HTTP/1.1 200 OK") && page.contains("Read-only view"), "{page}");
         let data = get(p, "GET /data HTTP/1.1\r\n\r\n");
         assert!(data.contains("\"data\":null"), "no snapshot yet: {data}");
@@ -262,6 +323,80 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 200") && !head.contains("<html"));
         drop(srv);
         assert!(TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], p)), Duration::from_millis(500)).is_err(), "switched off means not listening");
+    }
+
+    #[test]
+    fn a_taken_port_moves_to_the_next_free_one() {
+        // Below Windows' ephemeral range (49152 up), where the other tests' sockets
+        // and connections are given ports at this very moment: a port and the next
+        // one, both free, then the first taken.
+        let start = 20_000 + (std::process::id() % 10_000) as u16;
+        let (taken, p) = (start..start + 2_000)
+            .step_by(3)
+            .find_map(|p| {
+                let a = TcpListener::bind(("0.0.0.0", p)).ok()?;
+                drop(TcpListener::bind(("0.0.0.0", p + 1)).ok()?);
+                Some((a, p))
+            })
+            .expect("no free pair of ports");
+        let srv = PhoneServer::start(p, Arc::new(Mutex::new(Snapshot::default()))).unwrap();
+        assert_eq!(srv.port(), p + 1);
+        assert!(get(srv.port(), "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 200"));
+        drop(taken);
+    }
+
+    #[test]
+    fn only_this_pcs_names_are_answered() {
+        // A page elsewhere that gets a browser to resolve its own name to this PC
+        // (DNS rebinding) sends its own name as the Host.
+        let names = vec!["localhost".to_string(), "mypc".to_string()];
+        for ok in [None, Some("127.0.0.1:8090"), Some("192.168.1.5"), Some("[fe80::1]:8090"), Some("localhost:8090"), Some("MYPC:8090"), Some("mypc.lan"), Some("mypc.local:8090")] {
+            assert!(host_ok(ok, &names), "{ok:?}");
+        }
+        for bad in [Some("evil.example"), Some("evil.example:8090"), Some("notmypc"), Some("mypcx:8090"), Some("[not-an-ip]:8090"), Some("")] {
+            assert!(!host_ok(bad, &names), "{bad:?}");
+        }
+        let srv = PhoneServer::start(0, Arc::new(Mutex::new(Snapshot::default()))).unwrap();
+        assert!(get(srv.port(), "GET /data HTTP/1.1\r\nHost: evil.example\r\n\r\n").starts_with("HTTP/1.1 421"));
+        assert!(get(srv.port(), &format!("GET /data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.port())).starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_client_trickling_its_request_is_cut_off() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let srv = PhoneServer::serve_on(listener, Arc::new(Mutex::new(Snapshot::default())), Duration::from_millis(800)).unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", srv.port())).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let t0 = Instant::now();
+        // One byte every 300 ms: each read alone is well inside the per-read timeout,
+        // which used to be all there was. The server must cut it off at its deadline.
+        // (Windows discards the 408 reply when the client's unread bytes make the
+        // close a reset, so what is measured is when the connection ends.)
+        let mut ended = None;
+        for b in b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n".iter().cycle() {
+            if s.write_all(&[*b]).is_err() || probe_closed(&mut s) {
+                ended = Some(t0.elapsed());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            if t0.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+        }
+        let ended = ended.expect("the server never cut the trickling client off");
+        assert!(ended < Duration::from_millis(2500), "held for {ended:?}; the deadline is 0.8 s");
+    }
+
+    /// The server has answered or closed (end of stream or reset), as far as a short
+    /// read can tell; still waiting for more of the request otherwise. How much a read
+    /// got does not matter: any answer, or the end, means it is done with this client.
+    #[allow(clippy::unused_io_amount)]
+    fn probe_closed(s: &mut TcpStream) -> bool {
+        let mut b = [0u8; 64];
+        match s.read(&mut b) {
+            Ok(_) => true,
+            Err(e) => !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut),
+        }
     }
 
     #[test]

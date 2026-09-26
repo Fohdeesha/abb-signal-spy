@@ -131,8 +131,8 @@ impl SpyApp {
             if on {
                 match PhoneServer::start(self.settings.phone_port, Arc::clone(&self.phone_snapshot)) {
                     Ok(s) => {
-                        let urls: Vec<String> = crate::phone::local_addresses().iter().map(|a| format!("http://{a}:{}/", s.port())).collect();
-                        self.toast(Level::Info, format!("Phone view on: open {} on a phone on the same network. (Windows may ask to allow it through the firewall.)", if urls.is_empty() { format!("port {}", s.port()) } else { urls.join(" or ") }));
+                        let moved = if self.settings.phone_port != 0 && s.port() != self.settings.phone_port { format!(" (port {} was in use by another program)", self.settings.phone_port) } else { String::new() };
+                        self.toast(Level::Info, format!("Phone view on: open {} on a phone on the same network{moved}. (Windows may ask to allow it through the firewall.)", if s.urls.is_empty() { format!("port {}", s.port()) } else { s.urls.join(" or ") }));
                         self.phone = Some(s);
                     }
                     Err(e) => self.toast(Level::Error, format!("Phone view: {e}")),
@@ -143,21 +143,24 @@ impl SpyApp {
             }
         }
         if let Some(p) = &self.phone {
-            let urls = crate::phone::local_addresses();
-            ui.label(RichText::new(format!(":{}", p.port())).small()).on_hover_text(urls.iter().map(|a| format!("http://{a}:{}/", p.port())).collect::<Vec<_>>().join("\n"));
+            ui.label(RichText::new(format!(":{}", p.port())).small()).on_hover_text(p.urls.join("\n"));
         }
     }
 
-    /// A recorder that failed (disk full, folder gone) is reported and dropped.
+    /// A recorder that failed (disk full, folder gone), or closed itself (the
+    /// controller behind the address changed), is reported and dropped.
     pub fn check_recorders(&mut self) {
         for slot in [&mut self.recorder, &mut self.slow] {
-            if let Some(r) = slot
-                && let RecState::Failed(e) = r.status().state {
-                    let dir = r.status().dir;
-                    *slot = None;
-                    self.toasts.push(crate::app::Toast { at: std::time::Instant::now(), text: format!("Recording stopped: {e} ({})", dir.display()), level: Level::Error });
-                    self.log.error(format!("Recording stopped: {e} ({})", dir.display()));
-                }
+            let Some(r) = slot else { continue };
+            let st = r.status();
+            let (text, level) = match st.state {
+                RecState::Failed(e) => (format!("Recording stopped: {e} ({})", st.dir.display()), Level::Error),
+                RecState::Ended(why) => (format!("Recording closed: {why} ({})", st.dir.display()), Level::Warn),
+                _ => continue,
+            };
+            *slot = None;
+            self.toasts.push(crate::app::Toast { at: std::time::Instant::now(), text: text.clone(), level });
+            self.log.push(level, text);
         }
     }
 }
