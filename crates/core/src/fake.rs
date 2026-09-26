@@ -184,11 +184,18 @@ pub struct Behaviour {
     pub tick: Duration,
     /// Controller-clock milliseconds per tick; 4 on the VC. A test can make it wrap.
     pub stamp_step: u64,
+    /// Stamp like the real IRC5 instead: its tick is 4.032 ms and its clock counts
+    /// whole milliseconds, so steps are 4 with a 5 every 31.25 ticks, and 24 or 25 for
+    /// the 24 ms signals (tunemaster-testsignals.md s24 item 2).
+    pub irc5_clock: bool,
     pub aya_interval: Duration,
     pub aya_timeout: Duration,
     /// Hold the reply to a define of this signal until the next define arrives on
     /// the same connection.
     pub hold_define_of: Option<u32>,
+    /// Release that held reply after the next define's reply rather than before it:
+    /// replies out of the order of their requests.
+    pub release_held_after: bool,
     /// Send the stamps modulo 2^32, as a controller that keeps them in 32 bits does.
     pub wrap32: bool,
     /// Answer every request after this delay (a slow controller).
@@ -197,6 +204,9 @@ pub struct Behaviour {
     pub mute: HashSet<u32>,
     /// Stop all sample delivery (the whole feed dead, keepalives still flowing).
     pub mute_all: bool,
+    /// A virtual controller the PC is too busy for: no samples, and its clock stops
+    /// too, while it still answers (measured on the RW6 VC, 2026-09-27: s25 item 3).
+    pub freeze: bool,
     /// Do not answer the handshake at all.
     pub mute_handshake: bool,
     /// Extra entries in the handshake's client list, beyond the connections.
@@ -209,6 +219,12 @@ pub struct Behaviour {
     pub hold_delivery: bool,
     /// How stream ids are numbered: the VC's way or the IRC5's.
     pub id_pools: IdPools,
+    /// The system id the handshake reports: change it to stand in for a different
+    /// controller at the same address (a cable moved to the next robot).
+    pub system_id: String,
+    /// Never answer these commands (by property, e.g. "StartStream"), though they
+    /// still take effect: a controller that loses a reply.
+    pub unanswered: HashSet<String>,
 }
 
 impl Default for Behaviour {
@@ -241,18 +257,23 @@ impl Default for Behaviour {
             units,
             tick: Duration::from_millis(4),
             stamp_step: 4,
+            irc5_clock: false,
             aya_interval: Duration::from_millis(4000),
             aya_timeout: Duration::from_millis(16000),
             hold_define_of: None,
+            release_held_after: false,
             wrap32: false,
             reply_delay: Duration::ZERO,
             mute: HashSet::new(),
             mute_all: false,
+            freeze: false,
             mute_handshake: false,
             extra_clients: Vec::new(),
             refuse_next: HashMap::new(),
             hold_delivery: false,
             id_pools: IdPools::Vc,
+            system_id: SYSTEM_ID.into(),
+            unanswered: HashSet::new(),
         }
     }
 }
@@ -270,6 +291,8 @@ struct State {
     seen: Vec<Seen>,
     aya_answers: Vec<AyaAnswer>,
     held_reply: Option<(usize, Vec<u8>)>,
+    /// The part of a millisecond the IRC5-like clock has counted but not stamped.
+    clock_frac: f64,
     connections_total: usize,
     samples_sent: u64,
     handshakes: u64,
@@ -304,6 +327,7 @@ impl FakeController {
             seen: Vec::new(),
             aya_answers: Vec::new(),
             held_reply: None,
+            clock_frac: 0.0,
             connections_total: 0,
             samples_sent: 0,
             handshakes: 0,
@@ -591,7 +615,7 @@ fn handshake_reply(st: &State, txn: u16) -> Vec<u8> {
     let mut clients: Vec<String> = st.conns.values().map(|c| c.peer.ip().to_string()).collect();
     clients.extend(st.behaviour.extra_clients.iter().cloned());
     let list = format!("<i><cs>{}</cs></i>", clients.iter().map(|a| format!("<c a={a}/>")).collect::<String>());
-    let mut sys = SYSTEM_ID.as_bytes().to_vec();
+    let mut sys = st.behaviour.system_id.as_bytes().to_vec();
     sys.push(0);
     let mut lst = list.into_bytes();
     lst.push(0);
@@ -665,21 +689,33 @@ fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
                 return;
             }
             let reply = command(&mut st, conn, &prop, &args);
+            if st.behaviour.unanswered.contains(&prop) {
+                return;
+            }
             let (status, text, is_define_of) = reply;
             let r = reply_frame(txn, service::RESPONSE, rad_kind::REPLY, rad_format::STATUS_TEXT, cause::RESPONSE, &status_text(status, &text), false);
             if prop == "StreamDefine" {
                 // A reply held back for an earlier define on this connection goes out
-                // just ahead of this one's.
-                if st.held_reply.as_ref().is_some_and(|(c, _)| *c == conn)
-                    && let Some((c, held)) = st.held_reply.take()
+                // with this one's: just ahead of it, or just after it.
+                let held = if st.held_reply.as_ref().is_some_and(|(c, _)| *c == conn) { st.held_reply.take() } else { None };
+                let after = st.behaviour.release_held_after;
+                if let Some((c, h)) = &held
+                    && !after
                 {
-                    send_to(&mut st, c, &held);
+                    send_to(&mut st, *c, h);
                 }
                 if is_define_of.is_some() && st.behaviour.hold_define_of == is_define_of {
                     st.behaviour.hold_define_of = None;
                     st.held_reply = Some((conn, r));
-                    return;
+                } else {
+                    send_to(&mut st, conn, &r);
                 }
+                if let Some((c, h)) = held
+                    && after
+                {
+                    send_to(&mut st, c, &h);
+                }
+                return;
             }
             send_to(&mut st, conn, &r);
         }
@@ -816,8 +852,20 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
             std::thread::sleep(due - now);
         }
         let mut st = lock(&state);
+        if st.behaviour.freeze {
+            // Time stands still: no tick, no stamp, no sample.
+            drop(st);
+            continue;
+        }
         st.tick_count += 1;
-        let step = st.behaviour.stamp_step;
+        let step = if st.behaviour.irc5_clock {
+            st.clock_frac += 4.032;
+            let whole = st.clock_frac.floor();
+            st.clock_frac -= whole;
+            whole as u64
+        } else {
+            st.behaviour.stamp_step
+        };
         st.clock_ms = st.clock_ms.wrapping_add(step);
 
         // A network stall that has cleared: what was kept back goes out, in order.

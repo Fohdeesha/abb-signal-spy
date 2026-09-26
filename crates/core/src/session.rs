@@ -124,11 +124,25 @@ pub struct Options {
     /// Seconds per rung of the reconnect ladder; the product uses [`LADDER`].
     pub ladder: Vec<Duration>,
     pub ask: AskPolicy,
-    /// How many times in a row to reconnect when a reconnect gets no samples at
-    /// all. After a network fault the controller holds the broken connection as the
-    /// one it sends to until its keepalive times out (about 16 s), and a connection
-    /// made meanwhile never gets a sample (measured); a later one does.
-    pub orphan_retries: u32,
+    /// After a network fault the controller keeps the broken connection, as the one
+    /// it sends every sample to, until its keepalive times out, and a connection
+    /// subscribed meanwhile never gets a sample (s23 item 16). It lists that
+    /// connection in the handshake until it lets go: measured on the RW6 VC
+    /// (2026-09-27, `tools/abb_vc_held_listing.py`) as one extra entry for this PC,
+    /// gone after 14-16 s. An automatic reconnect that finds exactly that extra entry
+    /// waits for it, up to this long, before taking it for another program's.
+    pub held_wait: Duration,
+    /// How often it looks meanwhile: each look is a connection that only handshakes,
+    /// which changes nothing on the controller when it leaves.
+    pub held_poll: Duration,
+    /// On a virtual controller (reached over loopback): how long every stream may stop
+    /// while the controller still answers and nobody connects or leaves, before the
+    /// session gives up. A VC the PC is too busy for pauses InfoStream and its clock,
+    /// for as long as the load lasts, and answers the handshake in seconds meanwhile
+    /// (measured, tunemaster-testsignals.md s25 item 3): not another program taking
+    /// over. A real controller never did (s24 item 3), and there the fast exit stands.
+    /// Zero: no patience (the tests of the fast exit, which run over loopback).
+    pub vc_pause_patience: Duration,
 }
 
 /// When to ask before taking InfoStream while other RobAPI clients are connected.
@@ -158,9 +172,10 @@ impl Default for Options {
             teardown_wait: Duration::from_millis(1500),
             ladder: LADDER.iter().map(|&s| Duration::from_secs(s)).collect(),
             ask: AskPolicy::Remote,
-            // On the ladder (1, 2, 5, 15, 30 s) plus the wait for samples, five
-            // attempts span about a minute: well past the controller letting go.
-            orphan_retries: 5,
+            // Twice the 16 s keepalive timeout the controllers were measured to let go at.
+            held_wait: Duration::from_secs(30),
+            held_poll: Duration::from_secs(2),
+            vc_pause_patience: Duration::from_secs(120),
         }
     }
 }
@@ -374,7 +389,8 @@ struct TapSlot {
 enum Request {
     Connect(Target),
     Disconnect,
-    SetChannels(Vec<ChannelKey>),
+    /// The channels wanted, and which of them are expected to be text events.
+    SetChannels(Vec<ChannelKey>, BTreeSet<ChannelKey>),
     Answer(bool, Vec<String>),
     ResetInfoStream,
     Shutdown,
@@ -398,6 +414,11 @@ struct Emergency {
     host: String,
     own: Vec<u32>,
     next_txn: u16,
+    /// The InfoStream setup was sent: before it there is nothing to take down.
+    opened: bool,
+    /// Samples came on this connection: it was the tenant, whose StopStream stops
+    /// only its own feed. Anyone else's would stop the tenant's.
+    tenant: bool,
 }
 
 /// The handle. Dropping it tears the session down.
@@ -458,7 +479,13 @@ impl Session {
     /// The channels wanted, in order. At most [`MAX_CHANNELS`]; extras are ignored
     /// and logged. Duplicates are dropped.
     pub fn set_channels(&self, keys: Vec<ChannelKey>) {
-        self.send(Request::SetChannels(keys))
+        self.send(Request::SetChannels(keys, BTreeSet::new()))
+    }
+    /// As [`Session::set_channels`], naming the channels a catalogue says are text
+    /// events: they send only on a change (9875 sent nothing at StartStream on the
+    /// cell), so their silence before a first record is not reported as a fault.
+    pub fn set_channels_expecting_text(&self, keys: Vec<ChannelKey>, text: impl IntoIterator<Item = ChannelKey>) {
+        self.send(Request::SetChannels(keys, text.into_iter().collect()))
     }
     /// The person's answer to the other-clients question, with the clients it was
     /// shown for (the status's `others` at the time). A yes counts only while those
@@ -481,6 +508,12 @@ impl Session {
 
     pub fn status(&self) -> MutexGuard<'_, Status> {
         self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the worker is still there to act on requests: false after an internal
+    /// error ended it (its status then says so), when a new session is needed.
+    pub fn is_running(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
     pub fn log(&self) -> &Arc<LogBook> {
         &self.log
@@ -526,19 +559,31 @@ fn emergency_teardown(e: &Mutex<Emergency>) {
     let mut g = e.lock().unwrap_or_else(|p| p.into_inner());
     let host = g.host.clone();
     let own = std::mem::take(&mut g.own);
+    let (opened, tenant) = (g.opened, g.tenant);
     let mut txn = g.next_txn;
     if let Some(mut s) = g.stream.take() {
-        let _ = s.set_write_timeout(Some(Duration::from_millis(300)));
-        let mut next = || {
-            txn = txn.wrapping_add(1).max(1);
-            txn
-        };
-        let _ = s.write_all(&Command::StopStream.frame(next(), &host));
-        for id in own {
-            let _ = s.write_all(&Command::Undefine(id).frame(next(), &host));
+        // Before the InfoStream setup (a handshake, a question on screen) nothing was
+        // opened: closing is all there is to do.
+        if opened {
+            let _ = s.set_write_timeout(Some(Duration::from_millis(300)));
+            let mut next = || {
+                txn = txn.wrapping_add(1).max(1);
+                txn
+            };
+            // StopStream is controller-wide: only the tenant stopping its own feed.
+            if tenant && !own.is_empty() {
+                let _ = s.write_all(&Command::StopStream.frame(next(), &host));
+            }
+            for &id in &own {
+                let _ = s.write_all(&Command::Undefine(id).frame(next(), &host));
+            }
+            // Those undefines paused every stream, the tenant's too: restart them.
+            if !tenant && !own.is_empty() {
+                let _ = s.write_all(&Command::StartStream.frame(next(), &host));
+            }
+            let _ = s.write_all(&Command::StreamDisconnect.frame(next(), &host));
+            std::thread::sleep(Duration::from_millis(200));
         }
-        let _ = s.write_all(&Command::StreamDisconnect.frame(next(), &host));
-        std::thread::sleep(Duration::from_millis(200));
         let _ = s.shutdown(Shutdown::Both);
     }
 }
@@ -584,8 +629,9 @@ enum Pending {
     Stop,
     UndefineAll,
     Disconnect,
-    /// The handshake sent again because every stream went silent (a liveness check).
-    Probe { sent: Instant },
+    /// The handshake sent again because every stream went silent (a liveness check),
+    /// and how many samples this program had filed when it went out.
+    Probe { sent: Instant, samples: u64 },
 }
 
 struct Chan {
@@ -608,6 +654,9 @@ struct Chan {
     gaps: u64,
     stale_reported: bool,
     store: Option<Arc<Channel>>,
+    /// The window's catalogue says this is a text event: quiet until its first record
+    /// is normal for it.
+    expect_text: bool,
 }
 
 impl Chan {
@@ -628,6 +677,7 @@ impl Chan {
             gaps: 0,
             stale_reported: false,
             store: None,
+            expect_text: false,
         }
     }
     fn stream(&self) -> Option<u32> {
@@ -668,6 +718,8 @@ struct Worker {
     hello_txn: u16,
     txn: u16,
     pending: HashMap<u16, Pending>,
+    /// When each request still pending was sent.
+    sent_at: HashMap<u16, Instant>,
     chans: Vec<Chan>,
     by_stream: HashMap<u32, usize>,
     subscription: Option<u32>,
@@ -698,8 +750,35 @@ struct Worker {
     auto_reconnect: bool,
     /// Samples have arrived on an earlier connection to this target.
     delivered_before: bool,
-    /// Reconnects in a row that got no samples at all.
-    orphan_retries: u32,
+    /// The controller's client list as last known on a connection that worked (its
+    /// handshake, or a liveness check's answer): what an automatic reconnect compares
+    /// its own handshake with before it defines anything. `None` until a deliberate
+    /// connect has one.
+    baseline: Option<Vec<reply::ClientEntry>>,
+    /// This connection's handshake list, which becomes the baseline once the
+    /// connection delivers.
+    candidate: Option<Vec<reply::ClientEntry>>,
+    /// When the last working connection was lost: the controller lets go of a broken
+    /// one within its keepalive timeout of this.
+    lost_at: Option<Instant>,
+    /// The last automatic reconnect found the controller still holding the broken
+    /// connection.
+    held_seen: bool,
+    /// This connection is the one automatic reconnect made after another program's
+    /// exit ended InfoStream; the next one will be (set while leaving for it).
+    leaver_retry: bool,
+    leaver_retry_next: bool,
+    /// The system id of the controller at this target, as last seen: a different one
+    /// at the same address (a cable moved to the next robot) is another controller.
+    system_id: Option<String>,
+    /// Requests with no answer past their time, by kind: said once each.
+    told_unanswered: BTreeSet<&'static str>,
+    /// A virtual controller paused every stream while still answering: waited out
+    /// (see `vc_pause_patience`), since when.
+    vc_paused_since: Option<Instant>,
+    /// When the last liveness check went out: while waiting out a pause they are
+    /// spaced, not sent every tick.
+    last_probe_at: Option<Instant>,
     /// The controller's clock, as best known, when this program last did something
     /// that pauses or resumes delivery (`None`: before any sample arrived).
     own_change_at: Option<u64>,
@@ -763,6 +842,7 @@ impl Worker {
             hello_txn: 0,
             txn: 0,
             pending: HashMap::new(),
+            sent_at: HashMap::new(),
             chans: Vec::new(),
             by_stream: HashMap::new(),
             subscription: None,
@@ -780,7 +860,16 @@ impl Worker {
             last_frame_at: None,
             auto_reconnect: false,
             delivered_before: false,
-            orphan_retries: 0,
+            baseline: None,
+            candidate: None,
+            lost_at: None,
+            held_seen: false,
+            leaver_retry: false,
+            leaver_retry_next: false,
+            system_id: None,
+            told_unanswered: BTreeSet::new(),
+            vc_paused_since: None,
+            last_probe_at: None,
             own_change_at: None,
             own_change_sent: None,
             deferred: VecDeque::new(),
@@ -893,6 +982,7 @@ impl Worker {
                 }
                 if self.target.as_ref().is_some_and(|old| *old != t) {
                     self.fresh_start(&t);
+                    self.system_id = None;
                 }
                 self.target = Some(t);
                 self.established = false;
@@ -901,7 +991,12 @@ impl Worker {
                 self.retry_at = None;
                 self.auto_reconnect = false;
                 self.delivered_before = false;
-                self.orphan_retries = 0;
+                self.baseline = None;
+                self.candidate = None;
+                self.lost_at = None;
+                self.held_seen = false;
+                self.leaver_retry = false;
+                self.leaver_retry_next = false;
                 // A deliberate connect retries what the controller refused last time.
                 for c in &mut self.chans {
                     if matches!(c.state, ChannelState::Refused { .. } | ChannelState::NoReply) {
@@ -912,6 +1007,8 @@ impl Worker {
             }
             Request::Disconnect => {
                 self.retry_at = None;
+                self.held_seen = false;
+                self.leaver_retry_next = false;
                 if self.conn.is_some() {
                     self.emit_mark(Mark::Disconnected);
                     self.begin_teardown(After::Idle);
@@ -919,7 +1016,12 @@ impl Worker {
                     self.set_phase(Phase::Idle);
                 }
             }
-            Request::SetChannels(keys) => self.set_channels(keys),
+            Request::SetChannels(keys, text) => {
+                self.set_channels(keys);
+                for c in &mut self.chans {
+                    c.expect_text = text.contains(&c.key);
+                }
+            }
             Request::Answer(take, shown) => {
                 if self.stage != Stage::Approval || self.conn.is_none() {
                     return;
@@ -1054,9 +1156,10 @@ impl Worker {
         self.counters = Counters::default();
         let now = Instant::now();
         for c in &mut self.chans {
-            let (key, slot, state) = (c.key.clone(), c.slot, std::mem::replace(&mut c.state, ChannelState::Waiting));
+            let (key, slot, state, text) = (c.key.clone(), c.slot, std::mem::replace(&mut c.state, ChannelState::Waiting), c.expect_text);
             *c = Chan::new(key, slot);
             c.state = state;
+            c.expect_text = text;
             c.rate_mark = (now, 0);
         }
         self.log.info(format!("Connecting to a different controller ({t}): the charts start afresh."));
@@ -1138,8 +1241,11 @@ impl Worker {
             e.stream = self.conn.as_ref().and_then(|c| c.stream.try_clone().ok());
             e.host = host;
             e.own.clear();
+            e.opened = false;
+            e.tenant = false;
         }
         self.pending.clear();
+        self.sent_at.clear();
         self.by_stream.clear();
         for c in &mut self.chans {
             if !matches!(c.state, ChannelState::Refused { .. }) {
@@ -1166,6 +1272,10 @@ impl Worker {
         self.last_any_sample = None;
         self.announce = None;
         self.others.clear();
+        self.candidate = None;
+        self.leaver_retry = std::mem::take(&mut self.leaver_retry_next) && self.auto_reconnect;
+        self.vc_paused_since = None;
+        self.last_probe_at = None;
         self.timeline.session_start();
         self.connected_since = Some(Instant::now());
         self.streaming_since = None;
@@ -1213,6 +1323,7 @@ impl Worker {
         e.own.clear();
         drop(e);
         self.pending.clear();
+        self.sent_at.clear();
         self.by_stream.clear();
         self.retiring.clear();
         for c in &mut self.chans {
@@ -1258,9 +1369,66 @@ impl Worker {
             self.own_change_sent = Some(Instant::now());
         }
         self.pending.insert(txn, p);
+        self.sent_at.insert(txn, Instant::now());
         self.emergency.lock().unwrap_or_else(|e| e.into_inner()).next_txn = txn;
         self.write(&f);
         txn
+    }
+
+    /// How long this program's own restart or undefine counts as in play without an
+    /// answer. Patient: a controller that takes longer than the reply timeout to act
+    /// on each of a few pipelined requests must not have its pause read as a
+    /// takeover; but a reply that never comes must not switch the checks off for good.
+    fn own_change_patience(&self) -> Duration {
+        self.opt.reply_timeout * 4
+    }
+
+    /// This program's own define, undefine or restart is in play (sent, and neither
+    /// answered nor past its patience): a pause in delivery now is its own doing.
+    fn own_change_pending(&self) -> bool {
+        let patience = self.own_change_patience();
+        self.restart_needed
+            || self.defines_in_flight()
+            || self.pending.iter().any(|(txn, p)| matches!(p, Pending::Start | Pending::Undefine { .. } | Pending::UndefineAll) && self.sent_at.get(txn).is_some_and(|t| t.elapsed() < patience))
+    }
+
+    /// Requests of a live session that were never answered: a controller that lost a
+    /// reply must not leave the liveness check or the stall switched off for good (a
+    /// pending restart counts as this program's own change, and only one liveness
+    /// check is out at a time). Defines are timed on their own (`defines_timed_out`).
+    fn sweep_unanswered(&mut self, now: Instant) {
+        let late: Vec<(u16, &'static str)> = self
+            .pending
+            .iter()
+            .filter_map(|(txn, p)| {
+                let patience = self.own_change_patience();
+                let (limit, what) = match p {
+                    Pending::Probe { .. } => (self.opt.handshake_timeout, "the liveness check"),
+                    Pending::Start => (patience, "StartStream"),
+                    Pending::Stop => (patience, "StopStream"),
+                    Pending::Undefine { .. } => (patience, "StreamUndefine"),
+                    Pending::UndefineAll => (patience, "StreamUndefineAll"),
+                    _ => return None,
+                };
+                let sent = self.sent_at.get(txn)?;
+                (now.duration_since(*sent) >= limit).then_some((*txn, what))
+            })
+            .collect();
+        for (txn, what) in late {
+            self.pending.remove(&txn);
+            self.sent_at.remove(&txn);
+            if self.told_unanswered.insert(what) {
+                if what == "the liveness check" {
+                    self.log.warn(format!(
+                        "The controller did not answer the liveness check (its handshake, sent again when every stream fell silent) within {:.1} s. Another will be sent when the streams next fall silent; meanwhile a program taking InfoStream is noticed only by the {:.0} s stall.",
+                        self.opt.handshake_timeout.as_secs_f64(),
+                        self.opt.stall_after.as_secs_f64()
+                    ));
+                } else {
+                    self.log.warn(format!("The controller did not answer {what} within {:.1} s; carrying on without the answer.", self.own_change_patience().as_secs_f64()));
+                }
+            }
+        }
     }
 
     /// The connection is gone (read error, peer closed, desync, write failure).
@@ -1274,6 +1442,10 @@ impl Worker {
             return;
         }
         self.emit_mark(Mark::Lost { reason: why.to_string() });
+        if self.had_samples {
+            // The controller may hold this connection a while yet: see `held_wait`.
+            self.lost_at = Some(Instant::now());
+        }
         if self.established {
             self.schedule_reconnect(&format!("connection lost ({why})"));
             return;
@@ -1318,15 +1490,56 @@ impl Worker {
             self.log.warn(format!("This PC's address ({local_ip}) is not in the controller's client list; one of the listed clients is this program."));
         }
         self.emit_mark(Mark::Connected { target: self.target.clone().unwrap_or(Target { host: String::new(), port: 0 }), system_id: announce.system_id.clone() });
-        self.announce = Some(announce);
-        self.others = others;
+        let t = self.target.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        // A different controller behind the same address: every IRC5's service port
+        // is 192.168.125.1, so a cable moved to the next robot reconnects to it.
+        if let (Some(was), Some(now)) = (self.system_id.clone(), announce.system_id.clone())
+            && was != now
+        {
+            if self.auto_reconnect {
+                let reason = format!(
+                    "Connected again to {t}, but it is a different controller (system {now}; before, {was}). Not streaming from it unasked: its values would continue the other controller's charts. Connect again to use it."
+                );
+                self.log.error(reason.clone());
+                self.drop_conn();
+                self.set_phase(Phase::Stopped { reason });
+                return;
+            }
+            let t2 = self.target.clone().unwrap_or(Target { host: String::new(), port: 0 });
+            self.fresh_start(&t2);
+            self.log.warn(format!("{t} is a different controller from the one connected to before (system {now}; before, {was}): the charts start afresh."));
+            self.approved = None;
+            self.baseline = None;
+        }
+        if announce.system_id.is_some() {
+            self.system_id = announce.system_id.clone();
+        }
         let loopback = peer.ip().is_loopback();
-        let unapproved: Vec<&OtherClient> = self.others.iter().filter(|o| !o.pendant && !self.approved.as_ref().is_some_and(|a| a.contains(&o.address))).collect();
         let ask = match self.opt.ask {
             AskPolicy::Remote => !loopback,
             AskPolicy::Always => true,
             AskPolicy::Never => false,
         };
+        let clients = announce.clients.clone();
+        self.announce = Some(announce);
+        self.others = others;
+        // An automatic reconnect defines nothing until the controller's client list
+        // says nobody new came meanwhile: this program's exit, however it leaves,
+        // ends InfoStream for whoever took it since (measured, s24 items 10-11, and
+        // 2026-09-27 even after undefining its own streams first:
+        // `tools/abb_vc_clean_exit.py`).
+        if self.auto_reconnect
+            && let Some(base) = self.baseline.clone()
+            && !self.reconnect_guard(&base, &clients, &local_ip, ask, &t)
+        {
+            return;
+        }
+        if !self.auto_reconnect {
+            // A connection the person made: the reference for the reconnects to come.
+            self.baseline = Some(clients.clone());
+        }
+        self.candidate = Some(clients);
+        let unapproved: Vec<&OtherClient> = self.others.iter().filter(|o| !o.pendant && !self.approved.as_ref().is_some_and(|a| a.contains(&o.address))).collect();
         if ask && !unapproved.is_empty() {
             self.stage = Stage::Approval;
             self.stage_deadline = None;
@@ -1340,6 +1553,71 @@ impl Worker {
         self.begin_preamble();
     }
 
+    /// An automatic reconnect's look at the client list before it sets anything up:
+    /// whether to go on with this connection. If not, it has closed it (having only
+    /// handshaken, which changes nothing on the controller) and said what comes next.
+    ///
+    /// Against the list from before the loss, both of which name this program once:
+    /// one more entry for this PC is the broken connection the controller still
+    /// holds (measured, `held_wait`), to be waited out; anything else new is another
+    /// program, which may be the tenant by now and is never taken from unasked.
+    fn reconnect_guard(&mut self, base: &[reply::ClientEntry], now: &[reply::ClientEntry], local_ip: &str, ask: bool, t: &str) -> bool {
+        let (mut joined, _) = client_changes(base, now);
+        joined.retain(|a| !is_pendant_address(a));
+        let own = joined.iter().filter(|a| a.as_str() == local_ip).count();
+        let others: Vec<String> = joined.into_iter().filter(|a| a != local_ip).collect();
+        let held_may_linger = self.lost_at.is_some_and(|l| l.elapsed() < self.opt.held_wait);
+        if others.is_empty() && own == 1 && held_may_linger {
+            if !self.held_seen {
+                self.log.warn(
+                    "The controller still holds the connection that broke (it lists it until it lets go, about 16 s after the break) and would send it every sample. Waiting for that before setting anything up.",
+                );
+            }
+            self.held_seen = true;
+            self.drop_conn();
+            self.retry_at = Some(Instant::now() + self.opt.held_poll);
+            self.set_phase(Phase::Reconnecting { attempt: self.rung as u32 + 1, retry_in: self.opt.held_poll });
+            return false;
+        }
+        if others.is_empty() && own == 0 {
+            if std::mem::take(&mut self.held_seen) {
+                // This connection was open when the controller let go, and the VC
+                // starves a connection open at that moment (s24 item 10): once more.
+                self.log.info("The controller has let go of the connection that broke; connecting afresh.");
+                self.drop_conn();
+                self.retry_at = Some(Instant::now());
+                self.set_phase(Phase::Reconnecting { attempt: self.rung as u32 + 1, retry_in: Duration::ZERO });
+                return false;
+            }
+            return true;
+        }
+        self.held_seen = false;
+        let lingering = others.is_empty() && own == 1 && self.lost_at.is_some();
+        let mut names = others;
+        if own > 0 {
+            names.push(format!("another program on this PC ({local_ip})"));
+        }
+        let names = names.join(" and ");
+        if ask {
+            // Every other client is asked about afresh.
+            self.approved = None;
+            self.log.warn(format!("While the connection was down, {names} connected to the controller. Asking before taking InfoStream again: it may be showing test signals now."));
+            return true;
+        }
+        let reason = if lingering {
+            format!(
+                "Reconnected to {t}, but one more connection from this PC is listed than before, {:.0} s after the break: another program here, or the controller still holding the connection that broke. Nothing was set up, so as not to take InfoStream from another program. Connect again when it is free.",
+                self.opt.held_wait.as_secs_f64()
+            )
+        } else {
+            format!("While the connection was down, {names} connected to {t} and is still connected. It may be showing test signals now, and taking InfoStream back would stop them, so nothing was set up. Connect again when it is free.")
+        };
+        self.log.error(reason.clone());
+        self.drop_conn();
+        self.set_phase(Phase::Stopped { reason });
+        false
+    }
+
     fn begin_preamble(&mut self) {
         self.stage = Stage::Preamble;
         self.stage_deadline = Some(Instant::now() + self.opt.reply_timeout);
@@ -1349,8 +1627,10 @@ impl Worker {
         let txn = self.next_txn();
         let host = self.conn.as_ref().map(|c| c.host.clone()).unwrap_or_default();
         self.pending.insert(txn, Pending::Subscribe);
+        self.sent_at.insert(txn, Instant::now());
         let f = request::subscribe(txn, &host);
         self.write(&f);
+        self.emergency.lock().unwrap_or_else(|e| e.into_inner()).opened = true;
     }
 
     fn preamble_done(&mut self) {
@@ -1390,7 +1670,6 @@ impl Worker {
         self.stage = Stage::Streaming;
         self.stage_deadline = None;
         self.established = true;
-        self.rung = 0;
         let n = self.chans.iter().filter(|c| c.stream().is_some()).count();
         if n > 0 {
             self.start_stream();
@@ -1437,6 +1716,12 @@ impl Worker {
         if any && (self.restart_needed || !self.started) {
             self.start_stream();
         } else if !any {
+            // No stream of this program's left, but its undefine paused every stream
+            // on the controller: whoever is the tenant waits for a StartStream.
+            if self.restart_needed && self.started {
+                self.send_cmd(Command::StartStream, Pending::Start);
+                self.last_start = Some(Instant::now());
+            }
             self.restart_needed = false;
             self.restart_owed_at = None;
         }
@@ -1455,9 +1740,10 @@ impl Worker {
             return;
         }
         if self.stage == Stage::TearingDown {
-            // Already on the way out; a stronger request (exit) wins.
-            if after == After::Exit {
-                self.after_teardown = After::Exit;
+            // Already on the way out. A stronger request wins: an exit over anything,
+            // and the person's disconnect over an automatic reconnect.
+            if after == After::Exit || (after == After::Idle && matches!(self.after_teardown, After::Retry(_))) {
+                self.after_teardown = after;
             }
             return;
         }
@@ -1472,10 +1758,21 @@ impl Worker {
         if opened {
             // Pipelined, then one wait for all the replies: the VC has answered
             // StreamUndefine anywhere from 10 ms to over a second.
-            self.send_cmd(Command::StopStream, Pending::Stop);
             let own: Vec<u32> = self.chans.iter().filter_map(|c| c.stream()).collect();
-            for s in own {
+            // StopStream is controller-wide: only the tenant (samples came to it)
+            // stops its own feed with it. A session that never got a sample was not
+            // the tenant, and would stop the tenant's.
+            let tenant = self.had_samples;
+            if tenant && !own.is_empty() {
+                self.send_cmd(Command::StopStream, Pending::Stop);
+            }
+            for &s in &own {
                 self.send_cmd(Command::Undefine(s), Pending::Undefine { stream: s });
+            }
+            // Those undefines paused every stream, the tenant's too, until a
+            // StartStream (s23 item 4).
+            if !tenant && !own.is_empty() {
+                self.send_cmd(Command::StartStream, Pending::Start);
             }
             self.send_cmd(Command::StreamDisconnect, Pending::Disconnect);
             self.teardown_deadline = Some(Instant::now() + self.opt.teardown_wait);
@@ -1540,12 +1837,17 @@ impl Worker {
     /// Streams stopped arriving on a live session: InfoStream was very likely taken
     /// by another client.
     fn stalled(&mut self) {
-        let secs = self.opt.stall_after.as_secs_f64();
+        let secs = self.stall_bound().as_secs_f64();
         // Nothing at all since the last sample, keepalives included, fits a stalled
         // network as well as a takeover (the VC sends keepalives rarely while
         // streaming, so their absence proves nothing): say both.
         let silent = self.last_frame_at.is_none_or(|f| self.last_any_sample.is_some_and(|s| f <= s));
-        let reason = if silent {
+        let reason = if self.vc_patient() {
+            format!(
+                "The virtual controller has sent no samples for {secs:.0} s{}. It may have stopped, or the PC may be too busy for it; another program showing signals could also have taken InfoStream. Connect again when it is running.",
+                if silent { ", and has not answered either" } else { "" }
+            )
+        } else if silent {
             format!(
                 "Nothing at all from the controller for {secs:.0} s on a live connection: another tool, such as RobotStudio or TuneMaster, may have taken InfoStream, or the network or the controller stalled. Connect again when it is free."
             )
@@ -1555,6 +1857,18 @@ impl Worker {
             )
         };
         self.quit_quietly(reason, "samples stopped");
+    }
+
+    /// A virtual controller (reached over loopback), with patience for its pauses.
+    fn vc_patient(&self) -> bool {
+        !self.opt.vc_pause_patience.is_zero() && self.conn.as_ref().is_some_and(|c| is_loopback(c.peer.ip()))
+    }
+
+    /// How long every stream may be silent before the session stops: on a virtual
+    /// controller, long enough to wait out a pause of its own (it answers a handshake
+    /// in seconds meanwhile, or not at all while starved); elsewhere, the stall.
+    fn stall_bound(&self) -> Duration {
+        if self.vc_patient() { self.opt.vc_pause_patience.max(self.opt.stall_after) } else { self.opt.stall_after }
     }
 
     /// How long every stream may be silent before the liveness check: the option, or
@@ -1575,7 +1889,9 @@ impl Worker {
     /// on the VC: tunemaster-testsignals.md s24 item 12).
     fn send_probe(&mut self, now: Instant) {
         let txn = self.next_txn();
-        self.pending.insert(txn, Pending::Probe { sent: now });
+        self.pending.insert(txn, Pending::Probe { sent: now, samples: self.counters.samples });
+        self.sent_at.insert(txn, now);
+        self.last_probe_at = Some(now);
         self.emergency.lock().unwrap_or_else(|e| e.into_inner()).next_txn = txn;
         self.counters.liveness_checks += 1;
         self.dirty = true;
@@ -1586,25 +1902,29 @@ impl Worker {
     /// The controller answered the liveness check. TCP delivers in order, so every
     /// sample it sent before answering has arrived by now: if none came since the
     /// check went out, its streams have stopped while it still answers.
-    fn probe_answered(&mut self, frame: &Frame<'_>, sent: Instant) {
+    fn probe_answered(&mut self, frame: &Frame<'_>, sent: Instant, samples_then: u64) {
         if self.stage != Stage::Streaming || !self.started {
             return;
         }
-        // The samples were only held up on the way (a network hiccup).
-        if self.last_any_sample.is_some_and(|s| s > sent) {
+        let now_list = Announce::from_rads(frame.rads(), frame.ctrl1()).clients;
+        // Samples filed since the check went out came before its answer: the streams
+        // were only held up on the way (a network hiccup, or this worker running
+        // behind its queue). Counted, not timed: a frame the reader took in before the
+        // check was sent can be filed after it.
+        if self.counters.samples > samples_then || self.last_any_sample.is_some_and(|s| s > sent) {
+            if self.had_samples {
+                self.baseline = Some(now_list);
+            }
             return;
         }
         // This program changed something meanwhile: that pause is its own.
-        let own_change = self.restart_needed
-            || self.defines_in_flight()
-            || self.pending.values().any(|p| matches!(p, Pending::Start | Pending::Undefine { .. } | Pending::UndefineAll))
-            || self.own_change_sent.is_some_and(|t| t > sent)
-            || self.last_start.is_some_and(|t| t > sent);
+        let own_change = self.own_change_pending() || self.own_change_sent.is_some_and(|t| t > sent) || self.last_start.is_some_and(|t| t > sent);
         if own_change {
             return;
         }
-        let now_list = Announce::from_rads(frame.rads(), frame.ctrl1()).clients;
-        let then_list = self.announce.as_ref().map(|a| a.clients.clone()).unwrap_or_default();
+        // The list as last known on this connection: its handshake's, or the last
+        // liveness check's that found it alive.
+        let then_list = self.baseline.clone().or_else(|| self.announce.as_ref().map(|a| a.clients.clone())).unwrap_or_default();
         let (mut joined, mut left) = client_changes(&then_list, &now_list);
         // A pendant coming or going is not what stopped the streams.
         joined.retain(|a| !is_pendant_address(a));
@@ -1621,13 +1941,49 @@ impl Worker {
                 "another client took InfoStream",
             )
         } else if !left.is_empty() {
+            // Nobody is taking InfoStream: a program that had set up signals left, and
+            // its exit ended InfoStream for every connection (s24 item 11). Only a new
+            // connection gets samples again; connect once more by itself (the
+            // operator's decision, 2026-09-26), through the same checks as any
+            // automatic reconnect.
+            if !self.leaver_retry {
+                let why = format!(
+                    "every stream stopped at once when {} disconnected from the controller (a program that had set up test signals ends InfoStream for every program connected when it leaves); nobody is taking it, so connecting again, once",
+                    names(&left)
+                );
+                self.log.warn(format!("{}.", capitalize(&why)));
+                self.baseline = Some(now_list);
+                self.leaver_retry_next = true;
+                // This program leaves cleanly, but the controller may list its old
+                // connection a moment longer: the reconnect waits that out as it would
+                // a held one, rather than take it for another program.
+                self.lost_at = Some(Instant::now());
+                self.leave_quietly(After::Retry(why), "another client left");
+                return;
+            }
             (
                 format!(
-                    "Every stream stopped at once when {} disconnected from the controller: a program that had set up test signals and leaves can end InfoStream for every program connected. Connect again.",
+                    "Every stream stopped at once when {} disconnected from the controller, again: a program that had set up test signals and leaves ends InfoStream for every program connected. Connect again.",
                     names(&left)
                 ),
                 "another client left",
             )
+        } else if self.vc_patient() {
+            // A virtual controller: the PC too busy for it pauses InfoStream and its
+            // clock alike, and it answers meanwhile, with nobody new (measured, s25
+            // item 3). Waited out, the values shown as stale; each spaced check says
+            // again whether anyone connected, and samples that resume after another
+            // program's setup show it (the stamps skip, or a record type changes).
+            if self.vc_paused_since.is_none() {
+                self.vc_paused_since = Some(Instant::now());
+                self.log.warn(format!(
+                    "Every stream stopped while the virtual controller still answers, and no program connected or left. A virtual controller pauses when the PC is too busy for it: waiting up to {:.0} s for it to carry on, the values shown as stale meanwhile.",
+                    self.opt.vc_pause_patience.as_secs_f64()
+                ));
+            }
+            self.advice = Some("The virtual controller has paused (the PC may be too busy for it). Waiting for it to carry on; the values are stale meanwhile.".into());
+            self.dirty = true;
+            return;
         } else {
             (
                 "Every stream stopped at once while the controller still answers: another program has most likely taken InfoStream (RobotStudio or TuneMaster showing signals, for example), or one that had set up signals has left, which can end InfoStream for every program connected. Stopped straight away, before a newcomer sets up its signals (leaving any later clears them). Connect again when it is free.".to_string(),
@@ -1668,6 +2024,7 @@ impl Worker {
         }
         self.set_phase(Phase::TearingDown);
         self.pending.clear();
+        self.sent_at.clear();
         self.send_cmd(Command::StreamDisconnect, Pending::Disconnect);
         self.teardown_deadline = Some(Instant::now() + self.opt.teardown_wait.min(Duration::from_millis(500)));
     }
@@ -1737,7 +2094,7 @@ impl Worker {
                 // 221, 222, 225 and 9872 each sent their text (the work object, the
                 // tool, a program position) once and then only on change. Quiet is
                 // their normal state, so they are never called stale.
-                if c.stream().is_none() || c.kind == Some(ValueKind::String) {
+                if c.stream().is_none() || c.kind == Some(ValueKind::String) || (c.kind.is_none() && c.expect_text) {
                     continue;
                 }
                 let bound = stale_bound(self.opt.stale_after, c.sample_ms);
@@ -1759,32 +2116,31 @@ impl Worker {
                     }
                 }
             }
-            let own_change_pending = self.restart_needed
-                || self.defines_in_flight()
-                || self.pending.values().any(|p| matches!(p, Pending::Start | Pending::Undefine { .. } | Pending::UndefineAll));
+            self.sweep_unanswered(now);
+            // Frames the reader has taken in and this worker not yet: until they are
+            // filed, silence cannot be judged (a worker held up for a second would
+            // otherwise read its own backlog as every stream stopping).
+            let backlog = self.conn.as_ref().is_some_and(|c| c.queued.load(Ordering::Relaxed) > 0);
+            let own_change_pending = self.own_change_pending();
             let nothing_yet = !self.had_samples
                 && !own_change_pending
+                && !backlog
                 && self.chans.iter().any(|c| c.stream().is_some())
                 && self.last_start.is_some_and(|s| now.duration_since(s) > self.opt.stall_after);
-            // A reconnect that gets nothing, where the connection before it did: after
-            // a network fault the controller keeps sending to the broken connection
-            // until its keepalive times out, and never to one made meanwhile
-            // (measured). Connect again, a bounded number of times.
+            // A reconnect that gets nothing, where the connection before it did. The
+            // reconnect waited out the broken connection the controller held, and
+            // found nobody new in its client list; so another program has most likely
+            // taken InfoStream meanwhile from an address that was listed already.
+            // Stop, once: going again would end its InfoStream each time (s24 item 11).
             if nothing_yet && self.auto_reconnect && self.delivered_before {
-                self.orphan_retries += 1;
-                if self.orphan_retries > self.opt.orphan_retries {
-                    self.quit_quietly(
-                        format!(
-                            "Connected again {} times, but no samples arrive. Another tool, such as RobotStudio or TuneMaster, may have taken InfoStream while the connection was down. Connect again when it is free.",
-                            self.opt.orphan_retries + 1
-                        ),
-                        "no samples after reconnecting",
-                    );
+                let reason = if self.leaver_retry {
+                    "Connected again once, after another program's exit had ended InfoStream, but no samples arrive: another program may have taken InfoStream since. Connect again when it is free.".to_string()
                 } else {
-                    let why = "connected again, but no samples arrive: the controller is most likely still holding the connection that broke (it lets go of it after about 16 s)";
-                    self.log.warn(format!("{}.", capitalize(why)));
-                    self.leave_quietly(After::Retry(why.into()), "no samples after reconnecting");
-                }
+                    "Connected again after the connection was lost, but no samples arrive: another program has most likely taken InfoStream while the connection was down (the controller sends every sample to one program). Connect again when it is free.".to_string()
+                };
+                self.log.error(reason.clone());
+                self.emit_mark(Mark::Lost { reason: "no samples after reconnecting".into() });
+                self.begin_teardown(After::Stopped(reason));
                 return;
             }
             // Nothing at all on this connection, with other programs connected: the
@@ -1806,20 +2162,23 @@ impl Worker {
             // while this program's own define, undefine or restart is in play, the
             // pause is its own.
             let delivering = self.chans.iter().any(|c| c.stream().is_some() && c.session_samples > 0 && c.kind != Some(ValueKind::String));
-            if delivering && !own_change_pending {
+            if delivering && !own_change_pending && !backlog {
                 let since = match (self.last_any_sample, self.last_start) {
                     (Some(a), Some(b)) => a.max(b),
                     (a, b) => a.or(b).unwrap_or(now),
                 };
                 let silent = now.duration_since(since);
-                if silent > self.opt.stall_after {
+                if silent > self.stall_bound() {
                     self.stalled();
                     return;
                 }
                 // Long before the stall: ask whether the controller is still there. A
                 // takeover has to be left before the newcomer defines anything, since
-                // this program's exit clears whatever is defined by then.
-                if silent > self.probe_bound() && !self.pending.values().any(|p| matches!(p, Pending::Probe { .. })) {
+                // this program's exit clears whatever is defined by then. One at a
+                // time, and while a virtual controller's pause is waited out, spaced:
+                // each answer says again whether anyone connected meanwhile.
+                let spaced = self.last_probe_at.is_none_or(|t| now.duration_since(t) >= self.probe_bound());
+                if silent > self.probe_bound() && spaced && !self.pending.values().any(|p| matches!(p, Pending::Probe { .. })) {
                     self.send_probe(now);
                 }
             }
@@ -1889,10 +2248,11 @@ impl Worker {
             return;
         }
         if frame.service() == service::CONTROL
-            && let Some(Pending::Probe { sent }) = self.pending.get(&frame.txn()).cloned()
+            && let Some(Pending::Probe { sent, samples }) = self.pending.get(&frame.txn()).cloned()
         {
             self.pending.remove(&frame.txn());
-            self.probe_answered(&frame, sent);
+            self.sent_at.remove(&frame.txn());
+            self.probe_answered(&frame, sent, samples);
             return;
         }
 
@@ -1902,12 +2262,13 @@ impl Worker {
             if let Some(offset) = sample::find_marker(rad.data) {
                 *self.counters.sample_services.entry(frame.service()).or_default() += 1;
                 *self.counters.marker_offsets.entry(offset).or_default() += 1;
-                self.samples(rad.data, at);
                 handled = true;
+                // On the way out nothing more is filed: the takeover check is off by
+                // then, and what comes after a StopStream need not be this program's.
                 if self.stage == Stage::TearingDown {
-                    // Taken over: nothing more from this frame either.
                     return;
                 }
+                self.samples(rad.data, at);
                 continue;
             }
             if txn != 0 && self.pending.contains_key(&txn) {
@@ -1931,6 +2292,7 @@ impl Worker {
 
     fn reply(&mut self, txn: u16, r: Reply) {
         let Some(p) = self.pending.remove(&txn) else { return };
+        self.sent_at.remove(&txn);
         // The controller has acted on this program's change by now, however long it
         // took: a pause that began up to here is still its own doing.
         if matches!(p, Pending::Define { void: false, .. } | Pending::Undefine { .. } | Pending::UndefineAll | Pending::Start) {
@@ -2215,11 +2577,26 @@ impl Worker {
                 self.log.info(format!("{k}: samples arriving again."));
             }
             self.counters.samples += n as u64;
-            self.had_samples = true;
+            if !self.had_samples {
+                // The tenant now: its StopStream stops only its own feed, its client
+                // list is the reference for a reconnect, and the ladder starts over
+                // (a reconnect that set up but never delivered does not count).
+                self.had_samples = true;
+                self.emergency.lock().unwrap_or_else(|e| e.into_inner()).tenant = true;
+                if let Some(c) = self.candidate.take() {
+                    self.baseline = Some(c);
+                }
+                self.rung = 0;
+                self.leaver_retry = false;
+                self.lost_at = None;
+                self.held_seen = false;
+            }
             self.delivered_before = true;
-            self.orphan_retries = 0;
             self.advice = None;
             self.last_any_sample = Some(at);
+            if let Some(p) = self.vc_paused_since.take() {
+                self.log.info(format!("The virtual controller is sending again, after {:.1} s.", p.elapsed().as_secs_f64()));
+            }
             if taps_active {
                 batches.push(SampleBatch { key: self.chans[idx].key.clone(), kind: rec.kind, raw_ms, timeline_ms: tl, values, arrived });
             }
