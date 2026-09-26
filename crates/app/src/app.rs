@@ -242,6 +242,10 @@ impl SpyApp {
         };
         // Restore the channel set (the controller is not contacted until Connect).
         let saved = app.settings.channels.clone();
+        // Lanes count from 1; 0 is a file that never said (trimmed by hand, or older):
+        // each such channel gets a chart of its own, after every lane the file names,
+        // rather than all of them sharing one with volts beside degrees.
+        app.next_lane = saved.iter().map(|c| c.lane + 1).max().unwrap_or(1).max(1);
         for c in saved {
             if let (Ok(unit), Some(axis)) = (MechUnit::new(&c.unit), Axis::new(c.axis)) {
                 let key = ChannelKey { signal: c.signal, unit, axis };
@@ -249,8 +253,13 @@ impl SpyApp {
                     continue;
                 }
                 let i = app.chans.len();
-                app.next_lane = app.next_lane.max(c.lane + 1);
-                app.chans.push(ChanView { key, color: chan_color(i), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane.max(1), stats: Stats::default() });
+                let lane = if c.lane == 0 {
+                    app.next_lane += 1;
+                    app.next_lane - 1
+                } else {
+                    c.lane
+                };
+                app.chans.push(ChanView { key, color: chan_color(i), radians: c.radians, hold_nonzero: c.hold_nonzero, lane, stats: Stats::default() });
             }
         }
         app.sync_channels();
@@ -848,8 +857,7 @@ impl SpyApp {
                     Level::Warn => theme::WARN,
                     Level::Error => theme::BAD,
                 };
-                let t = spy_core::util::wall_iso(e.wall);
-                ui.label(RichText::new(format!("{}  {}", &t[11..19], e.text)).color(color).monospace());
+                ui.label(RichText::new(view::log_line(e)).color(color).monospace());
             }
         });
     }

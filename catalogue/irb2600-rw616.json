@@ -2,7 +2,7 @@
  "caveat": "Signal numbers, types and rates are what that controller reported. Another robot, another RobotWare version or additional axes may differ; a refusal is shown per channel.",
  "credits": "Names marked TuneMaster were recovered from ABB TuneMaster's signal tables; names marked RAPID manual are ABB's documented test signals. Everything else was identified by measurement.",
  "format": "abb-signal-spy-catalogue",
- "measured_on": "A two-robot IRC5 (IRB 2600-12/1.65 and IRB 2600-20/1.65, RobotWare 6.16.2027), measured 2026-09; record types from a RobotWare 6.16 virtual controller, 2026-09-25.",
+ "measured_on": "A two-robot IRC5 (IRB 2600-12/1.65 and IRB 2600-20/1.65, RobotWare 6.16.2027), measured 2026-09; record types from that controller's typed re-read, 2026-09-26, and from a RobotWare 6.16 virtual controller, 2026-09-25.",
  "signals": [
   {
    "abb": {
@@ -147,7 +147,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -169,7 +169,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -191,7 +191,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -281,16 +281,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Measured joint angle of the axis selected by -Axis. Several redundant copies of the same quantity.",
-   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other.",
+   "description": "Joint angle of the selected axis, arm side. Several redundant copies of the same quantity. Whether it is the measured angle or the commanded reference is not established: the two agree at rest, and 6000-6005, named measured on the same kind of evidence, proved to be the EGM reference. For the measured angle use 4000 (Position).",
+   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other. 1298 on axis 3 read -15.000 deg at rest, the J3 home.",
    "flags": [],
    "group": "g004",
    "joint": null,
-   "name": "Joint angle (measured)",
+   "name": "Joint angle, reference or measured",
    "named": true,
-   "next_test": "",
+   "next_test": "Read beside 4000 and 6000 while a joint moves under EGM: equal to the target at a plateau means reference, settling like 4000 means measured.",
    "number": 224,
-   "open_question": "Why the catalogue carries five copies is unknown.",
+   "open_question": "Measured or commanded; and why the catalogue carries five copies.",
    "ruled_out": "",
    "sample_ms": 24.192,
    "select": "axis",
@@ -326,7 +326,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -880,7 +880,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -903,7 +903,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -926,7 +926,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read -1 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -949,7 +949,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -993,7 +993,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -1008,7 +1008,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -1237,7 +1237,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -1260,7 +1260,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -1283,7 +1283,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read -1 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -1306,7 +1306,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed.",
+   "description": "The arm configuration fields that complete a frozen path-level pose block: 523-526 after 516-522 and 849-852 after 842-848, in the order cf1, cf4, cf6, cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Integer-typed on the RW6 VC and reading 0, 0, -1, 0, exactly like 9888-9891 (which TuneMaster names RobotConfig), and each block sits right after a path-level pose block.",
    "flags": [
     "no_data_2026_09"
@@ -1329,7 +1329,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -1351,7 +1351,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -1393,7 +1393,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -1415,7 +1415,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -1477,7 +1477,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -1622,7 +1622,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -2051,7 +2051,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -2066,7 +2066,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -2346,16 +2346,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Measured joint angle of the axis selected by -Axis. Several redundant copies of the same quantity.",
-   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other.",
+   "description": "Joint angle of the selected axis, arm side. Several redundant copies of the same quantity. Whether it is the measured angle or the commanded reference is not established: the two agree at rest, and 6000-6005, named measured on the same kind of evidence, proved to be the EGM reference. For the measured angle use 4000 (Position).",
+   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other. 1298 on axis 3 read -15.000 deg at rest, the J3 home.",
    "flags": [],
    "group": "g004",
    "joint": null,
-   "name": "Joint angle (measured)",
+   "name": "Joint angle, reference or measured",
    "named": true,
-   "next_test": "",
+   "next_test": "Read beside 4000 and 6000 while a joint moves under EGM: equal to the target at a plateau means reference, settling like 4000 means measured.",
    "number": 1298,
-   "open_question": "Why the catalogue carries five copies is unknown.",
+   "open_question": "Measured or commanded; and why the catalogue carries five copies.",
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
@@ -2502,7 +2502,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -2517,7 +2517,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -2829,7 +2829,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -2844,7 +2844,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -2991,7 +2991,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -3006,7 +3006,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -3101,7 +3101,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -3116,7 +3116,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -3188,7 +3188,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3210,7 +3210,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3232,7 +3232,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 20 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3254,7 +3254,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3276,7 +3276,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 16 with motors off and 18 with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3568,7 +3568,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -3583,7 +3583,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -3591,7 +3591,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3613,7 +3613,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -3655,7 +3655,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -3670,7 +3670,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -3750,8 +3750,8 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle of the axis selected by -Axis, arm side. ABB's own documented test signal.",
-   "evidence": "ABB RAPID TRM 3.86 testsignal names 4000 \"Position, degrees or mm\"; measured value matches the pose the robot was holding to 3.8e-5 relative on both robots.",
+   "description": "Joint angle of the selected axis, arm side, as measured. ABB's own documented test signal.",
+   "evidence": "ABB RAPID TRM 3.86 testsignal names 4000 \"Position, degrees or mm\"; it matches the pose the robot was holding to 3.8e-5 relative on both robots. Under motion on the real cell (ROB_1 J1): it settles after a move (3.0023, 2.9995, then 3.0000 at a +3 deg target), lags the commanded reference during a move, and follows RAPID's own MoveAbsJ, where the EGM reference 6000 does not.",
    "flags": [],
    "joint": null,
    "name": "Position",
@@ -4178,7 +4178,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 2 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -4200,7 +4200,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 6 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -4222,7 +4222,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 4 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -4244,7 +4244,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -4266,7 +4266,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -4288,7 +4288,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 4 with motors off and 0 with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -5338,7 +5338,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -5353,7 +5353,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -5384,16 +5384,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle, with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored.",
-   "evidence": "Identical on every -Axis value; 6001 read -0.5236 rad = -30.00 deg = ROB_2's configured J2 home, and 6002 read -0.4712 = -27.00 deg = its J3 home.",
+   "description": "The joint angle last commanded by externally guided motion (EGM), with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored. Not the measured angle: it equals the commanded target exactly while the arm is still settling, leads the measured position during a move, keeps its last value while EGM is not running (RAPID's own moves do not change it), and reads 0 on all six joints for about 2 s when an EGM session starts. For the measured angle use 4000 (Position).",
+   "evidence": "Real cell, ROB_1 under EGM: at 24 of 24 plateaus (each joint to home +3 and -3 deg) it read the commanded target exactly, to 1e-4 deg, while the EGM feedback differed by up to 0.02 deg; moving J1 from +3 to -3 deg it read 1.79 deg while 4000 read 2.52; through a RAPID MoveAbsJ that took J1 past 1 deg it stayed at the last EGM target; at the start of each EGM session it read 0 on all six joints for about 2 s with J3 at -15 and J5 at 65 deg. At rest it matches the pose held: 6001 read -30.00 deg and 6002 -27.00 deg, ROB_2's J2 and J3 home.",
    "flags": [],
    "joint": 1,
-   "name": "Joint angle J1..J6 (measured)",
+   "name": "Joint reference J1..J6 (EGM)",
    "named": true,
    "next_test": "",
    "number": 6000,
-   "open_question": "",
-   "ruled_out": "",
+   "open_question": "What it reads under other kinds of external guidance, and after a power-up before any EGM session has run.",
+   "ruled_out": "The measured joint angle: the two agree at rest, which is how it was first named, and differ under motion as described.",
    "sample_ms": 4.032,
    "select": "number",
    "type": "float",
@@ -5404,16 +5404,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle, with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored.",
-   "evidence": "Identical on every -Axis value; 6001 read -0.5236 rad = -30.00 deg = ROB_2's configured J2 home, and 6002 read -0.4712 = -27.00 deg = its J3 home.",
+   "description": "The joint angle last commanded by externally guided motion (EGM), with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored. Not the measured angle: it equals the commanded target exactly while the arm is still settling, leads the measured position during a move, keeps its last value while EGM is not running (RAPID's own moves do not change it), and reads 0 on all six joints for about 2 s when an EGM session starts. For the measured angle use 4000 (Position).",
+   "evidence": "Real cell, ROB_1 under EGM: at 24 of 24 plateaus (each joint to home +3 and -3 deg) it read the commanded target exactly, to 1e-4 deg, while the EGM feedback differed by up to 0.02 deg; moving J1 from +3 to -3 deg it read 1.79 deg while 4000 read 2.52; through a RAPID MoveAbsJ that took J1 past 1 deg it stayed at the last EGM target; at the start of each EGM session it read 0 on all six joints for about 2 s with J3 at -15 and J5 at 65 deg. At rest it matches the pose held: 6001 read -30.00 deg and 6002 -27.00 deg, ROB_2's J2 and J3 home.",
    "flags": [],
    "joint": 2,
-   "name": "Joint angle J1..J6 (measured)",
+   "name": "Joint reference J1..J6 (EGM)",
    "named": true,
    "next_test": "",
    "number": 6001,
-   "open_question": "",
-   "ruled_out": "",
+   "open_question": "What it reads under other kinds of external guidance, and after a power-up before any EGM session has run.",
+   "ruled_out": "The measured joint angle: the two agree at rest, which is how it was first named, and differ under motion as described.",
    "sample_ms": 4.032,
    "select": "number",
    "type": "float",
@@ -5424,16 +5424,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle, with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored.",
-   "evidence": "Identical on every -Axis value; 6001 read -0.5236 rad = -30.00 deg = ROB_2's configured J2 home, and 6002 read -0.4712 = -27.00 deg = its J3 home.",
+   "description": "The joint angle last commanded by externally guided motion (EGM), with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored. Not the measured angle: it equals the commanded target exactly while the arm is still settling, leads the measured position during a move, keeps its last value while EGM is not running (RAPID's own moves do not change it), and reads 0 on all six joints for about 2 s when an EGM session starts. For the measured angle use 4000 (Position).",
+   "evidence": "Real cell, ROB_1 under EGM: at 24 of 24 plateaus (each joint to home +3 and -3 deg) it read the commanded target exactly, to 1e-4 deg, while the EGM feedback differed by up to 0.02 deg; moving J1 from +3 to -3 deg it read 1.79 deg while 4000 read 2.52; through a RAPID MoveAbsJ that took J1 past 1 deg it stayed at the last EGM target; at the start of each EGM session it read 0 on all six joints for about 2 s with J3 at -15 and J5 at 65 deg. At rest it matches the pose held: 6001 read -30.00 deg and 6002 -27.00 deg, ROB_2's J2 and J3 home.",
    "flags": [],
    "joint": 3,
-   "name": "Joint angle J1..J6 (measured)",
+   "name": "Joint reference J1..J6 (EGM)",
    "named": true,
    "next_test": "",
    "number": 6002,
-   "open_question": "",
-   "ruled_out": "",
+   "open_question": "What it reads under other kinds of external guidance, and after a power-up before any EGM session has run.",
+   "ruled_out": "The measured joint angle: the two agree at rest, which is how it was first named, and differ under motion as described.",
    "sample_ms": 4.032,
    "select": "number",
    "type": "float",
@@ -5444,16 +5444,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle, with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored.",
-   "evidence": "Identical on every -Axis value; 6001 read -0.5236 rad = -30.00 deg = ROB_2's configured J2 home, and 6002 read -0.4712 = -27.00 deg = its J3 home.",
+   "description": "The joint angle last commanded by externally guided motion (EGM), with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored. Not the measured angle: it equals the commanded target exactly while the arm is still settling, leads the measured position during a move, keeps its last value while EGM is not running (RAPID's own moves do not change it), and reads 0 on all six joints for about 2 s when an EGM session starts. For the measured angle use 4000 (Position).",
+   "evidence": "Real cell, ROB_1 under EGM: at 24 of 24 plateaus (each joint to home +3 and -3 deg) it read the commanded target exactly, to 1e-4 deg, while the EGM feedback differed by up to 0.02 deg; moving J1 from +3 to -3 deg it read 1.79 deg while 4000 read 2.52; through a RAPID MoveAbsJ that took J1 past 1 deg it stayed at the last EGM target; at the start of each EGM session it read 0 on all six joints for about 2 s with J3 at -15 and J5 at 65 deg. At rest it matches the pose held: 6001 read -30.00 deg and 6002 -27.00 deg, ROB_2's J2 and J3 home.",
    "flags": [],
    "joint": 4,
-   "name": "Joint angle J1..J6 (measured)",
+   "name": "Joint reference J1..J6 (EGM)",
    "named": true,
    "next_test": "",
    "number": 6003,
-   "open_question": "",
-   "ruled_out": "",
+   "open_question": "What it reads under other kinds of external guidance, and after a power-up before any EGM session has run.",
+   "ruled_out": "The measured joint angle: the two agree at rest, which is how it was first named, and differ under motion as described.",
    "sample_ms": 4.032,
    "select": "number",
    "type": "float",
@@ -5464,16 +5464,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle, with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored.",
-   "evidence": "Identical on every -Axis value; 6001 read -0.5236 rad = -30.00 deg = ROB_2's configured J2 home, and 6002 read -0.4712 = -27.00 deg = its J3 home.",
+   "description": "The joint angle last commanded by externally guided motion (EGM), with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored. Not the measured angle: it equals the commanded target exactly while the arm is still settling, leads the measured position during a move, keeps its last value while EGM is not running (RAPID's own moves do not change it), and reads 0 on all six joints for about 2 s when an EGM session starts. For the measured angle use 4000 (Position).",
+   "evidence": "Real cell, ROB_1 under EGM: at 24 of 24 plateaus (each joint to home +3 and -3 deg) it read the commanded target exactly, to 1e-4 deg, while the EGM feedback differed by up to 0.02 deg; moving J1 from +3 to -3 deg it read 1.79 deg while 4000 read 2.52; through a RAPID MoveAbsJ that took J1 past 1 deg it stayed at the last EGM target; at the start of each EGM session it read 0 on all six joints for about 2 s with J3 at -15 and J5 at 65 deg. At rest it matches the pose held: 6001 read -30.00 deg and 6002 -27.00 deg, ROB_2's J2 and J3 home.",
    "flags": [],
    "joint": 5,
-   "name": "Joint angle J1..J6 (measured)",
+   "name": "Joint reference J1..J6 (EGM)",
    "named": true,
    "next_test": "",
    "number": 6004,
-   "open_question": "",
-   "ruled_out": "",
+   "open_question": "What it reads under other kinds of external guidance, and after a power-up before any EGM session has run.",
+   "ruled_out": "The measured joint angle: the two agree at rest, which is how it was first named, and differ under motion as described.",
    "sample_ms": 4.032,
    "select": "number",
    "type": "float",
@@ -5484,16 +5484,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Joint angle, with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored.",
-   "evidence": "Identical on every -Axis value; 6001 read -0.5236 rad = -30.00 deg = ROB_2's configured J2 home, and 6002 read -0.4712 = -27.00 deg = its J3 home.",
+   "description": "The joint angle last commanded by externally guided motion (EGM), with the JOINT ENCODED IN THE SIGNAL NUMBER: 6000=J1 ... 6005=J6. The axis setting is ignored. Not the measured angle: it equals the commanded target exactly while the arm is still settling, leads the measured position during a move, keeps its last value while EGM is not running (RAPID's own moves do not change it), and reads 0 on all six joints for about 2 s when an EGM session starts. For the measured angle use 4000 (Position).",
+   "evidence": "Real cell, ROB_1 under EGM: at 24 of 24 plateaus (each joint to home +3 and -3 deg) it read the commanded target exactly, to 1e-4 deg, while the EGM feedback differed by up to 0.02 deg; moving J1 from +3 to -3 deg it read 1.79 deg while 4000 read 2.52; through a RAPID MoveAbsJ that took J1 past 1 deg it stayed at the last EGM target; at the start of each EGM session it read 0 on all six joints for about 2 s with J3 at -15 and J5 at 65 deg. At rest it matches the pose held: 6001 read -30.00 deg and 6002 -27.00 deg, ROB_2's J2 and J3 home.",
    "flags": [],
    "joint": 6,
-   "name": "Joint angle J1..J6 (measured)",
+   "name": "Joint reference J1..J6 (EGM)",
    "named": true,
    "next_test": "",
    "number": 6005,
-   "open_question": "",
-   "ruled_out": "",
+   "open_question": "What it reads under other kinds of external guidance, and after a power-up before any EGM session has run.",
+   "ruled_out": "The measured joint angle: the two agree at rest, which is how it was first named, and differ under motion as described.",
    "sample_ms": 4.032,
    "select": "number",
    "type": "float",
@@ -5524,16 +5524,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Measured joint angle of the axis selected by -Axis. Several redundant copies of the same quantity.",
-   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other.",
+   "description": "Joint angle of the selected axis, arm side. Several redundant copies of the same quantity. Whether it is the measured angle or the commanded reference is not established: the two agree at rest, and 6000-6005, named measured on the same kind of evidence, proved to be the EGM reference. For the measured angle use 4000 (Position).",
+   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other. 1298 on axis 3 read -15.000 deg at rest, the J3 home.",
    "flags": [],
    "group": "g004",
    "joint": null,
-   "name": "Joint angle (measured)",
+   "name": "Joint angle, reference or measured",
    "named": true,
-   "next_test": "",
+   "next_test": "Read beside 4000 and 6000 while a joint moves under EGM: equal to the target at a plateau means reference, settling like 4000 means measured.",
    "number": 6008,
-   "open_question": "Why the catalogue carries five copies is unknown.",
+   "open_question": "Measured or commanded; and why the catalogue carries five copies.",
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
@@ -5698,11 +5698,11 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Byte-identical second copy of 6000-6005.",
-   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots.",
+   "description": "Byte-identical second copy of 6000-6005: the joint angle last commanded by externally guided motion, not the measured one.",
+   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots. That 6000-6005 is the EGM reference was shown on the real cell under motion.",
    "flags": [],
    "joint": 1,
-   "name": "Joint angle J1..J6 (duplicate)",
+   "name": "Joint reference J1..J6 (EGM, duplicate)",
    "named": true,
    "next_test": "",
    "number": 6020,
@@ -5718,11 +5718,11 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Byte-identical second copy of 6000-6005.",
-   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots.",
+   "description": "Byte-identical second copy of 6000-6005: the joint angle last commanded by externally guided motion, not the measured one.",
+   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots. That 6000-6005 is the EGM reference was shown on the real cell under motion.",
    "flags": [],
    "joint": 2,
-   "name": "Joint angle J1..J6 (duplicate)",
+   "name": "Joint reference J1..J6 (EGM, duplicate)",
    "named": true,
    "next_test": "",
    "number": 6021,
@@ -5738,11 +5738,11 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Byte-identical second copy of 6000-6005.",
-   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots.",
+   "description": "Byte-identical second copy of 6000-6005: the joint angle last commanded by externally guided motion, not the measured one.",
+   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots. That 6000-6005 is the EGM reference was shown on the real cell under motion.",
    "flags": [],
    "joint": 3,
-   "name": "Joint angle J1..J6 (duplicate)",
+   "name": "Joint reference J1..J6 (EGM, duplicate)",
    "named": true,
    "next_test": "",
    "number": 6022,
@@ -5758,11 +5758,11 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Byte-identical second copy of 6000-6005.",
-   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots.",
+   "description": "Byte-identical second copy of 6000-6005: the joint angle last commanded by externally guided motion, not the measured one.",
+   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots. That 6000-6005 is the EGM reference was shown on the real cell under motion.",
    "flags": [],
    "joint": 4,
-   "name": "Joint angle J1..J6 (duplicate)",
+   "name": "Joint reference J1..J6 (EGM, duplicate)",
    "named": true,
    "next_test": "",
    "number": 6023,
@@ -5778,11 +5778,11 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Byte-identical second copy of 6000-6005.",
-   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots.",
+   "description": "Byte-identical second copy of 6000-6005: the joint angle last commanded by externally guided motion, not the measured one.",
+   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots. That 6000-6005 is the EGM reference was shown on the real cell under motion.",
    "flags": [],
    "joint": 5,
-   "name": "Joint angle J1..J6 (duplicate)",
+   "name": "Joint reference J1..J6 (EGM, duplicate)",
    "named": true,
    "next_test": "",
    "number": 6024,
@@ -5798,11 +5798,11 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Byte-identical second copy of 6000-6005.",
-   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots.",
+   "description": "Byte-identical second copy of 6000-6005: the joint angle last commanded by externally guided motion, not the measured one.",
+   "evidence": "Alias clusters C014-C019: identical to 6000-6005 on every sample of every axis of both robots. That 6000-6005 is the EGM reference was shown on the real cell under motion.",
    "flags": [],
    "joint": 6,
-   "name": "Joint angle J1..J6 (duplicate)",
+   "name": "Joint reference J1..J6 (EGM, duplicate)",
    "named": true,
    "next_test": "",
    "number": 6025,
@@ -5838,16 +5838,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Measured joint angle of the axis selected by -Axis. Several redundant copies of the same quantity.",
-   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other.",
+   "description": "Joint angle of the selected axis, arm side. Several redundant copies of the same quantity. Whether it is the measured angle or the commanded reference is not established: the two agree at rest, and 6000-6005, named measured on the same kind of evidence, proved to be the EGM reference. For the measured angle use 4000 (Position).",
+   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other. 1298 on axis 3 read -15.000 deg at rest, the J3 home.",
    "flags": [],
    "group": "g004",
    "joint": null,
-   "name": "Joint angle (measured)",
+   "name": "Joint angle, reference or measured",
    "named": true,
-   "next_test": "",
+   "next_test": "Read beside 4000 and 6000 while a joint moves under EGM: equal to the target at a plateau means reference, settling like 4000 means measured.",
    "number": 6028,
-   "open_question": "Why the catalogue carries five copies is unknown.",
+   "open_question": "Measured or commanded; and why the catalogue carries five copies.",
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
@@ -6174,7 +6174,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 2 with motors off and 4 with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6196,7 +6196,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 2 with motors off and 4 with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6218,7 +6218,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and 0 with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6385,7 +6385,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6429,7 +6429,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -6444,7 +6444,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -6496,7 +6496,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6518,7 +6518,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6540,7 +6540,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6562,7 +6562,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6584,7 +6584,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -6964,7 +6964,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -6979,7 +6979,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7128,7 +7128,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7143,7 +7143,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7151,7 +7151,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7166,7 +7166,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7174,7 +7174,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7189,7 +7189,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7197,7 +7197,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7212,7 +7212,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7220,7 +7220,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7235,7 +7235,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7243,7 +7243,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7258,7 +7258,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7266,7 +7266,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7281,7 +7281,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7289,7 +7289,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7304,7 +7304,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7312,7 +7312,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7327,7 +7327,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7335,7 +7335,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7350,7 +7350,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7358,7 +7358,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7373,7 +7373,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7381,7 +7381,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7396,7 +7396,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7404,7 +7404,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7419,7 +7419,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7427,7 +7427,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7442,7 +7442,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7450,7 +7450,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7465,7 +7465,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7473,7 +7473,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7488,7 +7488,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7543,7 +7543,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7558,7 +7558,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7566,7 +7566,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7581,7 +7581,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7589,7 +7589,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and 1 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7604,7 +7604,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7612,7 +7612,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7627,7 +7627,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7635,7 +7635,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 1 with motors off and 0 with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7650,7 +7650,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -7658,7 +7658,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -7673,7 +7673,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -10799,7 +10799,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "physical",
@@ -10814,7 +10814,7 @@
    "ruled_out": "",
    "sample_ms": 4.032,
    "select": "axis",
-   "type": null,
+   "type": "int",
    "units": "",
    "vc": false
   },
@@ -10907,17 +10907,17 @@
    "category": "program state",
    "cell": true,
    "confidence": "probable",
-   "description": "Integer flag from TuneMaster's signal table (FinePoint). Integer-typed, 24 ms.",
-   "evidence": "Named FinePoint in TuneMaster's signal table; integer-typed on the RW6 VC, reading 0 with RAPID stopped.",
+   "description": "Integer flag from TuneMaster's signal table (FinePoint). Integer-typed, 24 ms. On the measured cell it read 0 with motors off and with a robot armed.",
+   "evidence": "Named FinePoint in TuneMaster's signal table. On the real cell it read 1 at the fine point that ends RAPID's homing move, and 0 at every other once-a-second reading over 20 minutes (motors off, holding and moving under EGM); 0 on the RW6 VC with RAPID stopped.",
    "flags": [
     "no_data_2026_09"
    ],
    "joint": null,
    "name": "Fine point",
    "named": true,
-   "next_test": "Run a RAPID move to a fine point and watch it.",
+   "next_test": "Log it at 24 ms through a RAPID program with fine and zone points.",
    "number": 9869,
-   "open_question": "What sets it: presumably a move ending in a fine point.",
+   "open_question": "How long it stays 1, and whether a zone point ever sets it.",
    "ruled_out": "",
    "sample_ms": 24.192,
    "select": "robot",
@@ -10934,7 +10934,7 @@
    "category": "program state",
    "cell": true,
    "confidence": "probable",
-   "description": "Integer flag from TuneMaster's signal table (ZoneLeft). Integer-typed, 24 ms.",
+   "description": "Integer flag from TuneMaster's signal table (ZoneLeft). Integer-typed, 24 ms. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Named ZoneLeft in TuneMaster's signal table; integer-typed on the RW6 VC, reading 0 with RAPID stopped.",
    "flags": [
     "no_data_2026_09"
@@ -10961,7 +10961,7 @@
    "category": "program state",
    "cell": true,
    "confidence": "probable",
-   "description": "Integer flag from TuneMaster's signal table (ZoneEntered). Integer-typed, 24 ms.",
+   "description": "Integer flag from TuneMaster's signal table (ZoneEntered). Integer-typed, 24 ms. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "Named ZoneEntered in TuneMaster's signal table; integer-typed on the RW6 VC, reading 0 with RAPID stopped.",
    "flags": [
     "no_data_2026_09"
@@ -11100,16 +11100,16 @@
    "category": "joint position",
    "cell": true,
    "confidence": "confirmed",
-   "description": "Measured joint angle of the axis selected by -Axis. Several redundant copies of the same quantity.",
-   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other.",
+   "description": "Joint angle of the selected axis, arm side. Several redundant copies of the same quantity. Whether it is the measured angle or the commanded reference is not established: the two agree at rest, and 6000-6005, named measured on the same kind of evidence, proved to be the EGM reference. For the measured angle use 4000 (Position).",
+   "evidence": "Equals the pose the robot was holding on all six axes of both robots, relative error 3.3e-5 to 3.4e-4. 6008 and 6028 are byte-identical to each other. 1298 on axis 3 read -15.000 deg at rest, the J3 home.",
    "flags": [],
    "group": "g004",
    "joint": null,
-   "name": "Joint angle (measured)",
+   "name": "Joint angle, reference or measured",
    "named": true,
-   "next_test": "",
+   "next_test": "Read beside 4000 and 6000 while a joint moves under EGM: equal to the target at a plateau means reference, settling like 4000 means measured.",
    "number": 9876,
-   "open_question": "Why the catalogue carries five copies is unknown.",
+   "open_question": "Measured or commanded; and why the catalogue carries five copies.",
    "ruled_out": "",
    "sample_ms": 24.192,
    "select": "axis",
@@ -11121,7 +11121,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -11419,7 +11419,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed.",
+   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "TuneMaster's signal table names 9888-9891 RobotConfig Cf1/Cf4/Cf6/CfX. Integer-typed on the RW6 VC, reading 0, 0, -1, 0. They sit right after the frozen path-level pose block 9881-9887.",
    "flags": [
     "no_data_2026_09"
@@ -11446,7 +11446,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed.",
+   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "TuneMaster's signal table names 9888-9891 RobotConfig Cf1/Cf4/Cf6/CfX. Integer-typed on the RW6 VC, reading 0, 0, -1, 0. They sit right after the frozen path-level pose block 9881-9887.",
    "flags": [
     "no_data_2026_09"
@@ -11473,7 +11473,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed.",
+   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed. On the measured cell it read -1 with motors off and with a robot armed.",
    "evidence": "TuneMaster's signal table names 9888-9891 RobotConfig Cf1/Cf4/Cf6/CfX. Integer-typed on the RW6 VC, reading 0, 0, -1, 0. They sit right after the frozen path-level pose block 9881-9887.",
    "flags": [
     "no_data_2026_09"
@@ -11500,7 +11500,7 @@
    "category": "cartesian pose",
    "cell": true,
    "confidence": "probable",
-   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed.",
+   "description": "The arm configuration part of the path-level pose, one signal number per field: 9888 cf1, 9889 cf4, 9890 cf6, 9891 cfx. Integer-typed. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "TuneMaster's signal table names 9888-9891 RobotConfig Cf1/Cf4/Cf6/CfX. Integer-typed on the RW6 VC, reading 0, 0, -1, 0. They sit right after the frozen path-level pose block 9881-9887.",
    "flags": [
     "no_data_2026_09"
@@ -11764,7 +11764,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -11786,7 +11786,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -11808,7 +11808,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -11830,7 +11830,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -11852,7 +11852,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 0 with motors off and with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"
@@ -11874,7 +11874,7 @@
    "category": "",
    "cell": true,
    "confidence": "open",
-   "description": "Valid on the measured cell, but it returned no data to the float-only decoder used in 2026-09; it may be integer- or string-typed. On the RW6 virtual controller it is int-typed.",
+   "description": "Integer-typed on the measured cell (the float-only decoder used before could not read it); its meaning is still open. On the measured cell it read 4 with motors off and 7 with a robot armed.",
    "evidence": "",
    "flags": [
     "no_data_2026_09"

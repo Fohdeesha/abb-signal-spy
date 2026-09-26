@@ -25,6 +25,8 @@ fn opts() -> Options {
         reply_timeout: Duration::from_millis(800),
         stale_after: Duration::from_millis(300),
         stall_after: Duration::from_millis(1000),
+        // Past the stale bound, so a dead feed shows stale before it stops.
+        probe_after: Duration::from_millis(500),
         teardown_wait: Duration::from_millis(1000),
         ladder: vec![Duration::from_millis(100), Duration::from_millis(200), Duration::from_millis(400)],
         ask: AskPolicy::Never,
@@ -506,12 +508,17 @@ fn channels_can_change_while_streaming() {
     assert!(wait_for(2000, || samples(&s, &a) > na + 5));
     // Removed mid-stream: undefined, and the rest keeps delivering (it stops unless
     // StartStream follows the undefine).
+    let starts = || fake.seen_props().iter().filter(|p| *p == "StartStream").count();
+    let started_before = starts();
     s.set_channels(vec![c.clone()]);
     assert!(wait_for(2000, || fake.streams().len() == 1), "{:?}", fake.streams());
+    assert!(wait_for(2000, || starts() > started_before), "no StartStream followed the undefine: {:?}", fake.seen_props());
+    // The pause shows as a gap once delivery resumes. Counting samples instead races:
+    // the status can still be catching up on samples sent before the pause.
+    assert!(wait_for(2000, || s.status().channels.iter().all(|ch| ch.gaps >= 1)), "the pauses were real: {:?}", s.status().channels);
     let nc = samples(&s, &c);
     assert!(wait_for(2000, || samples(&s, &c) > nc + 10), "delivery stopped after a mid-stream undefine");
     assert!(s.store().get(&a).is_some(), "a removed channel's history is the window's to drop, not the session's");
-    assert!(s.status().channels.iter().all(|ch| ch.gaps >= 1), "the pauses were real: {:?}", s.status().channels);
     assert_eq!(phase(&s), Phase::Streaming, "{}", log_text(&s));
     // The removed channel's last samples, still on their way when it was undefined,
     // are neither a channel's nor another client's.
@@ -626,9 +633,9 @@ fn another_tool_taking_infostream_is_caught_before_its_signals_show() {
     b.send(Command::UndefineAll);
     b.define(0, 4002, 1);
     b.define(1, 4000, 3);
-    b.send(Command::StartStream);
     let ids: Vec<(u32, u32)> = fake.streams().iter().map(|s| (s.0, s.1)).collect();
     assert_eq!(ids, vec![(214, 4000), (215, 4002)], "the fake must hand out the freed ids, as the VC does");
+    b.send(Command::StartStream);
 
     assert!(wait_for(3000, || matches!(phase(&a), Phase::Stopped { .. })), "{:?}\n{}", phase(&a), log_text(&a));
     let reason = stopped_reason(&a);
@@ -643,9 +650,116 @@ fn another_tool_taking_infostream_is_caught_before_its_signals_show() {
     // other tool's.
     let a_tail: Vec<String> = fake.seen()[before..].iter().filter(|x| x.conn == 1).map(|x| x.property.clone()).collect();
     assert_eq!(a_tail, vec!["StreamDisconnect".to_string()], "{a_tail:?}");
-    assert_eq!(fake.streams().len(), 2, "the other tool's streams must be left alone");
+    // Yet they are gone: the first subscriber's exit, whatever it sends, clears every
+    // stream on the controller (measured 2026-09-26, tunemaster-testsignals.md s24
+    // items 9-10). Only leaving before they are defined spares them.
+    assert!(wait_for(1000, || fake.streams().is_empty()), "{:?}", fake.streams());
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(fake.connections_total(), 2, "it went back for InfoStream");
+}
+
+#[test]
+fn a_takeover_is_left_before_the_newcomer_sets_up_its_signals() {
+    // Measured 2026-09-26 (tunemaster-testsignals.md s24 items 9-10): this program's
+    // exit, whatever it sends, clears every stream on the controller, the newcomer's
+    // included. The bridge's test-signal client clears every stream, then waits
+    // 500 ms before its first define: leaving inside that wait spares all of it.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let a = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    a.set_channels(vec![k.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&k))));
+    let before = fake.seen().len();
+    let mut b = OtherTool::connect(&fake, Duration::from_millis(20));
+    b.send(Command::StreamConnect);
+    b.send(Command::UndefineAll);
+    // The newcomer's wait; this test's probe_after is 500 ms.
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(matches!(phase(&a), Phase::Stopped { .. }), "still {:?} when the newcomer defines\n{}", phase(&a), log_text(&a));
+    b.define(0, 4002, 1);
+    b.define(1, 4000, 3);
+    std::thread::sleep(Duration::from_millis(300));
+    let ids: Vec<(u32, u32)> = fake.streams().iter().map(|s| (s.0, s.1)).collect();
+    assert_eq!(ids, vec![(214, 4000), (215, 4002)], "the newcomer's streams must survive");
+    let reason = stopped_reason(&a);
+    assert!(reason.contains("taken InfoStream"), "{reason}");
+    assert!(reason.contains("on this PC"), "the newcomer is named: {reason}");
+    // Quietly, as ever: StreamDisconnect only.
+    let a_tail: Vec<String> = fake.seen()[before..].iter().filter(|x| x.conn == 1).map(|x| x.property.clone()).collect();
+    assert_eq!(a_tail, vec!["StreamDisconnect".to_string()], "{a_tail:?}");
+    assert_eq!(a.status().counters.liveness_checks, 1);
+}
+
+#[test]
+fn a_network_stall_that_clears_is_not_a_takeover() {
+    // Everything held on the way (samples, replies), then delivered in order: the
+    // samples still in flight arrive before the answer to the liveness check, so the
+    // check sees them and the session carries on.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let a = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    a.set_channels(vec![k.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&k))));
+    fake.with(|b| b.hold_delivery = true);
+    assert!(wait_for(2000, || a.status().counters.liveness_checks == 1), "no liveness check\n{}", log_text(&a));
+    std::thread::sleep(Duration::from_millis(100));
+    fake.with(|b| b.hold_delivery = false);
+    let n = samples(&a, &k);
+    assert!(wait_for(2000, || samples(&a, &k) > n + 50), "{:?}\n{}", phase(&a), log_text(&a));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(phase(&a), Phase::Streaming, "{}", log_text(&a));
+}
+
+#[test]
+fn a_program_leaving_that_ends_infostream_is_named() {
+    // Measured on the VC (s24 item 11): a client that set up streams and leaves ends
+    // InfoStream for every program still connected.
+    let mut beh = Behaviour::default();
+    beh.extra_clients = vec!["192.0.2.9".into()];
+    let fake = FakeController::start(beh).unwrap();
+    let a = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    a.set_channels(vec![k.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&k))));
+    fake.with(|b| {
+        b.extra_clients.clear();
+        b.mute_all = true;
+    });
+    assert!(wait_for(2000, || matches!(phase(&a), Phase::Stopped { .. })), "{:?}\n{}", phase(&a), log_text(&a));
+    let reason = stopped_reason(&a);
+    assert!(reason.contains("192.0.2.9") && reason.contains("disconnected"), "{reason}");
+}
+
+#[test]
+fn a_change_of_this_programs_own_while_the_check_is_out_is_not_a_takeover() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut o = opts();
+    o.stall_after = Duration::from_secs(3);
+    let a = spawn(o);
+    let x = key(6000, "ROB_1", 1);
+    let y = key(6001, "ROB_1", 1);
+    a.set_channels(vec![x.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&x))));
+    // A slow controller (every request answered 600 ms late), and the feed pauses.
+    fake.with(|b| {
+        b.reply_delay = Duration::from_millis(600);
+        b.mute_all = true;
+    });
+    assert!(wait_for(2000, || a.status().counters.liveness_checks == 1), "no liveness check\n{}", log_text(&a));
+    // While the check is out the person adds a channel: its define pauses delivery
+    // until this program's StartStream, so the silence is now its own doing.
+    a.set_channels(vec![x.clone(), y.clone()]);
+    // The answer goes out with still no sample since the check (the define is
+    // queued behind it on the slow controller); only then does the feed come back.
+    assert!(wait_for(3000, || fake.handshakes() == 2), "the check was never answered");
+    std::thread::sleep(Duration::from_millis(100));
+    fake.with(|b| b.mute_all = false);
+    assert!(wait_for(5000, || samples(&a, &y) > 20), "{:?}\n{}", phase(&a), log_text(&a));
+    assert_eq!(phase(&a), Phase::Streaming, "{}", log_text(&a));
 }
 
 #[test]
@@ -958,8 +1072,8 @@ fn a_takeover_of_a_channel_that_has_not_delivered_yet_is_caught() {
     let mut b = OtherTool::connect(&fake, Duration::from_millis(20));
     b.send(Command::UndefineAll);
     b.define(0, 4002, 1);
-    b.send(Command::StartStream);
     assert_eq!(fake.streams().first().map(|s| (s.0, s.1)), Some((215, 4002)));
+    b.send(Command::StartStream);
     assert!(wait_for(3000, || matches!(phase(&a), Phase::Stopped { .. })), "{:?}\n{}", phase(&a), log_text(&a));
     assert!(stopped_reason(&a).contains("taken InfoStream"), "{}", stopped_reason(&a));
     assert!(history(&a, &k).is_empty(), "another tool's signal was filed under a silent channel: {:?}", &history(&a, &k)[..3.min(history(&a, &k).len())]);

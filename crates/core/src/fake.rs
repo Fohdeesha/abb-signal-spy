@@ -21,7 +21,17 @@
 //!   sends (StartStream, SUBSCRIBE again); only a connection that subscribes after
 //!   it becomes the new tenant (measured 2026-09-25, `tools/abb_vc_handover.py`)
 //! * a define or undefine while streaming stops delivery until StartStream
-//! * a closed connection's streams are reaped
+//! * a closed connection's streams are reaped, and more (measured 2026-09-26,
+//!   tunemaster-testsignals.md s24 items 9-11): when the tenant's connection closes,
+//!   however it leaves, **every** stream goes, another connection's included; when a
+//!   connection that defined a stream closes, every stream goes too and every
+//!   subscriber still connected gets nothing more (only a new connection does). A
+//!   connection that only handshook changes nothing when it leaves. One difference
+//!   is not modelled: after the tenant left, the VC also starved a connection that had
+//!   connected but not yet subscribed, where the real IRC5 served it; the fake does
+//!   what the IRC5 did
+//! * the handshake is answered whenever it is sent, mid-session too, with the
+//!   current client list (s24 item 12)
 //! * the AYA keepalive with ctrl 4000/16000; a zeroed reply drops the connection
 //!   at once, no reply drops it at the timeout
 //!
@@ -129,8 +139,13 @@ struct Conn {
     id: usize,
     writer: TcpStream,
     subscribed: bool,
-    /// Subscribed while another connection was the tenant: never becomes one.
+    /// Subscribed while another connection was the tenant, or still subscribed when
+    /// another connection's streams were torn down: never gets a sample again.
     orphan: bool,
+    /// Defined a stream at some point: its leaving tears InfoStream down.
+    defined: bool,
+    /// Bytes kept back while `hold_delivery` is set.
+    held: Vec<u8>,
     /// Broken, but the controller has not noticed: kept (as the tenant, if it was)
     /// until then, though nothing reaches the client.
     zombie_until: Option<Instant>,
@@ -166,6 +181,10 @@ pub struct Behaviour {
     pub extra_clients: Vec<String>,
     /// Refuse the next define of each of these signals with this status, once.
     pub refuse_next: HashMap<u32, i64>,
+    /// A stall on the network: everything for the clients (samples, replies,
+    /// keepalives) is kept back, then delivered in order when this is cleared, as TCP
+    /// delivers after a hiccup. The controller carries on meanwhile.
+    pub hold_delivery: bool,
 }
 
 impl Default for Behaviour {
@@ -208,6 +227,7 @@ impl Default for Behaviour {
             mute_handshake: false,
             extra_clients: Vec::new(),
             refuse_next: HashMap::new(),
+            hold_delivery: false,
         }
     }
 }
@@ -227,6 +247,7 @@ struct State {
     held_reply: Option<(usize, Vec<u8>)>,
     connections_total: usize,
     samples_sent: u64,
+    handshakes: u64,
 }
 
 pub struct FakeController {
@@ -260,6 +281,7 @@ impl FakeController {
             held_reply: None,
             connections_total: 0,
             samples_sent: 0,
+            handshakes: 0,
         }));
         let running = Arc::new(AtomicBool::new(true));
         let mut threads = Vec::new();
@@ -311,6 +333,10 @@ impl FakeController {
     }
     pub fn samples_sent(&self) -> u64 {
         lock(&self.state).samples_sent
+    }
+    /// Handshake (control) frames received, from every connection.
+    pub fn handshakes(&self) -> u64 {
+        lock(&self.state).handshakes
     }
     pub fn clock_ms(&self) -> u64 {
         lock(&self.state).clock_ms
@@ -387,8 +413,16 @@ fn broadcast(st: &mut State, bytes: &[u8]) {
 }
 
 fn send_to(st: &mut State, conn: usize, bytes: &[u8]) {
+    let hold = st.behaviour.hold_delivery;
     let failed = match st.conns.get_mut(&conn) {
-        Some(c) => c.writer.write_all(bytes).is_err(),
+        Some(c) if hold => {
+            c.held.extend_from_slice(bytes);
+            false
+        }
+        Some(c) => {
+            let held = std::mem::take(&mut c.held);
+            (!held.is_empty() && c.writer.write_all(&held).is_err()) || c.writer.write_all(bytes).is_err()
+        }
         None => false,
     };
     if failed {
@@ -407,11 +441,26 @@ fn close_conn(st: &mut State, conn: usize) {
     if st.conns.get(&conn).is_some_and(|c| c.zombie_until.is_some_and(|t| Instant::now() < t)) {
         return;
     }
-    if let Some(c) = st.conns.remove(&conn) {
-        let _ = c.writer.shutdown(Shutdown::Both);
+    let was_tenant = tenant(st) == Some(conn);
+    let Some(c) = st.conns.remove(&conn) else { return };
+    let _ = c.writer.shutdown(Shutdown::Both);
+    if was_tenant {
+        // s24 item 10: the tenant's exit, whatever it sent, clears every stream.
+        st.streams.clear();
+    } else if c.defined {
+        // s24 item 11: so does the exit of a connection that defined a stream, and
+        // the subscribers left get nothing more on their connections. Not a broken
+        // connection the controller still holds: that one keeps the tenancy until it
+        // lets go (s23 item 16), and what a leaving client does to it is unmeasured.
+        st.streams.clear();
+        for other in st.conns.values_mut() {
+            if other.subscribed && other.zombie_until.is_none() {
+                other.orphan = true;
+            }
+        }
+    } else {
+        st.streams.retain(|_, s| s.owner != conn);
     }
-    // Reaped on disconnect, as measured on the VC.
-    st.streams.retain(|_, s| s.owner != conn);
     if st.streams.is_empty() {
         st.streaming = false;
     }
@@ -430,7 +479,7 @@ fn accept_loop(listener: TcpListener, state: Arc<Mutex<State>>, running: Arc<Ato
                     let id = st.next_conn;
                     st.next_conn += 1;
                     st.connections_total += 1;
-                    st.conns.insert(id, Conn { id, writer, subscribed: false, orphan: false, zombie_until: None, last_aya_answer: Instant::now(), peer });
+                    st.conns.insert(id, Conn { id, writer, subscribed: false, orphan: false, defined: false, held: Vec::new(), zombie_until: None, last_aya_answer: Instant::now(), peer });
                     id
                 };
                 let (state, running) = (state.clone(), running.clone());
@@ -548,6 +597,7 @@ fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
     let mut st = lock(state);
     match frame.service() {
         service::CONTROL => {
+            st.handshakes += 1;
             if !st.behaviour.mute_handshake {
                 let r = handshake_reply(&st, frame.txn());
                 send_to(&mut st, conn, &r);
@@ -699,6 +749,9 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
                 id
             };
             st.streams.insert(id, Stream { id, owner: conn, signal, unit, axis0, sample_ms: def.sample_ms });
+            if let Some(c) = st.conns.get_mut(&conn) {
+                c.defined = true;
+            }
             // Measured: a define while streaming does not deliver until StartStream.
             st.streaming = false;
             (OK, format!("-StreamId {id} -SampleTime {}", fmt_ms(def.sample_ms)), Some(signal))
@@ -728,6 +781,14 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
         st.tick_count += 1;
         let step = st.behaviour.stamp_step;
         st.clock_ms = st.clock_ms.wrapping_add(step);
+
+        // A network stall that has cleared: what was kept back goes out, in order.
+        if !st.behaviour.hold_delivery {
+            let waiting: Vec<usize> = st.conns.values().filter(|c| !c.held.is_empty()).map(|c| c.id).collect();
+            for id in waiting {
+                send_to(&mut st, id, &[]);
+            }
+        }
 
         // Broken connections the controller now notices.
         let now = Instant::now();

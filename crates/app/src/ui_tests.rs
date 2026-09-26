@@ -302,6 +302,28 @@ fn the_browser_shows_named_signals_and_finds_any_number() {
 }
 
 #[test]
+fn a_settings_file_without_lanes_gives_each_channel_its_own_chart() {
+    // Every settings field has a default so a trimmed or older file still loads; a
+    // missing lane must not put volts and degrees on one chart.
+    let dir = temp_dir("lanes");
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{"channels": [
+            {"signal": 5027, "unit": "ROB_1", "axis": 1},
+            {"signal": 6000, "unit": "ROB_1", "axis": 1},
+            {"signal": 4002, "unit": "ROB_1", "axis": 2, "lane": 7}
+        ]}"#,
+    )
+    .unwrap();
+    let h = harness(dir, AskPolicy::Remote);
+    let lanes: Vec<u32> = h.state().chans.iter().map(|c| c.lane).collect();
+    assert_eq!(lanes.len(), 3);
+    assert_eq!(lanes[2], 7, "a saved lane is kept");
+    assert!(lanes[0] != lanes[1] && !lanes[..2].contains(&7) && !lanes[..2].contains(&0), "{lanes:?}");
+    assert!(h.state().next_lane > *lanes.iter().max().unwrap(), "{lanes:?}, next {}", h.state().next_lane);
+}
+
+#[test]
 fn channels_come_back_next_time() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("persist");

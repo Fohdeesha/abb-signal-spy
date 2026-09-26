@@ -84,6 +84,22 @@ pub fn local_time(t: std::time::SystemTime) -> String {
     format!("{} UTC", &iso[11..23])
 }
 
+/// Local wall-clock time `HH:MM:SS`, as the log pane shows it: the same clock as the
+/// chart's hover. (The log file keeps ISO UTC, marked `Z`.)
+pub fn local_hms(t: std::time::SystemTime) -> String {
+    let s = local_time(t);
+    match s.split_once('.') {
+        Some((hms, rest)) if rest.ends_with("UTC") => format!("{hms} UTC"),
+        Some((hms, _)) => hms.to_string(),
+        None => s,
+    }
+}
+
+/// One line of the log pane.
+pub fn log_line(e: &spy_core::log::Entry) -> String {
+    format!("{}  {}", local_hms(e.wall), e.text)
+}
+
 /// Short form for chart legends and the phone view.
 pub fn short_label(cat: &Catalogue, key: &ChannelKey) -> String {
     format!("{} · {}", key.signal, label(cat, key))
@@ -172,12 +188,23 @@ mod tests {
     }
 
     #[test]
+    fn the_log_pane_shows_the_same_clock_as_the_charts() {
+        // The chart hover shows local time; the log pane used to show UTC unmarked,
+        // four hours apart on the cell's PC. (Discriminating only off UTC.)
+        let wall = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_410_000);
+        let e = spy_core::log::Entry { seq: 0, wall, level: spy_core::log::Level::Info, text: "x".into() };
+        let line = log_line(&e);
+        assert!(line.starts_with(&local_time(wall)[..8]), "{line} / {}", local_time(wall));
+        assert!(line.ends_with("  x"), "{line}");
+    }
+
+    #[test]
     fn labels_say_what_selects_them() {
         let cat = Catalogue::builtin();
         let k = |s, u: &str, a| ChannelKey { signal: s, unit: MechUnit::new(u).unwrap(), axis: Axis::new(a).unwrap() };
         assert_eq!(label(&cat, &k(4002, "ROB_1", 2)), "Torque  ROB_1 J2");
         assert_eq!(label(&cat, &k(5027, "ROB_2", 1)), "DC-link voltage  ROB_2");
-        assert_eq!(label(&cat, &k(6001, "ROB_1", 1)), "Joint angle (measured)  ROB_1 J2");
+        assert_eq!(label(&cat, &k(6001, "ROB_1", 1)), "Joint reference (EGM)  ROB_1 J2");
         assert_eq!(label(&cat, &k(99999, "ROB_1", 3)), "Signal 99999  ROB_1 J3");
     }
 }

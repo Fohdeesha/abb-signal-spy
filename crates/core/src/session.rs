@@ -34,6 +34,14 @@
 //!   not grab InfoStream back; and it closes that session quietly, because
 //!   StopStream is controller-wide and "its" stream ids may by then belong to
 //!   whoever took over.
+//! * **Leave a takeover early.** However this program leaves, the controller clears
+//!   every stream defined at that moment, the newcomer's included (measured on the
+//!   IRC5 and the VC, 2026-09-26: tunemaster-testsignals.md s24). So when every
+//!   stream falls silent it sends the handshake again at once: the controller
+//!   answers it mid-session with its current client list, and an answer with still
+//!   no sample (TCP delivers any sample in flight first) means the streams stopped
+//!   while the controller answers. It leaves then, before a newcomer's first define,
+//!   and names whoever connected or left.
 //! * **Tear down on every exit path**: StopStream, StreamUndefine for each of its
 //!   own ids, StreamDisconnect. Never StreamUndefineAll, except behind the explicit
 //!   reset request.
@@ -106,6 +114,12 @@ pub struct Options {
     /// A started session that has streamed, then gets no sample from any of its
     /// streams for this long, has lost InfoStream: it stops.
     pub stall_after: Duration,
+    /// Every stream silent for this long (or 25 sample times of the fastest, if
+    /// longer), with no change of this program's own in play: it asks the controller
+    /// for its client list again. An answer with still no sample means InfoStream was
+    /// taken, and the session leaves at once, before the newcomer sets up its signals
+    /// (leaving later clears them: tunemaster-testsignals.md s24 items 9-12).
+    pub probe_after: Duration,
     pub teardown_wait: Duration,
     /// Seconds per rung of the reconnect ladder; the product uses [`LADDER`].
     pub ladder: Vec<Duration>,
@@ -137,6 +151,10 @@ impl Default for Options {
             reply_timeout: Duration::from_secs(3),
             stale_after: Duration::from_millis(1000),
             stall_after: Duration::from_secs(3),
+            // Four times the longest gap a healthy VC stream showed in two minutes
+            // (73 ms), and well inside the half second the bridge's test-signal client
+            // leaves between clearing every stream and its first define.
+            probe_after: Duration::from_millis(300),
             teardown_wait: Duration::from_millis(1500),
             ladder: LADDER.iter().map(|&s| Duration::from_secs(s)).collect(),
             ask: AskPolicy::Remote,
@@ -234,6 +252,8 @@ pub struct Counters {
     pub sample_services: BTreeMap<u8, u64>,
     pub marker_offsets: BTreeMap<usize, u64>,
     pub unexpected_frames: u64,
+    /// Client lists asked for mid-session because every stream went silent.
+    pub liveness_checks: u64,
     pub defects: BTreeMap<String, u64>,
     pub clock_resets: u64,
     /// Samples a recorder could not keep up with.
@@ -553,6 +573,8 @@ enum Pending {
     Stop,
     UndefineAll,
     Disconnect,
+    /// The handshake sent again because every stream went silent (a liveness check).
+    Probe { sent: Instant },
 }
 
 struct Chan {
@@ -670,6 +692,8 @@ struct Worker {
     /// The controller's clock, as best known, when this program last did something
     /// that pauses or resumes delivery (`None`: before any sample arrived).
     own_change_at: Option<u64>,
+    /// When this program last sent something that pauses or resumes delivery.
+    own_change_sent: Option<Instant>,
     /// Requests that arrived while a switch of controller was tearing the old
     /// session down; handled, in order, once it is done.
     deferred: VecDeque<Request>,
@@ -747,6 +771,7 @@ impl Worker {
             delivered_before: false,
             orphan_retries: 0,
             own_change_at: None,
+            own_change_sent: None,
             deferred: VecDeque::new(),
             had_samples: false,
             last_any_sample: None,
@@ -1125,6 +1150,7 @@ impl Worker {
         self.restart_owed_at = None;
         self.last_frame_at = None;
         self.own_change_at = None;
+        self.own_change_sent = None;
         self.had_samples = false;
         self.last_any_sample = None;
         self.announce = None;
@@ -1218,6 +1244,7 @@ impl Worker {
             // Refreshed again when the reply comes: a slow controller acts on it
             // well after it was sent.
             self.own_change_at = self.controller_now();
+            self.own_change_sent = Some(Instant::now());
         }
         self.pending.insert(txn, p);
         self.emergency.lock().unwrap_or_else(|e| e.into_inner()).next_txn = txn;
@@ -1519,6 +1546,83 @@ impl Worker {
         self.quit_quietly(reason, "samples stopped");
     }
 
+    /// How long every stream may be silent before the liveness check: the option, or
+    /// 25 sample times of the fastest delivering stream, whichever is longer.
+    fn probe_bound(&self) -> Duration {
+        let fastest = self
+            .chans
+            .iter()
+            .filter(|c| c.stream().is_some() && c.session_samples > 0 && c.kind != Some(ValueKind::String))
+            .filter_map(|c| c.sample_ms)
+            .fold(f64::INFINITY, f64::min);
+        let by_rate = if fastest.is_finite() { Duration::from_secs_f64(fastest * 25.0 / 1000.0) } else { Duration::ZERO };
+        self.opt.probe_after.max(by_rate)
+    }
+
+    /// Every stream is silent: send the handshake again. The controller answers it
+    /// mid-session with its current client list and carries on streaming (measured
+    /// on the VC: tunemaster-testsignals.md s24 item 12).
+    fn send_probe(&mut self, now: Instant) {
+        let txn = self.next_txn();
+        self.pending.insert(txn, Pending::Probe { sent: now });
+        self.emergency.lock().unwrap_or_else(|e| e.into_inner()).next_txn = txn;
+        self.counters.liveness_checks += 1;
+        self.dirty = true;
+        let f = request::hello(txn);
+        self.write(&f);
+    }
+
+    /// The controller answered the liveness check. TCP delivers in order, so every
+    /// sample it sent before answering has arrived by now: if none came since the
+    /// check went out, its streams have stopped while it still answers.
+    fn probe_answered(&mut self, frame: &Frame<'_>, sent: Instant) {
+        if self.stage != Stage::Streaming || !self.started {
+            return;
+        }
+        // The samples were only held up on the way (a network hiccup).
+        if self.last_any_sample.is_some_and(|s| s > sent) {
+            return;
+        }
+        // This program changed something meanwhile: that pause is its own.
+        let own_change = self.restart_needed
+            || self.defines_in_flight()
+            || self.pending.values().any(|p| matches!(p, Pending::Start | Pending::Undefine { .. } | Pending::UndefineAll))
+            || self.own_change_sent.is_some_and(|t| t > sent)
+            || self.last_start.is_some_and(|t| t > sent);
+        if own_change {
+            return;
+        }
+        let now_list = Announce::from_rads(frame.rads(), frame.ctrl1()).clients;
+        let then_list = self.announce.as_ref().map(|a| a.clients.clone()).unwrap_or_default();
+        let (joined, left) = client_changes(&then_list, &now_list);
+        let local_ip = self.conn.as_ref().map(|c| c.local.ip().to_string()).unwrap_or_default();
+        let name = |a: &String| if *a == local_ip { format!("another program on this PC ({a})") } else { a.clone() };
+        let names = |v: &[String]| v.iter().map(name).collect::<Vec<_>>().join(" and ");
+        let (reason, mark) = if !joined.is_empty() {
+            (
+                format!(
+                    "Every stream stopped at once, and {} connected to the controller after this program did: another program has taken InfoStream. Stopped straight away, before it sets up its signals (leaving any later clears them). Connect again when it is free.",
+                    names(&joined)
+                ),
+                "another client took InfoStream",
+            )
+        } else if !left.is_empty() {
+            (
+                format!(
+                    "Every stream stopped at once when {} disconnected from the controller: a program that had set up test signals and leaves can end InfoStream for every program connected. Connect again.",
+                    names(&left)
+                ),
+                "another client left",
+            )
+        } else {
+            (
+                "Every stream stopped at once while the controller still answers: another program has most likely taken InfoStream (RobotStudio or TuneMaster showing signals, for example), or one that had set up signals has left, which can end InfoStream for every program connected. Stopped straight away, before a newcomer sets up its signals (leaving any later clears them). Connect again when it is free.".to_string(),
+                "another client took InfoStream",
+            )
+        };
+        self.quit_quietly(reason, mark);
+    }
+
     /// Another client has taken InfoStream, and what arrives next may be its
     /// signals under this program's stream ids.
     fn taken_over(&mut self, what: &str) {
@@ -1692,9 +1796,16 @@ impl Worker {
                     (Some(a), Some(b)) => a.max(b),
                     (a, b) => a.or(b).unwrap_or(now),
                 };
-                if now.duration_since(since) > self.opt.stall_after {
+                let silent = now.duration_since(since);
+                if silent > self.opt.stall_after {
                     self.stalled();
                     return;
+                }
+                // Long before the stall: ask whether the controller is still there. A
+                // takeover has to be left before the newcomer defines anything, since
+                // this program's exit clears whatever is defined by then.
+                if silent > self.probe_bound() && !self.pending.values().any(|p| matches!(p, Pending::Probe { .. })) {
+                    self.send_probe(now);
                 }
             }
         }
@@ -1760,6 +1871,13 @@ impl Worker {
 
         if self.stage == Stage::Hello && frame.service() == service::CONTROL && frame.txn() == self.hello_txn {
             self.handshake_done(&frame);
+            return;
+        }
+        if frame.service() == service::CONTROL
+            && let Some(Pending::Probe { sent }) = self.pending.get(&frame.txn()).cloned()
+        {
+            self.pending.remove(&frame.txn());
+            self.probe_answered(&frame, sent);
             return;
         }
 
@@ -1851,6 +1969,9 @@ impl Worker {
                 self.retiring.clear();
                 self.log.info(if r.is_failure() { format!("StreamUndefineAll answered: {}", r.summary()) } else { "StreamUndefineAll done; redefining this program's channels.".into() });
             }
+            // Its answer is a control frame, taken in `frame`; anything else under its
+            // transaction says nothing.
+            Pending::Probe { .. } => {}
         }
     }
 
@@ -2301,6 +2422,32 @@ fn broadcast(taps: &Mutex<Vec<TapSlot>>, ev: TapEvent, counters: &mut Counters) 
 fn stale_bound(base: Duration, sample_ms: Option<f64>) -> Duration {
     let by_rate = sample_ms.map(|ms| Duration::from_secs_f64(ms * 25.0 / 1000.0)).unwrap_or(Duration::ZERO);
     base.max(by_rate)
+}
+
+/// Who joined and who left between two client lists. Compared as multisets of
+/// addresses: the controller lists every connection, so one PC can appear twice.
+fn client_changes(then: &[reply::ClientEntry], now: &[reply::ClientEntry]) -> (Vec<String>, Vec<String>) {
+    let count = |v: &[reply::ClientEntry]| {
+        let mut m: BTreeMap<String, usize> = BTreeMap::new();
+        for c in v {
+            *m.entry(c.address.clone()).or_default() += 1;
+        }
+        m
+    };
+    let (before, after) = (count(then), count(now));
+    let mut joined = Vec::new();
+    let mut left = Vec::new();
+    for (addr, &n) in &after {
+        for _ in before.get(addr).copied().unwrap_or(0)..n {
+            joined.push(addr.clone());
+        }
+    }
+    for (addr, &n) in &before {
+        for _ in after.get(addr).copied().unwrap_or(0)..n {
+            left.push(addr.clone());
+        }
+    }
+    (joined, left)
 }
 
 fn is_loopback(ip: IpAddr) -> bool {
