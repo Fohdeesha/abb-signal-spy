@@ -189,7 +189,7 @@ fn wait_streaming(s: &Session, log: &LogBook, tail: &mut LogTail, take: bool, ti
                 println!("other RobAPI clients are connected to this controller:");
                 for o in &others {
                     let attrs: Vec<String> = o.attributes.iter().filter(|(k, _)| k != "a").map(|(k, v)| format!("{k}={v}")).collect();
-                    println!("    {}{}{}", o.address, if o.same_pc { "  (this PC)" } else { "" }, if attrs.is_empty() { String::new() } else { format!("  {}", attrs.join(" ")) });
+                    println!("    {}{}{}{}", o.address, if o.same_pc { "  (this PC)" } else { "" }, if o.pendant { "  (FlexPendant)" } else { "" }, if attrs.is_empty() { String::new() } else { format!("  {}", attrs.join(" ")) });
                 }
                 println!("another tool, such as RobotStudio or TuneMaster, may be streaming test signals from it;");
                 println!("taking InfoStream will stop its streams.");

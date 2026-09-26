@@ -227,6 +227,17 @@ pub struct OtherClient {
     pub attributes: Vec<(String, String)>,
     /// Same address as this PC's end of the connection: another program here.
     pub same_pc: bool,
+    /// On the IRC5's internal network: its FlexPendant ([`is_pendant_address`]).
+    pub pendant: bool,
+}
+
+/// An address on the IRC5's internal network, which its FlexPendant connects from
+/// (192.168.126.10 on the measured cell: tunemaster-testsignals.md s24 item 1). Every
+/// connection to a real IRC5 lists it, and it is not a program that could be streaming
+/// test signals, so it is named but never asked about: the operator's decision
+/// (2026-09-26), on one cell's evidence.
+pub fn is_pendant_address(address: &str) -> bool {
+    address.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| matches!(ip.octets(), [192, 168, 126, _]))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1295,7 +1306,7 @@ impl Worker {
                 me_found = true;
                 continue;
             }
-            others.push(OtherClient { address: c.address.clone(), attributes: c.attributes.clone(), same_pc: c.address == local_ip });
+            others.push(OtherClient { address: c.address.clone(), attributes: c.attributes.clone(), same_pc: c.address == local_ip, pendant: is_pendant_address(&c.address) });
         }
         self.log.info(format!(
             "Connected to {} (system {}). RobAPI clients: {}.",
@@ -1310,7 +1321,7 @@ impl Worker {
         self.announce = Some(announce);
         self.others = others;
         let loopback = peer.ip().is_loopback();
-        let unapproved: Vec<&OtherClient> = self.others.iter().filter(|o| !self.approved.as_ref().is_some_and(|a| a.contains(&o.address))).collect();
+        let unapproved: Vec<&OtherClient> = self.others.iter().filter(|o| !o.pendant && !self.approved.as_ref().is_some_and(|a| a.contains(&o.address))).collect();
         let ask = match self.opt.ask {
             AskPolicy::Remote => !loopback,
             AskPolicy::Always => true,
@@ -1594,7 +1605,10 @@ impl Worker {
         }
         let now_list = Announce::from_rads(frame.rads(), frame.ctrl1()).clients;
         let then_list = self.announce.as_ref().map(|a| a.clients.clone()).unwrap_or_default();
-        let (joined, left) = client_changes(&then_list, &now_list);
+        let (mut joined, mut left) = client_changes(&then_list, &now_list);
+        // A pendant coming or going is not what stopped the streams.
+        joined.retain(|a| !is_pendant_address(a));
+        left.retain(|a| !is_pendant_address(a));
         let local_ip = self.conn.as_ref().map(|c| c.local.ip().to_string()).unwrap_or_default();
         let name = |a: &String| if *a == local_ip { format!("another program on this PC ({a})") } else { a.clone() };
         let names = |v: &[String]| v.iter().map(name).collect::<Vec<_>>().join(" and ");
@@ -1776,12 +1790,13 @@ impl Worker {
             // Nothing at all on this connection, with other programs connected: the
             // likeliest reason is that one of them subscribed first and gets every
             // sample. Said once; not a stop, since a signal can also just be silent.
-            if nothing_yet && !self.told_no_samples && !self.others.is_empty() {
+            let programs = self.others.iter().filter(|o| !o.pendant).count();
+            if nothing_yet && !self.told_no_samples && programs > 0 {
                 self.told_no_samples = true;
                 self.log.warn(format!(
                     "No samples at all in {:.0} s. {} other program(s) are connected to this controller. If one of them is showing test signals, it is getting every sample (InfoStream sends them all to one program): close its signal view (RobotStudio, TuneMaster), then connect again. If this program's own earlier connection broke, the controller lets go of it after about 16 s: connect again then.",
                     self.opt.stall_after.as_secs_f64(),
-                    self.others.len()
+                    programs
                 ));
                 self.advice = Some("No samples yet. If another program connected to this controller is showing test signals, it is getting all of them: close its signal view (RobotStudio, TuneMaster), then connect again.".into());
                 self.dirty = true;

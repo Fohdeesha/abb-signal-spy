@@ -763,6 +763,76 @@ fn a_change_of_this_programs_own_while_the_check_is_out_is_not_a_takeover() {
 }
 
 #[test]
+fn the_flexpendant_alone_is_not_asked_about() {
+    // Every real IRC5 lists its FlexPendant, on its internal network (192.168.126.10 on
+    // the measured cell). Asking about it on every connection teaches people to click
+    // through the question (the operator's decision, 2026-09-26).
+    let mut beh = Behaviour::default();
+    beh.extra_clients = vec!["192.168.126.10".into()];
+    let fake = FakeController::start(beh).unwrap();
+    let mut o = opts();
+    o.ask = AskPolicy::Always;
+    let s = spawn(o);
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))), "{:?}\n{}", phase(&s), log_text(&s));
+    let others = s.status().others.clone();
+    assert_eq!(others.len(), 1, "{others:?}");
+    assert!(others[0].pendant, "{others:?}");
+}
+
+#[test]
+fn another_client_beside_the_flexpendant_is_asked_about() {
+    let mut beh = Behaviour::default();
+    beh.extra_clients = vec!["192.168.126.10".into(), "192.0.2.27".into()];
+    let fake = FakeController::start(beh).unwrap();
+    let mut o = opts();
+    o.ask = AskPolicy::Always;
+    let s = spawn(o);
+    s.set_channels(vec![key(4002, "ROB_1", 1)]);
+    s.connect(target(&fake));
+    assert!(wait_for(4000, || phase(&s) == Phase::AwaitingApproval), "{:?}", phase(&s));
+    let waiting = log_text(&s).lines().find(|l| l.contains("Waiting for your decision")).unwrap_or_default().to_string();
+    assert!(waiting.contains("192.0.2.27") && !waiting.contains("192.168.126.10"), "{waiting}");
+}
+
+#[test]
+fn the_flexpendant_is_not_taken_for_a_program_getting_the_samples() {
+    // Nothing arrives on this connection: the advice to close another program's
+    // signal view must not point at the pendant, which every real IRC5 lists.
+    let mut beh = Behaviour::default();
+    beh.extra_clients = vec!["192.168.126.10".into()];
+    beh.mute_all = true;
+    let fake = FakeController::start(beh).unwrap();
+    let s = spawn(opts());
+    s.set_channels(vec![key(4002, "ROB_1", 1)]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || phase(&s) == Phase::Streaming));
+    std::thread::sleep(Duration::from_millis(1600));
+    assert!(!log_text(&s).contains("other program(s) are connected"), "{}", log_text(&s));
+    assert!(s.status().advice.is_none(), "{:?}", s.status().advice);
+}
+
+#[test]
+fn the_pendant_reconnecting_is_not_blamed_for_a_takeover() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let a = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    a.set_channels(vec![k.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&k))));
+    fake.with(|b| {
+        b.extra_clients = vec!["192.168.126.10".into()];
+        b.mute_all = true;
+    });
+    assert!(wait_for(2000, || matches!(phase(&a), Phase::Stopped { .. })), "{:?}\n{}", phase(&a), log_text(&a));
+    let reason = stopped_reason(&a);
+    assert!(!reason.contains("192.168.126.10"), "the pendant was blamed: {reason}");
+    assert!(reason.contains("taken InfoStream"), "{reason}");
+}
+
+#[test]
 fn a_fast_takeover_is_caught_by_the_record_type() {
     // A takeover quicker than one sample leaves no gap; a stream that changes record
     // type still cannot be this program's.
@@ -1010,7 +1080,7 @@ fn an_answer_only_counts_for_the_clients_it_was_given_for() {
     assert!(wait_for(4000, || phase(&s) == Phase::AwaitingApproval));
     // A yes given while a different list was on screen (the connection dropped and
     // came back with another client meanwhile) takes nothing.
-    let stale = vec![spy_core::session::OtherClient { address: "10.0.0.9".into(), attributes: vec![], same_pc: false }];
+    let stale = vec![spy_core::session::OtherClient { address: "10.0.0.9".into(), attributes: vec![], same_pc: false, pendant: false }];
     s.answer(true, &stale);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(phase(&s), Phase::AwaitingApproval);

@@ -89,7 +89,7 @@ impl Settings {
                 (s, None)
             }
             Err(e) => {
-                let aside = path.with_extension(format!("json.bad-{}", spy_core::util::wall_stamp(std::time::SystemTime::now())));
+                let aside = path.with_extension(format!("json.bad-{}", spy_core::util::local_stamp(std::time::SystemTime::now())));
                 let _ = std::fs::rename(path, &aside);
                 (Settings::default(), Some(format!("The settings file could not be read ({e}); it was kept as {} and defaults are in use.", aside.display())))
             }

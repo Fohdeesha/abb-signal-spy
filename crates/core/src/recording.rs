@@ -46,7 +46,7 @@ use crate::sample::ValueKind;
 use crate::session::{BatchValues, Mark, Session, Tap, TapEvent};
 use crate::store::{ChannelKey, Store};
 use crate::timeline::Timeline;
-use crate::util::{wall_iso, wall_stamp};
+use crate::util::{local_stamp, wall_iso};
 
 pub const FORMAT: &str = "abb-signal-spy-recording";
 pub const VERSION: u32 = 1;
@@ -206,7 +206,10 @@ pub fn new_folder(base: &Path, label: &str) -> Result<PathBuf, String> {
     // does not exist.
     let label: String = label.chars().map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' }).take(60).collect();
     let label = label.trim_matches(|c: char| c == ' ' || c == '.').to_string();
-    let stem = if label.is_empty() { wall_stamp(SystemTime::now()) } else { format!("{} {label}", wall_stamp(SystemTime::now())) };
+    // The local clock: the one the window shows and a person looks for a recording by
+    // (recording.json keeps exact UTC).
+    let now = local_stamp(SystemTime::now());
+    let stem = if label.is_empty() { now } else { format!("{now} {label}") };
     std::fs::create_dir_all(base).map_err(|e| format!("cannot create {}: {e}", base.display()))?;
     for i in 1..1000 {
         let name = if i == 1 { stem.clone() } else { format!("{stem} ({i})") };
@@ -923,6 +926,13 @@ mod tests {
         let name = c.file_name().unwrap().to_string_lossy().to_string();
         assert!(!name.ends_with(' ') && !name.ends_with('.'), "{name:?}");
         std::fs::write(c.join("data.csv"), "x").unwrap();
+        // Named on the local clock, the one the window shows and a person looks for
+        // the recording by (discriminating only off UTC).
+        let before = crate::util::local_stamp(SystemTime::now());
+        let d = new_folder(&base, "").unwrap();
+        let after = crate::util::local_stamp(SystemTime::now());
+        let name = d.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name == before || name == after, "{name} is not {before} (local time)");
         let _ = std::fs::remove_dir_all(&base);
     }
 

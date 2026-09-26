@@ -63,22 +63,8 @@ pub fn label(cat: &Catalogue, key: &ChannelKey) -> String {
 
 /// Local wall-clock time `HH:MM:SS.mmm`, daylight saving as it was on that date.
 pub fn local_time(t: std::time::SystemTime) -> String {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
-        use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-        if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-            // FILETIME: 100 ns ticks since 1601.
-            let ticks = d.as_nanos() / 100 + 116_444_736_000_000_000;
-            let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
-            unsafe {
-                let mut utc: SYSTEMTIME = std::mem::zeroed();
-                let mut local: SYSTEMTIME = std::mem::zeroed();
-                if FileTimeToSystemTime(&ft, &mut utc) != 0 && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0 {
-                    return format!("{:02}:{:02}:{:02}.{:03}", local.wHour, local.wMinute, local.wSecond, local.wMilliseconds);
-                }
-            }
-        }
+    if let Some((_, _, _, h, mi, s, ms)) = spy_core::util::local_parts(t) {
+        return format!("{h:02}:{mi:02}:{s:02}.{ms:03}");
     }
     let iso = spy_core::util::wall_iso(t);
     format!("{} UTC", &iso[11..23])

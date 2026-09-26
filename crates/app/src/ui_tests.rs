@@ -136,6 +136,19 @@ fn the_other_clients_question_is_asked_and_answered() {
 }
 
 #[test]
+fn a_real_controllers_flexpendant_alone_asks_nothing() {
+    // Every real IRC5 lists its FlexPendant on its internal network: named, not asked
+    // about (the operator's decision, 2026-09-26).
+    let b = Behaviour { extra_clients: vec!["192.168.126.10".into()], ..Behaviour::default() };
+    let fake = FakeController::start(b).unwrap();
+    let mut h = harness(temp_dir("pendant"), AskPolicy::Always);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
+    assert!(h.query_by_label("Other programs are connected to this controller").is_none());
+    assert!(h.query_all_by_label_contains("192.168.126.10 [FlexPendant]").count() >= 1, "the pendant is named as such");
+}
+
+#[test]
 fn record_save_last_and_slow_log_write_their_folders() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("rec");

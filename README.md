@@ -45,13 +45,14 @@ already there. `--connect HOST[:PORT]` connects at startup.
 
 ## Recordings
 
-Each recording is a folder under `Documents\TestSignals`:
+Each recording is a folder under `Documents\TestSignals`, named for the local date and time it
+started, for example `2026-09-26_04-47-20 dc dip`:
 
 - `data.csv`: `controller_ms,channel,value`, one row per sample. `controller_ms` is the controller's own
   clock; `channel` is `signal/unit/axis`, for example `4002/ROB_1/2`.
 - `slow.csv` (slow logs): `controller_ms,channel,count,mean,min,max`, one row per channel per interval.
-- `recording.json`: the controller, each channel's name, units and sample time, the wall-clock time at
-  each connection, reconnects and controller restarts, markers, and whether any samples were lost.
+- `recording.json`: the controller, each channel's name, units and sample time, the wall-clock time (UTC)
+  at each connection, reconnects and controller restarts, markers, and whether any samples were lost.
 
 String signals (the work object, the tool's name, a program position) are written quoted, and may
 contain commas, quotes and line breaks; any CSV reader, pandas included, reads them correctly.

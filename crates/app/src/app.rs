@@ -656,7 +656,9 @@ impl SpyApp {
                 ui.separator();
                 let names = self.client_names(&st.others);
                 let text = format!("Other RobAPI clients: {}", names.join(", "));
-                ui.label(RichText::new(text).color(theme::WARN)).on_hover_text("Other programs connected to this controller over RobAPI. RobotStudio counts whenever it is connected, even when it is not streaming.");
+                // The pendant alone is every real IRC5's normal state: said, not warned.
+                let label = if st.others.iter().all(|o| o.pendant) { RichText::new(text).weak() } else { RichText::new(text).color(theme::WARN) };
+                ui.label(label).on_hover_text("Other programs connected to this controller over RobAPI. RobotStudio counts whenever it is connected, even when it is not streaming. The controller's FlexPendant is always connected, on its internal network (192.168.126.x).");
             }
             let lost = st.counters.dropped_to_taps;
             if lost > 0 {
@@ -676,6 +678,9 @@ impl SpyApp {
                 }
                 if o.same_pc {
                     s.push_str(" [this PC]");
+                }
+                if o.pendant {
+                    s.push_str(" [FlexPendant]");
                 }
                 let extra: Vec<String> = o.attributes.iter().filter(|(k, _)| k != "a").map(|(k, v)| format!("{k}={v}")).collect();
                 if !extra.is_empty() {
