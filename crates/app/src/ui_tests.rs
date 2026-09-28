@@ -528,6 +528,129 @@ fn a_reviewed_stretch_saves_as_csv() {
     assert_eq!(t.len(), torque.len() + words.len() + saved_rows(&text, "6010/ROB_1/J1", "deg/s").len());
 }
 
+/// A recording folder as the recorder writes one (4002 J1 in Nm), in the harness's
+/// recordings folder, for review.
+fn recording_on_disk(dir: &std::path::Path, name: &str, kind: &str, label: &str, csv: &str) -> PathBuf {
+    let d = dir.join("recordings").join(name);
+    std::fs::create_dir_all(&d).unwrap();
+    let (file, interval) = if kind == "slow" { ("slow.csv", r#", "interval_ms": 1000"#) } else { ("data.csv", "") };
+    let json = format!(
+        r#"{{"format": "abb-signal-spy-recording", "version": 2, "kind": "{kind}", "app": "t", "label": "{label}", "started_utc": "2026-09-27T10:00:00.000Z",
+            "complete": true, "controller": "t", "channels": [{{"id": "4002/ROB_1/J1", "signal": 4002, "unit": "ROB_1", "axis": 1, "name": "Torque", "units": "Nm", "sample_ms": 4.0}}],
+            "anchors": [{{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}}], "rows_written": 0, "samples_lost": 0 {interval}}}"#
+    );
+    std::fs::write(d.join("recording.json"), json).unwrap();
+    std::fs::write(d.join(file), csv).unwrap();
+    d
+}
+
+fn full_csv() -> String {
+    let mut csv = String::from("controller_ms,channel,value\n");
+    for t in (1000..2000).step_by(4) {
+        csv += &format!("{t},4002/ROB_1/J1,1\n");
+    }
+    csv
+}
+
+#[test]
+fn a_reviewed_slow_log_gives_its_intervals_extremes_and_saves_them() {
+    let dir = temp_dir("review-slow");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let csv = "controller_ms,channel,count,mean,min,max\n1000,4002/ROB_1/J1,250,356.5,300,357.1\n2000,4002/ROB_1/J1,250,356.5,356,357\n3000,4002/ROB_1/J1,250,356.4,356,357\n";
+    let folder = recording_on_disk(&dir, "slow", "slow", "", csv);
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let r = h.state().review.as_ref().unwrap().review.clone();
+    let s = crate::review_view::review_stats(&h.state().catalogue, r.channel("4002/ROB_1/J1").unwrap(), r.start, r.end + 1);
+    assert_eq!((s.min, s.max), (300.0, 357.1), "the dip the slow log caught, contradicted by its statistics");
+    h.get_by_label("Save CSV").click();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
+    let text = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
+    assert_eq!(text.lines().next(), Some("time_utc,t_s,channel,name,units,mean,min,max,count"));
+    assert!(text.lines().any(|l| l.ends_with(",356.5,300,357.1,250")), "the interval's minimum lost from the file: {text}");
+}
+
+#[test]
+fn a_reviewed_recordings_saves_carry_its_own_label() {
+    let dir = temp_dir("review-label");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    h.state_mut().rec_label = "robot three".into();
+    let folder = recording_on_disk(&dir, "one", "full", "robot one", &full_csv());
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    h.get_by_label("Save CSV").click();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
+    let saved = files_ending(&dir.join("recordings"), " view.csv");
+    let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.contains("robot one") && !name.contains("robot three"), "robot one's data saved as {name}");
+}
+
+#[test]
+fn keys_while_reviewing_leave_the_live_session_alone() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("review-keys");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    start_recording(&mut h);
+    let live = only_recording(&dir);
+    let folder = recording_on_disk(&dir, "old", "full", "", &full_csv());
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    h.key_press(egui::Key::M);
+    h.key_press(egui::Key::Space);
+    let _ = h.run_ok();
+    assert!(h.state().paused_at.is_none(), "the hidden live charts paused");
+    h.get_by_label("Close the recording").click();
+    let _ = h.run_ok();
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    assert!(spy_core::recording::read_meta(&live).unwrap().markers.is_empty(), "a marker put into the live recording from the review");
+}
+
+#[test]
+fn review_statistics_are_computed_once_for_a_stretch() {
+    let dir = temp_dir("review-stats-once");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let folder = recording_on_disk(&dir, "one", "full", "", &full_csv());
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    for _ in 0..6 {
+        let _ = h.run_ok();
+    }
+    let n = h.state().review.as_ref().unwrap().stats_computed;
+    assert_eq!(n, 1, "the statistics of the same stretch computed {n} times (each a pass over every sample in view)");
+}
+
+#[test]
+fn a_set_partly_there_already_still_ends_in_one_chart() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut h = harness(temp_dir("sets-partly"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 6000, "Add");
+    let keys: Vec<spy_core::store::ChannelKey> = (1..=6).map(|a| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(a).unwrap() }).collect();
+    // J2 there too, in a chart of its own.
+    assert!(h.state_mut().add_channels(vec![keys[1].clone()], false));
+    assert!(h.state_mut().add_channels(keys, true), "the other four torques");
+    let lanes: std::collections::BTreeSet<u32> = h.state().chans.iter().filter(|c| c.key.signal == 4002).map(|c| c.lane).collect();
+    assert_eq!(lanes.len(), 1, "six torques \"in one chart\" split over {} charts", lanes.len());
+    let other = h.state().chans.iter().find(|c| c.key.signal == 6000).unwrap().lane;
+    assert!(!lanes.contains(&other), "the joint angle pulled into the torques' chart");
+}
+
+#[test]
+fn the_same_channel_twice_in_one_request_is_added_once() {
+    let mut h = harness(temp_dir("add-twice"), AskPolicy::Remote);
+    let k = spy_core::store::ChannelKey { signal: 5027, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(1).unwrap() };
+    assert!(h.state_mut().add_channels(vec![k.clone(), k.clone()], true));
+    assert_eq!(h.state().chans.len(), 1, "a settings file naming a unit twice added its DC link twice");
+}
+
 #[test]
 fn a_channel_set_adds_or_replaces_in_one_go() {
     let fake = FakeController::start(Behaviour::default()).unwrap();

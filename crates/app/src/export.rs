@@ -33,6 +33,8 @@ pub type ExportJob = JoinHandle<Result<(PathBuf, usize), String>>;
 pub enum Value {
     Number(f64),
     Text(String),
+    /// A slow log's interval: its mean, minimum, maximum and sample count.
+    Interval { mean: f64, min: f64, max: f64, count: u64 },
 }
 
 /// One channel's samples in the stretch, in time order.
@@ -47,6 +49,12 @@ fn quoted(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// A field as it is where it is safe, quoted where it would break its row (a comma,
+/// a quote, a line break) or read as a formula in a spreadsheet.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\r', '\n']) || s.starts_with(['=', '+', '-', '@', '\t']) { quoted(s) } else { s.to_string() }
+}
+
 fn number(v: f64) -> String {
     if v.is_nan() { "NaN".to_string() } else { format!("{v}") }
 }
@@ -54,22 +62,35 @@ fn number(v: f64) -> String {
 /// Write the series to `out`, merged into time order (ties in id order). `from` is
 /// the stretch's start (`t_s` counts from it); `utc_offset` turns a sample's time
 /// into UTC ms since 1970, where the wall clock is known. Returns the rows written.
-pub fn write_rows(out: &mut impl Write, from: i64, utc_offset: Option<i64>, mut series: Vec<Series>) -> std::io::Result<usize> {
+#[cfg(test)]
+pub fn write_rows(out: &mut impl Write, from: i64, utc_offset: Option<i64>, series: Vec<Series>) -> std::io::Result<usize> {
+    write_rows_until(out, from, utc_offset, series, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// [`write_rows`], stopping with an error once `stop` is set (the window closing).
+/// A slow log's intervals get their minimum, maximum and count beside their mean.
+fn write_rows_until(out: &mut impl Write, from: i64, utc_offset: Option<i64>, mut series: Vec<Series>, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<usize> {
     series.sort_by(|a, b| a.id.cmp(&b.id));
     let mut heads: Vec<Option<(i64, Value)>> = series.iter_mut().map(|s| s.samples.next()).collect();
-    out.write_all(b"time_utc,t_s,channel,name,units,value\n")?;
+    let intervals = heads.iter().flatten().any(|(_, v)| matches!(v, Value::Interval { .. }));
+    out.write_all(if intervals { b"time_utc,t_s,channel,name,units,mean,min,max,count\n" } else { b"time_utc,t_s,channel,name,units,value\n" })?;
     // Written once per series, not once per row. The window's labels space their
     // parts widely; a file gets single spaces.
     let tidy = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let fixed: Vec<String> = series.iter().map(|s| format!("{},{},{}", s.id, quoted(&tidy(&s.name)), quoted(&s.units))).collect();
+    let fixed: Vec<String> = series.iter().map(|s| format!("{},{},{}", csv_field(&s.id), quoted(&tidy(&s.name)), quoted(&s.units))).collect();
     let mut rows = 0;
     // At most a couple of dozen series: the earliest head by a straight look.
     while let Some(i) = (0..heads.len()).filter(|&i| heads[i].is_some()).min_by_key(|&i| heads[i].as_ref().map(|h| h.0)) {
+        if rows % 4096 == 0 && stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("stopped: the window was closing"));
+        }
         let Some((t, v)) = std::mem::replace(&mut heads[i], series[i].samples.next()) else { break };
-        let when = utc_offset.and_then(|o| t.checked_add(o)).map(utc_text).unwrap_or_default();
+        let when = utc_offset.and_then(|o| t.checked_add(o)).and_then(utc_text).unwrap_or_default();
+        let blank = if intervals { ",,," } else { "" };
         let value = match v {
-            Value::Number(v) => number(v),
-            Value::Text(s) => quoted(&s),
+            Value::Number(v) => format!("{}{blank}", number(v)),
+            Value::Text(s) => format!("{}{blank}", quoted(&s)),
+            Value::Interval { mean, min, max, count } => format!("{},{},{},{count}", number(mean), number(min), number(max)),
         };
         writeln!(out, "{when},{:.3},{},{value}", (t - from) as f64 / 1000.0, fixed[i])?;
         rows += 1;
@@ -77,20 +98,29 @@ pub fn write_rows(out: &mut impl Write, from: i64, utc_offset: Option<i64>, mut 
     Ok(rows)
 }
 
-fn utc_text(ms: i64) -> String {
+/// UTC ms since 1970 as text; `None` for a time no clock shows (Windows' starts in
+/// 1601 and ends in 30827: past either, SystemTime arithmetic panics).
+fn utc_text(ms: i64) -> Option<String> {
     let d = std::time::Duration::from_millis(ms.unsigned_abs());
-    wall_iso(if ms >= 0 { std::time::UNIX_EPOCH + d } else { std::time::UNIX_EPOCH - d })
+    let t = if ms >= 0 { std::time::UNIX_EPOCH.checked_add(d) } else { std::time::UNIX_EPOCH.checked_sub(d) }?;
+    Some(wall_iso(t))
 }
 
 /// Write the series to `path` through `path.part`: the finished name appears only
 /// once the file is complete, and a failed save leaves nothing behind.
+#[cfg(test)]
 pub fn write_csv(path: &Path, from: i64, utc_offset: Option<i64>, series: Vec<Series>) -> Result<usize, String> {
+    write_csv_until(path, from, utc_offset, series, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// [`write_csv`], stopped once `stop` is set: nothing is left behind then either.
+pub fn write_csv_until(path: &Path, from: i64, utc_offset: Option<i64>, series: Vec<Series>, stop: &std::sync::atomic::AtomicBool) -> Result<usize, String> {
     let part = part_name(path);
     let io = |e: std::io::Error| format!("writing {} failed: {e}", part.display());
     let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e| format!("cannot create {}: {e}", part.display()))?;
     let result = (|| {
         let mut out = std::io::BufWriter::with_capacity(1 << 20, f);
-        let rows = write_rows(&mut out, from, utc_offset, series).map_err(io)?;
+        let rows = write_rows_until(&mut out, from, utc_offset, series, stop).map_err(io)?;
         let f = out.into_inner().map_err(|e| io(e.into_error()))?;
         f.sync_all().map_err(io)?;
         drop(f);
@@ -137,11 +167,14 @@ pub fn crop_png(image: &egui::ColorImage, rect: egui::Rect, pixels_per_point: f3
 }
 
 impl SpyApp {
-    /// A new file in the recordings folder, named for now, the label and what it is.
+    /// A new file in the recordings folder, named for now, the label and what it is:
+    /// a reviewed recording's own label while one is open (its rows carry no
+    /// controller or system id to tell them apart), the REC label otherwise.
     fn export_path(&self, what: &str, ext: &str) -> Result<PathBuf, String> {
         let dir = self.record_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let label: String = self.rec_label.chars().map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' }).take(60).collect();
+        let label = self.review.as_ref().map_or(self.rec_label.as_str(), |rs| rs.review.meta.label.as_str());
+        let label: String = label.chars().map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' }).take(60).collect();
         let label = label.trim_matches(|c: char| c == ' ' || c == '.').to_string();
         let stem = if label.is_empty() { format!("{} {what}", local_stamp(std::time::SystemTime::now())) } else { format!("{} {label} {what}", local_stamp(std::time::SystemTime::now())) };
         for i in 1..1000 {
@@ -198,7 +231,7 @@ impl SpyApp {
             series.push(Series { id: def.id(), name: crate::derived_view::file_name(def), units: def.units().into(), samples: Box::new(samples.into_iter().map(|(t, v)| (t, Value::Number(v)))) });
         }
         let note = if skipped_text { " (text signals are not kept in the live history: record them with REC)" } else { "" };
-        self.start_export(total, note, move |p| write_csv(p, from, utc_offset, series));
+        self.start_export(total, note, move |p, stop| write_csv_until(p, from, utc_offset, series, stop));
     }
 
     /// The reviewed recording's stretch in view, to a CSV.
@@ -223,7 +256,7 @@ impl SpyApp {
         let total = r.channels.iter().map(|ch| within(&ch.t) + ch.text.iter().filter(|(t, _)| (from..to).contains(t)).count()).sum();
         let utc_offset = r.wall_clock.then_some(0);
         // The recording is shared, not copied: the thread reads it where it is.
-        self.start_export(total, "", move |p| {
+        self.start_export(total, "", move |p, stop| {
             let series = r
                 .channels
                 .iter()
@@ -232,16 +265,16 @@ impl SpyApp {
                     let mut text: Vec<(i64, Value)> = ch.text.iter().filter(|(t, _)| (from..to).contains(t)).map(|(t, s)| (*t, Value::Text(s.clone()))).collect();
                     // Text rows are kept as they came; the merge needs them in order.
                     text.sort_by_key(|(t, _)| *t);
-                    let numbers = ch.recorded(from, to).map(move |(t, v)| (t, Value::Number(v * factor)));
+                    let numbers = recorded_values(ch, from, to, factor);
                     let units = if ch.text.is_empty() { units } else { String::new() };
                     Series { id: ch.id.clone(), name, units, samples: Box::new(merge_two(numbers, text.into_iter())) }
                 })
                 .collect();
-            write_csv(p, from, utc_offset, series)
+            write_csv_until(p, from, utc_offset, series, stop)
         });
     }
 
-    fn start_export(&mut self, total: usize, note: &'static str, write: impl FnOnce(&Path) -> Result<usize, String> + Send + 'static) {
+    fn start_export(&mut self, total: usize, note: &'static str, write: impl FnOnce(&Path, &std::sync::atomic::AtomicBool) -> Result<usize, String> + Send + 'static) {
         if total == 0 {
             self.toast(Level::Warn, "No samples in view to save.");
             return;
@@ -255,8 +288,10 @@ impl SpyApp {
         }
         let ctx = self.ctx.clone();
         self.export_note = note;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.export_stop = stop.clone();
         self.export_job = Some(std::thread::spawn(move || {
-            let r = write(&path).map(|n| (path, n));
+            let r = write(&path, &stop).map(|n| (path, n));
             ctx.request_repaint();
             r
         }));
@@ -316,6 +351,20 @@ impl SpyApp {
     }
 }
 
+/// A recorded channel's values over `[from, to)` as recorded (a held signal's padding
+/// kept), in its display unit: a slow log's intervals with their minimum, maximum and
+/// count beside the mean.
+fn recorded_values<'a>(ch: &'a spy_core::review::ReviewChannel, from: i64, to: i64, factor: f64) -> Box<dyn Iterator<Item = (i64, Value)> + Send + 'a> {
+    match (&ch.band, &ch.counts) {
+        (Some((lo, hi)), Some(counts)) => {
+            let a = ch.t.partition_point(|&x| x < from);
+            let b = ch.t.partition_point(|&x| x < to);
+            Box::new((a..b).map(move |i| (ch.t[i], Value::Interval { mean: ch.v[i] * factor, min: lo[i] * factor, max: hi[i] * factor, count: counts[i] })))
+        }
+        _ => Box::new(ch.recorded(from, to).map(move |(t, v)| (t, Value::Number(v * factor)))),
+    }
+}
+
 /// Two time-ordered streams as one.
 fn merge_two<'a>(a: impl Iterator<Item = (i64, Value)> + Send + 'a, b: impl Iterator<Item = (i64, Value)> + Send + 'a) -> impl Iterator<Item = (i64, Value)> + Send + 'a {
     let (mut a, mut b) = (a.peekable(), b.peekable());
@@ -357,6 +406,56 @@ mod tests {
         let mut out = Vec::new();
         write_rows(&mut out, 1000, None, vec![Series { id: "4002/ROB_1/J1".into(), name: String::new(), units: String::new(), samples: numbers(vec![(1250, 1.0)]) }]).unwrap();
         assert_eq!(String::from_utf8(out).unwrap().lines().nth(1), Some(",0.250,4002/ROB_1/J1,\"\",\"\",1"));
+    }
+
+    #[test]
+    fn an_id_that_needs_quotes_gets_them_and_times_past_any_clock_do_not_crash() {
+        // A damaged recording can name a channel anything; a row keeps its six fields.
+        let mut out = Vec::new();
+        write_rows(&mut out, 0, None, vec![Series { id: "x,y\n\"z\"".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(0, 1.0)]) }]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().nth(1), Some(",0.000,\"x,y"), "the id's line break stays inside its quotes");
+        assert!(text.contains("\"x,y\n\"\"z\"\"\",\"n\",\"\",1"), "{text}");
+        let mut out = Vec::new();
+        write_rows(&mut out, 0, None, vec![Series { id: "=HYPERLINK(1)".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(0, 1.0)]) }]).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains(",\"=HYPERLINK(1)\","), "a formula-like id quoted");
+        // Before 1601 (Windows' clock starts there) and past its range: no time, no panic.
+        for offset in [-20_000_000_000_000i64, i64::MAX - 5, i64::MIN / 2] {
+            let mut out = Vec::new();
+            write_rows(&mut out, 0, Some(offset), vec![Series { id: "a".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(1, 1.0)]) }]).unwrap();
+            assert!(String::from_utf8(out).unwrap().lines().nth(1).unwrap().starts_with(",0.001,"), "{offset}");
+        }
+    }
+
+    #[test]
+    fn a_slow_logs_intervals_save_with_their_extremes_and_counts() {
+        let mut out = Vec::new();
+        let rows = vec![(1000, Value::Interval { mean: 356.5, min: 300.0, max: 357.1, count: 250 })];
+        write_rows(&mut out, 1000, None, vec![Series { id: "5027/ROB_1/J1".into(), name: "DC link".into(), units: "V".into(), samples: Box::new(rows.into_iter()) }]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().next(), Some("time_utc,t_s,channel,name,units,mean,min,max,count"));
+        assert_eq!(text.lines().nth(1), Some(",0.000,5027/ROB_1/J1,\"DC link\",\"V\",356.5,300,357.1,250"), "the dip the slow log caught is in the file");
+    }
+
+    #[test]
+    fn a_save_stopped_partway_leaves_nothing() {
+        // The window closing while a long save runs: it stops, and no part file stays.
+        let dir = std::env::temp_dir().join(format!("spy-export-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x view.csv");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = stop.clone();
+        let samples = (0..200_000i64).map(move |t| {
+            if t == 1000 {
+                s2.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            (t, Value::Number(1.0))
+        });
+        let r = write_csv_until(&p, 0, None, vec![Series { id: "a".into(), name: "n".into(), units: String::new(), samples: Box::new(samples) }], &stop);
+        assert!(r.is_err(), "finished though told to stop: {r:?}");
+        assert!(!p.exists() && !part_name(&p).exists(), "a stopped save left a file behind");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

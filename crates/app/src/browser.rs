@@ -284,7 +284,13 @@ impl SpyApp {
 
     /// Add channels; false (and a message) when that would break the rules.
     pub fn add_channels(&mut self, keys: Vec<ChannelKey>, overlay: bool) -> bool {
-        let fresh: Vec<ChannelKey> = keys.into_iter().filter(|k| !self.chans.iter().any(|c| &c.key == k)).collect();
+        // Each once, however often asked for (a settings file can name a unit twice).
+        let mut fresh: Vec<ChannelKey> = Vec::new();
+        for k in &keys {
+            if !self.chans.iter().any(|c| &c.key == k) && !fresh.contains(k) {
+                fresh.push(k.clone());
+            }
+        }
         if fresh.is_empty() {
             self.toast(Level::Warn, "That channel is already there.");
             return false;
@@ -293,8 +299,16 @@ impl SpyApp {
             self.toast(Level::Error, format!("At most {MAX_CHANNELS} channels at once: {} free.", MAX_CHANNELS - self.chans.len()));
             return false;
         }
-        let lane = self.next_lane;
-        self.next_lane += 1;
+        // Overlaid ("in one chart"): with some of them there already, all of them share
+        // the first one's chart, the ones already there moved into it.
+        let present: Vec<usize> = if overlay { self.chans.iter().enumerate().filter(|(_, c)| keys.contains(&c.key)).map(|(i, _)| i).collect() } else { Vec::new() };
+        let lane = match present.first() {
+            Some(&i) => self.chans[i].lane,
+            None => self.next_lane_and_bump(),
+        };
+        for &i in &present {
+            self.chans[i].lane = lane;
+        }
         for (j, k) in fresh.into_iter().enumerate() {
             // Overlaid channels share the first one's chart; otherwise each gets its own.
             let l = if overlay || j == 0 { lane } else { self.next_lane_and_bump() };

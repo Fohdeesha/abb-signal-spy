@@ -25,6 +25,9 @@ const BLOCK: usize = 256;
 pub const MAX_FILE_BYTES: u64 = 2 << 30;
 /// A clock stepping back further than this is a restart (the timeline's jitter).
 const RESTART_BACK_MS: i64 = 2_000;
+/// No controller's clock reaches this (2^40 ms, 34 years of uptime): the live
+/// timeline's bound on a stamp too.
+const MAX_CONTROLLER_MS: i64 = 1 << 40;
 
 /// Up to [`BLOCK`] consecutive samples of one channel, never across a gap.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +59,8 @@ pub struct ReviewChannel {
     pub raw: Option<Vec<f64>>,
     /// A slow log's interval minimum and maximum beside each mean.
     pub band: Option<(Vec<f64>, Vec<f64>)>,
+    /// A slow log's sample count in each interval.
+    pub counts: Option<Vec<u64>>,
     /// A string signal's texts.
     pub text: Vec<(i64, String)>,
     /// A step longer than this is a gap: 1.5 sample times (a slow log: intervals).
@@ -201,7 +206,7 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     let mut mapper = Mapper { mapping, segment: 0, seg_max: None, at: 0, ran_out: false };
 
     let f = std::fs::File::open(&path).map_err(|e| format!("cannot read {file}: {e}"))?;
-    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None };
+    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None, strict_end: !meta.complete };
     let slow = meta.kind == Kind::Slow;
     let want = if slow { 6 } else { 3 };
     let mut by_id: BTreeMap<String, ReviewChannel> = BTreeMap::new();
@@ -215,7 +220,10 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
         }
         let this = row;
         row += 1;
-        let parsed = r.ok().filter(|(_, f)| f.len() == want).and_then(|(line, f)| Some((line, f[0].0.parse::<i64>().ok()?, f)));
+        // A controller clock no controller shows (a garbled row) is a bad row, as the
+        // live timeline drops it: kept, it would pin the time axis and push every later
+        // sample of its channel out as "out of order".
+        let parsed = r.ok().filter(|(_, f)| f.len() == want).and_then(|(line, f)| Some((line, f[0].0.parse::<i64>().ok().filter(|c| (0..MAX_CONTROLLER_MS).contains(c))?, f)));
         let Some((_, cms, fields)) = parsed else {
             bad_rows += 1;
             if bad_lines.len() < 20 {
@@ -234,6 +242,7 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
             v: Vec::new(),
             raw: None,
             band: slow.then(|| (Vec::new(), Vec::new())),
+            counts: slow.then(Vec::new),
             text: Vec::new(),
             gap_ms: 0.0,
             derived: None,
@@ -253,6 +262,9 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
         if let Some((lo, hi)) = &mut ch.band {
             lo.push(value(4));
             hi.push(value(5));
+        }
+        if let Some(n) = &mut ch.counts {
+            n.push(fields[2].0.parse().unwrap_or(0));
         }
     }
     if let Some(e) = rows.error {
@@ -287,13 +299,25 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     let lasts = channels.iter().filter_map(|c| c.t.last().copied()).chain(channels.iter().filter_map(|c| c.text.last().map(|x| x.0)));
     let (start, end) = (firsts.min().unwrap_or(0), lasts.max().unwrap_or(0));
     let wall_clock = !matches!(mapper.mapping, Mapping::Controller);
-    // Markers carry the controller's clock at the moment they were placed; events only
-    // the wall clock, which is the time axis unless there is no anchor.
+    // Markers carry the controller's clock at the sample they were put on: mapped
+    // through the anchor in effect when they were placed, as that sample's row was,
+    // not placed by the PC's clock (which drifts from the controller's). Events carry
+    // only the wall clock, which is the time axis unless there is no anchor.
+    let through_anchor = |c: i64, u: i64| -> i64 {
+        let a = anchors.iter().rev().find(|a| a.2 <= u).or(anchors.first());
+        match a {
+            // More than a minute from where the PC's clock put it: a restart between the
+            // anchor and the marker; the PC's clock is the better guess then.
+            Some(&(_, ac, au)) if ((au + (c - ac)) - u).abs() <= 60_000 => au + (c - ac),
+            _ => u,
+        }
+    };
     let mut marks = Vec::new();
     for m in &meta.markers {
         let t = match (wall_clock, m.controller_ms, utc_ms(&m.utc)) {
             (false, Some(c), _) => Some(c),
-            (true, _, Some(u)) => Some(u),
+            (true, Some(c), Some(u)) => Some(through_anchor(c, u)),
+            (true, None, Some(u)) => Some(u),
             _ => None,
         };
         if let Some(t) = t {
@@ -358,7 +382,7 @@ fn derive(meta: &Meta, channels: &mut Vec<ReviewChannel>, notes: &mut Vec<String
         };
         let gap_ms = first.gap_ms;
         let b = blocks(&t, &v, None, gap_ms);
-        out.push(ReviewChannel { id: def.id(), key: None, entry: Some(entry), t, v, raw: None, band: None, text: Vec::new(), gap_ms, derived: Some(def.clone()), blocks: b });
+        out.push(ReviewChannel { id: def.id(), key: None, entry: Some(entry), t, v, raw: None, band: None, counts: None, text: Vec::new(), gap_ms, derived: Some(def.clone()), blocks: b });
     }
     if meta.events.iter().any(|e| e.kind == "derived-setting") && !out.is_empty() {
         notes.push("A target or plateau was set or cleared during the recording: the derived values here are all computed with the last one (the changes are marked).".into());
@@ -412,6 +436,34 @@ impl ReviewChannel {
         (i > 0).then(|| (self.t[i - 1], self.v[i - 1]))
     }
 
+    /// The value at `t` for a cursor: the newest sample at or before it, but nothing in
+    /// a gap or long after the channel's last sample (the value before it is not the
+    /// value there).
+    pub fn value_at(&self, t: i64) -> Option<f64> {
+        let (at, v) = self.at_or_before(t)?;
+        ((t - at) as f64 <= self.gap_ms).then_some(v)
+    }
+
+    /// The smallest and largest value over `[from, to)`: for a slow log, its
+    /// intervals' recorded minimum and maximum, not the extremes of their means.
+    pub fn extremes(&self, from: i64, to: i64) -> Option<(f64, f64)> {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for i in self.lower_bound(from)..self.lower_bound(to) {
+            let x = self.v[i];
+            let (l, h) = match &self.band {
+                Some((bl, bh)) => (bl[i].min(x), bh[i].max(x)),
+                None => (x, x),
+            };
+            if l.is_finite() {
+                lo = lo.min(l);
+            }
+            if h.is_finite() {
+                hi = hi.max(h);
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
+
     /// The samples with `from <= t < to` as recorded (a held signal's padding kept).
     pub fn recorded(&self, from: i64, to: i64) -> impl Iterator<Item = (i64, f64)> + '_ {
         let (a, b) = (self.lower_bound(from), self.lower_bound(to));
@@ -447,48 +499,57 @@ impl ReviewChannel {
                 *col_idx = Some(c);
             }
         };
-        let dense = b - a > columns * 8;
-        if !dense {
-            let mut prev: Option<i64> = None;
+        let mut prev: Option<i64> = None;
+        // One sample as it is: a gap or a NaN ends the segment.
+        let sample = |i: usize, current: &mut Vec<Column>, col_idx: &mut Option<usize>, segments: &mut Vec<Vec<Column>>, prev: &mut Option<i64>| {
+            let (t, x) = (self.t[i], self.v[i] * scale);
+            if prev.is_some_and(|p| (t - p) as f64 > self.gap_ms) && !current.is_empty() {
+                segments.push(std::mem::take(current));
+                *col_idx = None;
+            }
+            *prev = Some(t);
+            if !x.is_finite() {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(current));
+                }
+                *col_idx = None;
+                return;
+            }
+            let (lo, hi) = match &self.band {
+                Some((l, h)) => ((l[i] * scale).min(x), (h[i] * scale).max(x)),
+                None => (x, x),
+            };
+            push(current, col_idx, col(t), t, lo, hi, x, x);
+        };
+        if b - a <= columns * 8 {
             for i in a..b {
-                let (t, x) = (self.t[i], self.v[i] * scale);
-                if prev.is_some_and(|p| (t - p) as f64 > self.gap_ms) && !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                    col_idx = None;
-                }
-                prev = Some(t);
-                if !x.is_finite() {
-                    if !current.is_empty() {
-                        segments.push(std::mem::take(&mut current));
-                    }
-                    col_idx = None;
-                    continue;
-                }
-                let (lo, hi) = match &self.band {
-                    Some((l, h)) => ((l[i] * scale).min(x), (h[i] * scale).max(x)),
-                    None => (x, x),
-                };
-                push(&mut current, &mut col_idx, col(t), t, lo, hi, x, x);
+                sample(i, &mut current, &mut col_idx, &mut segments, &mut prev);
             }
         } else {
+            // A summary block stands in for its samples only where it lies wholly inside
+            // the view and inside one pixel column. Drawn whole at the view's edge or
+            // across columns, it would put a spike from outside the view inside it,
+            // leave one inside out, or draw it up to a block early. Any other block's
+            // samples are drawn one by one: the work stays that of the samples in view
+            // at most, and of the columns once blocks are narrower than a column.
+            let (inside_a, inside_b) = (self.lower_bound(from), self.lower_bound(to));
             let first_block = self.blocks.partition_point(|bl| bl.end <= a);
-            let mut prev_t1: Option<i64> = None;
             for bl in &self.blocks[first_block..] {
                 if bl.start >= b {
                     break;
                 }
-                if prev_t1.is_some_and(|p| (bl.t0 - p) as f64 > self.gap_ms || !bl.first.is_finite()) && !current.is_empty() {
+                let whole = bl.start >= inside_a && bl.end <= inside_b && col(bl.t0) == col(bl.t1) && bl.min.is_finite() && bl.first.is_finite() && bl.last.is_finite();
+                if !whole {
+                    for i in bl.start.max(a)..bl.end.min(b) {
+                        sample(i, &mut current, &mut col_idx, &mut segments, &mut prev);
+                    }
+                    continue;
+                }
+                if prev.is_some_and(|p| (bl.t0 - p) as f64 > self.gap_ms) && !current.is_empty() {
                     segments.push(std::mem::take(&mut current));
                     col_idx = None;
                 }
-                prev_t1 = Some(bl.t1);
-                if !bl.min.is_finite() {
-                    if !current.is_empty() {
-                        segments.push(std::mem::take(&mut current));
-                    }
-                    col_idx = None;
-                    continue;
-                }
+                prev = Some(bl.t1);
                 let (lo, hi) = if scale >= 0.0 { (bl.min * scale, bl.max * scale) } else { (bl.max * scale, bl.min * scale) };
                 push(&mut current, &mut col_idx, col(bl.t0), bl.t0, lo, hi, bl.first * scale, bl.last * scale);
             }
@@ -632,6 +693,8 @@ mod tests {
         let ch = r.channel("4002/ROB_1/J1").unwrap();
         assert_eq!(ch.v, vec![2.5, 3.0]);
         assert_eq!(ch.band, Some((vec![1.0, 2.0], vec![4.0, 9.0])));
+        assert_eq!(ch.counts, Some(vec![25, 25]), "the samples in each interval");
+        assert_eq!(ch.extremes(r.start, r.end + 1), Some((1.0, 9.0)), "a slow log's extremes are its intervals' minimum and maximum, not its means'");
         assert_eq!(ch.gap_ms, 1500.0, "one interval and a half");
         let cols = ch.decimate(r.start, r.end + 1, 100, 1.0);
         assert_eq!(cols.len(), 1);
@@ -691,7 +754,104 @@ mod tests {
     fn channel(t: Vec<i64>, v: Vec<f64>) -> ReviewChannel {
         let gap_ms = 6.0;
         let blocks = blocks(&t, &v, None, gap_ms);
-        ReviewChannel { id: "x".into(), key: None, entry: None, t, v, raw: None, band: None, text: Vec::new(), gap_ms, derived: None, blocks }
+        ReviewChannel { id: "x".into(), key: None, entry: None, t, v, raw: None, band: None, counts: None, text: Vec::new(), gap_ms, derived: None, blocks }
+    }
+
+    #[test]
+    fn a_zoomed_out_view_keeps_its_spikes_where_they_are() {
+        // 80 s at 4 ms, flat but for three spikes; the view 10 s to 50 s on 800
+        // columns: 12.5 samples a column, where whole summary blocks (256 samples,
+        // 1 s) span many columns.
+        let n = 20_000usize;
+        let t: Vec<i64> = (0..n as i64).map(|i| i * 4).collect();
+        let mut v = vec![0.0; n];
+        v[2530] = 1000.0; // 10.12 s: in view, in a block that starts before it
+        v[5100] = 500.0; // 20.4 s: in view, in the middle of a block
+        v[12530] = 800.0; // 50.12 s: out of view, in a block that starts inside it
+        let ch = channel(t, v);
+        let (from, to) = (10_000, 50_000);
+        let cols: Vec<Column> = ch.decimate(from, to, 800, 1.0).into_iter().flatten().collect();
+        let width = (to - from) / 800;
+        assert!(cols.iter().any(|c| c.max == 1000.0 && c.t >= from), "the spike at 10.12 s is not in view: {:?}", cols.iter().find(|c| c.max == 1000.0).map(|c| c.t));
+        let mid = cols.iter().find(|c| c.max == 500.0).expect("the spike at 20.4 s");
+        assert!((mid.t - 20_400).abs() <= width, "drawn at {} ms, {} ms from where it is", mid.t, mid.t - 20_400);
+        assert!(!cols.iter().any(|c| c.max == 800.0), "a spike from outside the view drawn in it");
+        assert!(cols.iter().all(|c| c.t >= from - 4 && c.t <= to + 4), "a column from outside the view (beyond the one sample either side a line enters by)");
+        // Columns wider than a block (4 s each): the block that straddles the view's
+        // left edge fits inside its first column, and still must not bring in the
+        // samples it holds from before the view.
+        let mut v = vec![0.0; n];
+        v[2400] = 700.0; // 9.6 s: before the view, in the block that straddles 10 s
+        let ch = channel((0..n as i64).map(|i| i * 4).collect(), v);
+        let wide: Vec<Column> = ch.decimate(from, to, 10, 1.0).into_iter().flatten().collect();
+        assert!(!wide.iter().any(|c| c.max == 700.0), "a spike from before the view drawn at its edge");
+        assert!(wide.iter().all(|c| c.t >= from - 4), "a column from before the view");
+    }
+
+    #[test]
+    fn a_gap_between_two_whole_summary_blocks_still_breaks_the_line() {
+        // 4 s of samples, a gap of a second, then one block's worth: on 4 s columns the
+        // last block before the gap and the one after it each fit in a column, drawn
+        // whole, and the gap between them must still end the segment.
+        let t: Vec<i64> = (0..1000).map(|i| i * 4).chain((0..256).map(|i| 5000 + i * 4)).collect();
+        let v = vec![1.0; t.len()];
+        let ch = channel(t, v);
+        let segs = ch.decimate(0, 40_000, 10, 1.0);
+        assert_eq!(segs.len(), 2, "a line drawn across a one-second gap");
+    }
+
+    #[test]
+    fn a_cursor_in_a_recorded_gap_reads_nothing() {
+        let ch = channel(vec![0, 4, 8, 5000, 5004], vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(ch.value_at(6), Some(2.0));
+        assert_eq!(ch.value_at(2500), None, "the value before a gap, read inside it");
+        assert_eq!(ch.value_at(5004), Some(5.0));
+        assert_eq!(ch.value_at(90_000), None, "long after the channel's last sample");
+        assert_eq!(ch.value_at(-5), None);
+    }
+
+    #[test]
+    fn a_marker_sits_on_the_sample_it_was_put_on() {
+        // An hour in, the PC's clock 400 ms ahead of the controller's: the marker is
+        // where its controller time says, not where the PC's clock put it.
+        let anchors = r#"{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#;
+        let extra = r#", "markers": [{"utc": "2026-09-27T11:00:00.400Z", "kind": "marker", "text": "M1", "controller_ms": 3601000}]"#;
+        let d = folder("marker-drift", "full", anchors, extra, "controller_ms,channel,value\n1000,4002/ROB_1/J1,1\n3601000,4002/ROB_1/J1,2\n");
+        let r = open(&d, &[]).unwrap();
+        let m = r.marks.iter().find(|m| m.kind == "marker").unwrap();
+        assert_eq!(m.t, ms("2026-09-27T11:00:00.000Z"), "{} ms off its sample", m.t - ms("2026-09-27T11:00:00.000Z"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_garbled_timestamp_is_a_bad_row_not_the_end_of_its_channel() {
+        let anchors = r#"{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#;
+        let csv = "controller_ms,channel,value\n1000,4002/ROB_1/J1,1\n1004,4002/ROB_1/J1,2\n1000000000000000,4002/ROB_1/J1,9\n-5,4002/ROB_1/J1,9\n1008,4002/ROB_1/J1,3\n1012,4002/ROB_1/J1,4\n";
+        let d = folder("garbled", "full", anchors, "", csv);
+        let r = open(&d, &[]).unwrap();
+        assert_eq!(r.channel("4002/ROB_1/J1").unwrap().v, vec![1.0, 2.0, 3.0, 4.0], "the rows after the garbled ones were dropped as out of order");
+        assert_eq!(r.bad_rows, 2);
+        assert!(r.end - r.start < 1000, "the stretch spans {} ms", r.end - r.start);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_row_cut_off_at_the_end_of_an_unfinished_recording_is_left_out() {
+        // A power cut mid-row: "356.7" written as "35". The recorder ends every row
+        // with a newline, so a last line without one is cut short, in a recording
+        // that never finished. (A hand-made complete file may lack the last newline.)
+        let anchors = r#"{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#;
+        let csv = "controller_ms,channel,value\n1000,4002/ROB_1/J1,356.7\n1004,4002/ROB_1/J1,35";
+        let d = folder("cut", "full", anchors, "", csv);
+        let json = std::fs::read_to_string(d.join("recording.json")).unwrap().replace("\"complete\": true", "\"complete\": false");
+        std::fs::write(d.join("recording.json"), json).unwrap();
+        let r = open(&d, &[]).unwrap();
+        assert_eq!(r.channel("4002/ROB_1/J1").unwrap().v, vec![356.7], "a cut-off value read as data");
+        assert_eq!(r.bad_rows, 1);
+        let _ = std::fs::remove_dir_all(&d);
+        let d = folder("uncut", "full", anchors, "", csv);
+        assert_eq!(open(&d, &[]).unwrap().channel("4002/ROB_1/J1").unwrap().v, vec![356.7, 35.0], "a complete file's last line is its own");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

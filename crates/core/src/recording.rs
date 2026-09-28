@@ -939,7 +939,7 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
     };
     let file = if meta.kind == Kind::Slow { "slow.csv" } else { "data.csv" };
     let f = File::open(dir.join(file)).map_err(|e| format!("cannot read {file}: {e}"))?;
-    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None };
+    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None, strict_end: !meta.complete };
     let mut data: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
     let mut text: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
     let mut bad = Vec::new();
@@ -987,6 +987,9 @@ pub(crate) struct CsvRows<R: std::io::BufRead> {
     /// A read failed (a share gone, a bad sector): the rows end there, and the
     /// reason is kept for the caller rather than retried forever.
     pub(crate) error: Option<String>,
+    /// A last line with no newline is cut short (the recorder ends every row with
+    /// one): for a recording that never finished. A hand-made file may lack it.
+    pub(crate) strict_end: bool,
 }
 
 /// Longer than any row this program writes by far; bounds what an unterminated
@@ -1029,6 +1032,10 @@ impl<R: std::io::BufRead> CsvRows<R> {
                 if bytes.last() != Some(&b'\n') {
                     self.skip_line();
                 }
+                return Some(Err(start));
+            }
+            // A line short of MAX_ROW with no newline ends the file.
+            if self.strict_end && bytes.last() != Some(&b'\n') {
                 return Some(Err(start));
             }
             let text = String::from_utf8_lossy(&bytes);
@@ -1254,7 +1261,7 @@ mod tests {
                 Err(std::io::Error::other("the share is gone"))
             }
         }
-        let mut rows = CsvRows { r: std::io::BufReader::new(Gone), line: 0, error: None };
+        let mut rows = CsvRows { r: std::io::BufReader::new(Gone), line: 0, error: None, strict_end: false };
         assert!(rows.next_row().is_none(), "a failing read must end the rows, not repeat");
         assert!(rows.error.as_deref().is_some_and(|e| e.contains("the share is gone")), "{:?}", rows.error);
         assert!(rows.next_row().is_none());
@@ -1447,7 +1454,7 @@ mod tests {
             }
         }
         let r = Runaway { left: 50 << 20, tail: std::io::Cursor::new(b"\n7,4002/ROB_1/J1,1.5\n") };
-        let mut rows = CsvRows { r: std::io::BufReader::new(r), line: 0, error: None };
+        let mut rows = CsvRows { r: std::io::BufReader::new(r), line: 0, error: None, strict_end: false };
         assert!(matches!(rows.next_row(), Some(Err(1))), "a runaway line is a bad row");
         let next = rows.next_row();
         assert!(matches!(&next, Some(Ok((_, f))) if f.len() == 3 && f[0].0 == "7"), "{next:?}");
@@ -1488,7 +1495,7 @@ mod tests {
     #[test]
     fn the_reader_takes_csv_as_csv() {
         let text = "controller_ms,channel,value\n1,a,1.5\n2,b,\"x, \"\"y\"\"\r\nz\"\n3,a,NaN\nnot a row\n4,a\n5,c,\"unterminated\n";
-        let mut rows = CsvRows { r: std::io::Cursor::new(text.as_bytes()), line: 0, error: None };
+        let mut rows = CsvRows { r: std::io::Cursor::new(text.as_bytes()), line: 0, error: None, strict_end: false };
         let mut got = Vec::new();
         while let Some(r) = rows.next_row() {
             got.push(r.map(|(line, f)| (line, f.into_iter().map(|(v, q)| format!("{}{v}", if q { "q:" } else { "" })).collect::<Vec<_>>())));

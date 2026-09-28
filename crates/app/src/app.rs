@@ -165,6 +165,8 @@ pub struct SpyApp {
     /// A CSV being written, and what to add to its "saved" message.
     pub export_job: Option<crate::export::ExportJob>,
     pub export_note: &'static str,
+    /// Set to stop the save under way (the window closing): it leaves nothing behind.
+    pub export_stop: Arc<std::sync::atomic::AtomicBool>,
 
     /// A recording open for review, and one being opened.
     pub review: Option<crate::review_view::ReviewState>,
@@ -301,6 +303,7 @@ impl SpyApp {
             png_pending: false,
             export_job: None,
             export_note: "",
+            export_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             review: None,
             review_job: None,
             show_recordings: false,
@@ -1055,6 +1058,14 @@ impl SpyApp {
             return;
         }
         let (space, m) = ctx.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::M)));
+        // While reviewing, the live charts are hidden: pausing them unseen, or putting a
+        // marker into a live recording from what is under review, would mislead.
+        if self.review.is_some() {
+            if m {
+                self.toast(Level::Info, "M puts a marker on the live charts: close the recording under review first.");
+            }
+            return;
+        }
         if space {
             self.toggle_pause();
         }
@@ -1260,6 +1271,12 @@ impl SpyApp {
         }
         if let Some(r) = self.slow.take() {
             r.stop();
+        }
+        // A save under way stops, and its part file goes with it.
+        if let Some(job) = self.export_job.take() {
+            self.export_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = job.join();
+            self.log.info("A CSV being saved was stopped: the window closed before it was done.");
         }
         self.phone = None;
         self.save_settings();

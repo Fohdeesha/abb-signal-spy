@@ -33,21 +33,30 @@ pub struct ReviewState {
     pub cursors_on: bool,
     pub cursor_a: Option<f64>,
     pub cursor_b: Option<f64>,
+    /// Times the channels' statistics were computed (each is a pass over every sample
+    /// in the stretch).
+    pub stats_computed: u64,
+    /// The last statistics computed and their stretch: the panel's (0), the cursors' (1).
+    stats_cache: [Option<StatsFor>; 2],
 }
+
+/// Each channel's statistics, and the stretch `[from, to)` they are of.
+type StatsFor = ((i64, i64), Vec<RangeStats>);
 
 impl ReviewState {
     fn new(review: Review) -> ReviewState {
         let dur = ((review.end - review.start) as f64 / 1000.0).max(0.001);
-        ReviewState { review: Arc::new(review), view: (0.0, dur), fresh: true, cursors_on: false, cursor_a: None, cursor_b: None }
+        ReviewState { review: Arc::new(review), view: (0.0, dur), fresh: true, cursors_on: false, cursor_a: None, cursor_b: None, stats_computed: 0, stats_cache: [None, None] }
     }
 
     fn duration(&self) -> f64 {
         ((self.review.end - self.review.start) as f64 / 1000.0).max(0.001)
     }
 
-    /// Seconds on the chart to the recording's time axis (ms).
+    /// Seconds on the chart to the recording's time axis (ms); saturating, however far
+    /// the charts are zoomed or dragged.
     fn t_of(&self, x: f64) -> i64 {
-        self.review.start + (x * 1000.0).round() as i64
+        self.review.start.saturating_add((x * 1000.0).round() as i64)
     }
 }
 
@@ -410,6 +419,24 @@ impl SpyApp {
         }
     }
 
+    /// Each channel's statistics over `[from, to)`, in its display unit, computed once
+    /// for a stretch and kept (slot 0 the panel's stretch in view, 1 the cursors'): a
+    /// long recording's stretch holds tens of millions of samples, and the window
+    /// repaints many times a second.
+    fn review_stats_cached(&mut self, slot: usize, from: i64, to: i64) -> Vec<RangeStats> {
+        let cat = &self.catalogue;
+        let Some(rs) = &mut self.review else { return Vec::new() };
+        if let Some((k, v)) = &rs.stats_cache[slot]
+            && *k == (from, to)
+        {
+            return v.clone();
+        }
+        let v: Vec<RangeStats> = rs.review.channels.iter().map(|ch| review_stats(cat, ch, from, to)).collect();
+        rs.stats_computed += 1;
+        rs.stats_cache[slot] = Some(((from, to), v.clone()));
+        v
+    }
+
     fn review_cursor_table(&mut self, ui: &mut egui::Ui) {
         let Some(rs) = &self.review else { return };
         let (a, b) = (rs.cursor_a, rs.cursor_b);
@@ -417,6 +444,9 @@ impl SpyApp {
             (Some(a), Some(b)) => (a.min(b), a.max(b)),
             _ => rs.view,
         };
+        let (from, to) = (rs.t_of(range.0), rs.t_of(range.1).saturating_add(1));
+        let stats = self.review_stats_cached(1, from, to);
+        let Some(rs) = &self.review else { return };
         ui.separator();
         match (a, b) {
             (Some(a), Some(b)) => ui.label(RichText::new(format!("A {a:.3} s   B {b:.3} s   Δt {:.3} s  (statistics between A and B)", b - a)).strong()),
@@ -428,11 +458,11 @@ impl SpyApp {
                 ui.label(RichText::new(h).small().strong());
             }
             ui.end_row();
-            for ch in rs.review.channels.iter().filter(|c| !c.v.is_empty()) {
+            for (i, ch) in rs.review.channels.iter().enumerate().filter(|(_, c)| !c.v.is_empty()) {
                 let (units, factor) = display(ch);
-                let at = |x: Option<f64>| x.and_then(|x| ch.at_or_before(rs.t_of(x))).map(|(_, v)| v * factor);
+                let at = |x: Option<f64>| x.and_then(|x| at_cursor(rs, ch, x, factor));
                 let (va, vb) = (at(a), at(b));
-                let s = review_stats(&self.catalogue, ch, rs.t_of(range.0), rs.t_of(range.1) + 1);
+                let s = stats.get(i).copied().unwrap_or_default();
                 let f = |v: Option<f64>| v.map(view::fmt).unwrap_or_else(|| "--".into());
                 ui.label(RichText::new(name(&self.catalogue, ch)).small());
                 ui.label(RichText::new(f(va)).small().monospace());
@@ -448,6 +478,9 @@ impl SpyApp {
     /// statistics over the stretch in view. No status word, no readout: nothing here
     /// is live.
     pub fn review_table(&mut self, ui: &mut egui::Ui) {
+        let Some(rs) = &self.review else { return };
+        let (from, to) = (rs.t_of(rs.view.0), rs.t_of(rs.view.1).saturating_add(1));
+        let stats = self.review_stats_cached(0, from, to);
         let Some(rs) = &self.review else { return };
         let r = &rs.review;
         let m = &r.meta;
@@ -481,7 +514,6 @@ impl SpyApp {
         }
         ui.separator();
         ui.label(RichText::new(format!("In view: {:.1} s to {:.1} s", rs.view.0, rs.view.1)).small().weak());
-        let (from, to) = (rs.t_of(rs.view.0), rs.t_of(rs.view.1) + 1);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (i, ch) in r.channels.iter().enumerate() {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -499,7 +531,7 @@ impl SpyApp {
                         return;
                     }
                     let (units, _) = display(ch);
-                    let s = review_stats(&self.catalogue, ch, from, to);
+                    let s = stats.get(i).copied().unwrap_or_default();
                     if s.n == 0 {
                         ui.label(RichText::new("no samples in view").small().weak());
                         return;
@@ -513,10 +545,16 @@ impl SpyApp {
     }
 }
 
+/// A channel's value at cursor `x` (seconds on the chart), in its display unit:
+/// nothing in a gap, or after the channel ended.
+pub(crate) fn at_cursor(rs: &ReviewState, ch: &ReviewChannel, x: f64, factor: f64) -> Option<f64> {
+    ch.value_at(rs.t_of(x)).map(|v| v * factor)
+}
+
 /// Statistics of a recorded channel over `[from, to)`, in its display unit, read as the
 /// signal means it: a wrapping angle's mean on the circle (computed in radians, then
 /// scaled). A zero-filled signal's padding was undone when the recording was opened.
-fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from: i64, to: i64) -> RangeStats {
+pub(crate) fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from: i64, to: i64) -> RangeStats {
     let recorded = ch.key.as_ref().map_or(view::Reading::Plain, |k| view::reading(cat.get(k.signal)));
     let r = match ch.derived.as_ref().map_or(recorded, crate::derived_view::reading) {
         view::Reading::ZeroFilled => view::Reading::Plain,
@@ -524,7 +562,14 @@ fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from: i64, to: i
     };
     let v: Vec<f64> = ch.range(from, to).map(|(_, v)| v).collect();
     let (_, factor) = display(ch);
-    let s = view::stats_of(&v, r);
+    let mut s = view::stats_of(&v, r);
+    // A slow log's extremes are its intervals' recorded minimum and maximum, not the
+    // extremes of their means (a dip it caught would be contradicted otherwise).
+    if ch.band.is_some()
+        && let Some((lo, hi)) = ch.extremes(from, to)
+    {
+        (s.min, s.max) = (lo, hi);
+    }
     RangeStats { n: s.n, mean: s.mean * factor, min: s.min * factor, max: s.max * factor, sd: s.sd * factor }
 }
 
@@ -586,10 +631,13 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str) -> Option
         HoverPosition::NearDataPoint { plot_name, position, .. } => (Some(*plot_name), *position),
         HoverPosition::Elsewhere { position } => (None, *position),
     };
-    let t = start + (p.x * 1000.0).round() as i64;
+    let t = start.saturating_add((p.x * 1000.0).round() as i64);
     let when = if wall {
-        let at = if t >= 0 { UNIX_EPOCH + Duration::from_millis(t as u64) } else { UNIX_EPOCH - Duration::from_millis(t.unsigned_abs()) };
-        view::local_time(at)
+        // Checked: zoomed out before 1601 or past year 30827, SystemTime arithmetic
+        // panics on Windows.
+        let d = Duration::from_millis(t.unsigned_abs());
+        let at = if t >= 0 { UNIX_EPOCH.checked_add(d) } else { UNIX_EPOCH.checked_sub(d) };
+        at.map_or_else(|| "a time no clock shows".to_string(), view::local_time)
     } else {
         format!("controller {t} ms")
     };
@@ -602,6 +650,47 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small recording on disk, opened: 4002 J1 at 1000-1040 ms, then after a 5 s gap
+    /// at 6000-6040.
+    fn gapped_review() -> Review {
+        let d = std::env::temp_dir().join(format!("spy-review-gap-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("recording.json"),
+            r#"{"format": "abb-signal-spy-recording", "version": 2, "kind": "full", "app": "t", "started_utc": "2026-09-27T10:00:00.000Z", "complete": true,
+                "channels": [{"id": "4002/ROB_1/J1", "signal": 4002, "unit": "ROB_1", "axis": 1, "name": "Torque", "units": "Nm", "sample_ms": 4.0}],
+                "anchors": [{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}], "rows_written": 0, "samples_lost": 0}"#,
+        )
+        .unwrap();
+        let mut csv = String::from("controller_ms,channel,value\n");
+        for t in (1000..=1040).step_by(4).chain((6000..=6040).step_by(4)) {
+            csv += &format!("{t},4002/ROB_1/J1,{}\n", if t < 5000 { 1 } else { 2 });
+        }
+        std::fs::write(d.join("data.csv"), csv).unwrap();
+        let r = spy_core::review::open(&d, &[]).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        r
+    }
+
+    #[test]
+    fn a_review_cursor_in_a_gap_reads_nothing() {
+        let rs = ReviewState::new(gapped_review());
+        let ch = rs.review.channel("4002/ROB_1/J1").unwrap().clone();
+        assert_eq!(at_cursor(&rs, &ch, 0.02, 1.0), Some(1.0));
+        assert_eq!(at_cursor(&rs, &ch, 2.5, 1.0), None, "the value before a 5 s gap, read in it");
+        assert_eq!(at_cursor(&rs, &ch, 5.02, 1.0), Some(2.0));
+    }
+
+    #[test]
+    fn extreme_zoom_and_hovering_before_1601_do_not_crash() {
+        let rs = ReviewState::new(gapped_review());
+        for x in [1e16, -1e16, f64::MAX, f64::MIN, -11_644_473_700.0] {
+            let _ = rs.t_of(x);
+            let pos = HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 0.0) };
+            assert!(hover(&pos, rs.review.start, true, "Nm").is_some(), "{x}");
+        }
+    }
 
     #[test]
     fn a_dropped_folder_or_one_of_its_files_means_the_recording() {
