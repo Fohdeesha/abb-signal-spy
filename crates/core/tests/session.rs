@@ -672,37 +672,162 @@ fn a_restarted_virtual_controller_is_followed_to_its_new_port() {
     assert!(new.seen_props().iter().any(|p| p == "StreamDefine"));
 }
 
-#[test]
-fn a_restarted_vc_whose_own_robotstudio_took_infostream_says_connect_again() {
-    // Measured on the RW6 VC (2026-09-28, s25 item 9): RobotStudio's own connection,
-    // listed all along, reconnects at every VC start and takes InfoStream first;
-    // this program leaving ends that hold, and the next connection gets the samples.
-    let mut old = FakeController::start(Behaviour::default()).unwrap();
+/// A session streaming from a VC with a RobotStudio-like client listed beside it
+/// (handshake only); the VC then restarts on a new port, where that client
+/// reconnects first and sends StreamConnect (s25 item 9), and the session follows.
+/// `extra`: clients elsewhere, listed by both.
+struct RestartedVc {
+    s: Session,
+    k: ChannelKey,
+    new: FakeController,
+    rs: OtherTool,
+    n: u64,
+}
+
+fn restarted_vc(o: Options, extra: &[&str]) -> RestartedVc {
+    let b = || Behaviour { extra_clients: extra.iter().map(|a| a.to_string()).collect(), ..Behaviour::default() };
+    let mut old = FakeController::start(b()).unwrap();
     let mut rs = OtherTool::connect(&old, Duration::from_millis(20));
     rs.s.write_all(&spy_core::request::hello(1)).unwrap();
     let ports = Arc::new(Mutex::new(vec![old.port()]));
-    let s = spawn(Options { find_vc: finder(ports.clone()), ..opts() });
+    let s = spawn(Options { find_vc: finder(ports.clone()), ..o });
     let k = key(6000, "ROB_1", 1);
     s.set_channels(vec![k.clone()]);
     s.connect(target(&old));
     assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let n = samples(&s, &k);
+    let (new, rs2) = restart(&mut old, &ports, b());
+    drop(rs);
+    RestartedVc { s, k, new, rs: rs2, n }
+}
+
+/// The VC restarts on a new port: RobotStudio's connection reconnects there first
+/// and takes InfoStream (s25 item 9); the finder then sees the new port.
+fn restart(old: &mut FakeController, ports: &Arc<Mutex<Vec<u16>>>, b: Behaviour) -> (FakeController, OtherTool) {
     old.stop();
     ports.lock().unwrap().clear();
-    let new = FakeController::start(Behaviour::default()).unwrap();
+    let new = FakeController::start(b).unwrap();
     let mut rs = OtherTool::connect(&new, Duration::from_millis(20));
     rs.s.write_all(&spy_core::request::hello(1)).unwrap();
     rs.send(Command::StreamConnect);
     ports.lock().unwrap().push(new.port());
-    let reason = {
-        assert!(wait_for(15000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
-        stopped_reason(&s)
-    };
-    assert!(reason.contains("RobotStudio's own") && reason.contains("Connect again"), "{reason}");
-    // As it says: connected again, this program gets the samples.
-    let n = samples(&s, &k);
-    s.connect(target(&new));
-    assert!(wait_for(5000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 20), "{:?}\n{}", phase(&s), log_text(&s));
+    (new, rs)
+}
+
+#[test]
+fn each_outage_gets_its_own_one_reconnect() {
+    let mut first = FakeController::start(Behaviour::default()).unwrap();
+    let mut rs = OtherTool::connect(&first, Duration::from_millis(20));
+    rs.s.write_all(&spy_core::request::hello(1)).unwrap();
+    let ports = Arc::new(Mutex::new(vec![first.port()]));
+    let s = spawn(Options { find_vc: finder(ports.clone()), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&first));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let streaming_again = |n: u64| wait_for(15000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 20);
+    // Two restarts: each followed, each connected again once, by itself.
+    let (mut second, rs2) = restart(&mut first, &ports, Behaviour::default());
     drop(rs);
+    assert!(streaming_again(samples(&s, &k)), "{:?}\n{}", phase(&s), log_text(&s));
+    let (third, rs3) = restart(&mut second, &ports, Behaviour::default());
+    drop(rs2);
+    assert!(streaming_again(samples(&s, &k)), "{:?}\n{}", phase(&s), log_text(&s));
+    assert_eq!(log_text(&s).matches("connecting again, once").count(), 2, "{}", log_text(&s));
+    // Then a drop with no restart: the other connection's hold is not taken by itself.
+    third.drop_connections();
+    drop(rs3);
+    let mut rs4 = OtherTool::connect(&third, Duration::from_millis(20));
+    rs4.s.write_all(&spy_core::request::hello(1)).unwrap();
+    rs4.send(Command::StreamConnect);
+    assert!(wait_for(15000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    assert_eq!(log_text(&s).matches("connecting again, once").count(), 2, "{}", log_text(&s));
+}
+
+#[test]
+fn a_restarted_vc_whose_own_robotstudio_took_infostream_is_connected_again_once() {
+    // Measured on the RW6 VC (2026-09-28, s25 item 9): this program leaving ends
+    // RobotStudio's hold, and the next connection gets the samples. So the session
+    // leaves and comes back by itself, once (G24).
+    let v = restarted_vc(opts(), &[]);
+    let (s, k) = (&v.s, &v.k);
+    let mut stopped = false;
+    assert!(
+        wait_for(15000, || {
+            stopped |= matches!(phase(s), Phase::Stopped { .. });
+            phase(s) == Phase::Streaming && samples(s, k) > v.n + 20
+        }),
+        "{:?}\n{}",
+        phase(s),
+        log_text(s)
+    );
+    assert!(!stopped, "it came back by itself\n{}", log_text(s));
+    assert_eq!(log_text(s).matches("connecting again, once").count(), 1, "{}", log_text(s));
+    let connects = v.new.seen().iter().filter(|x| x.property == "StreamConnect").count();
+    assert_eq!(connects, 3, "the other client's, the follow's, and the one reconnect's");
+}
+
+#[test]
+fn a_restarted_vc_is_not_connected_again_by_itself_with_a_client_elsewhere() {
+    // Someone on another PC may be the one showing signals: asked of the person.
+    let v = restarted_vc(opts(), &["192.0.2.27"]);
+    assert!(wait_for(15000, || matches!(phase(&v.s), Phase::Stopped { .. })), "{:?}\n{}", phase(&v.s), log_text(&v.s));
+    let reason = stopped_reason(&v.s);
+    assert!(reason.contains("RobotStudio's own") && reason.contains("Connect again"), "{reason}");
+    assert!(!log_text(&v.s).contains("connecting again, once"), "{}", log_text(&v.s));
+    // As it says: connected again, this program gets the samples.
+    let n = samples(&v.s, &v.k);
+    v.s.connect(target(&v.new));
+    assert!(wait_for(5000, || phase(&v.s) == Phase::Streaming && samples(&v.s, &v.k) > n + 20), "{:?}\n{}", phase(&v.s), log_text(&v.s));
+}
+
+#[test]
+fn a_vc_that_did_not_restart_is_not_connected_again_by_itself() {
+    // The connection dropped, the port did not move: the controller did not restart,
+    // so nothing says the other connection's hold is RobotStudio's automatic one.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut rs = OtherTool::connect(&fake, Duration::from_millis(20));
+    rs.s.write_all(&spy_core::request::hello(1)).unwrap();
+    let s = spawn(Options { find_vc: finder(Arc::new(Mutex::new(vec![fake.port()]))), ladder: vec![Duration::from_millis(400)], ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.drop_connections();
+    let mut rs = OtherTool::connect(&fake, Duration::from_millis(20));
+    rs.s.write_all(&spy_core::request::hello(1)).unwrap();
+    rs.send(Command::StreamConnect);
+    assert!(wait_for(15000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    assert!(!log_text(&s).contains("connecting again, once"), "{}", log_text(&s));
+    assert!(!log_text(&s).contains("now answers on port"), "{}", log_text(&s));
+}
+
+#[test]
+fn the_one_reconnect_after_a_vc_restart_is_not_repeated() {
+    // A program on this PC takes InfoStream again straight after this program left,
+    // on a fresh connection of its own (an orphaned one gets nothing, whatever it
+    // sends: s23 item 15): one showing signals, not RobotStudio's hold at the start.
+    let v = restarted_vc(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(1000)], ..opts() }, &[]);
+    let RestartedVc { s, new, rs, .. } = v;
+    let again = std::thread::scope(|sc| {
+        sc.spawn(|| {
+            // This program set up there (the other client defines nothing), then left.
+            assert!(wait_for(15000, || !new.streams().is_empty()));
+            assert!(wait_for(15000, || new.open_connections() < 2));
+            drop(rs);
+            let mut again = OtherTool::connect(&new, Duration::from_millis(20));
+            again.s.write_all(&spy_core::request::hello(1)).unwrap();
+            again.send(Command::StreamConnect);
+            again
+        })
+        .join()
+        .unwrap()
+    });
+    assert!(wait_for(15000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    let reason = stopped_reason(&s);
+    assert!(reason.contains("still no samples") && reason.contains("showing test signals"), "{reason}");
+    assert_eq!(log_text(&s).matches("connecting again, once").count(), 1, "{}", log_text(&s));
+    drop(again);
 }
 
 #[test]

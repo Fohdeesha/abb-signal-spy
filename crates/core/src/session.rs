@@ -784,6 +784,13 @@ struct Worker {
     system_id: Option<String>,
     /// The last restarted virtual controller followed to its new port (from, to).
     moved: Option<(Target, Target)>,
+    /// This outage followed the controller to a new port: it restarted, and
+    /// RobotStudio's own connection took InfoStream as it started (s25 item 9).
+    followed_restart: bool,
+    /// This outage already left and connected again once for that (G24). Both are
+    /// cleared by the first sample; a deliberate connect needs no clearing, since
+    /// only a session that delivered before the outage connects again by itself.
+    vc_hold_retried: bool,
     /// A local VC answered while this one was looked for, but none as this
     /// controller: said once until the next connection.
     told_other_vc: bool,
@@ -884,6 +891,8 @@ impl Worker {
             leaver_retry_next: false,
             system_id: None,
             moved: None,
+            followed_restart: false,
+            vc_hold_retried: false,
             told_other_vc: false,
             told_unanswered: BTreeSet::new(),
             vc_paused_since: None,
@@ -1239,6 +1248,7 @@ impl Worker {
                 self.log.info(format!("The controller now answers on port {port}, not {}: a virtual controller takes a new port at every start. Connecting there.", target.port));
                 self.moved = Some((target, to.clone()));
                 self.target = Some(to);
+                self.followed_restart = true;
                 self.open_once(false);
                 return;
             }
@@ -2202,8 +2212,24 @@ impl Worker {
             // up streams ends that hold when it leaves (measured, s25 item 9).
             let on_vc = self.conn.as_ref().is_some_and(|c| is_loopback(c.peer.ip()));
             if nothing_yet && self.auto_reconnect && self.delivered_before {
+                // A virtual controller this outage followed to a new port restarted, and
+                // that hold is RobotStudio's automatic one: leave, which ends it, and
+                // connect again by itself, once, when every other client is on this PC
+                // (the operator's decision, G24).
+                if on_vc && self.followed_restart && !self.vc_hold_retried && self.others.iter().all(|o| o.same_pc) {
+                    self.vc_hold_retried = true;
+                    // Its own connection may stay listed a moment: waited out like a held one.
+                    self.lost_at = Some(Instant::now());
+                    self.emit_mark(Mark::Lost { reason: "no samples after the virtual controller restarted".into() });
+                    self.begin_teardown(After::Retry(
+                        "no samples after the virtual controller restarted: RobotStudio's own connection takes InfoStream as a virtual controller starts, and this program leaving ends that, so connecting again, once".into(),
+                    ));
+                    return;
+                }
                 let reason = if self.leaver_retry {
                     "Connected again once, after another program's exit had ended InfoStream, but no samples arrive: another program may have taken InfoStream since. Connect again when it is free.".to_string()
+                } else if on_vc && self.vc_hold_retried {
+                    "Connected again once more after the virtual controller restarted, but still no samples arrive: another program on this PC is most likely showing test signals (TuneMaster, RobotStudio's Signal Analyzer). Close it, then connect again.".to_string()
                 } else if on_vc {
                     "Connected again after the connection was lost, but no samples arrive: another connection has InfoStream. On a virtual controller that is usually RobotStudio's own, which takes it whenever the controller starts, and this program leaving ends that: Connect again. (If a program on this PC is showing test signals, TuneMaster or RobotStudio's Signal Analyzer, close it first.)".to_string()
                 } else {
@@ -2670,6 +2696,8 @@ impl Worker {
                 }
                 self.rung = 0;
                 self.leaver_retry = false;
+                self.followed_restart = false;
+                self.vc_hold_retried = false;
                 self.lost_at = None;
                 self.held_seen = false;
             }
