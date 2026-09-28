@@ -139,6 +139,38 @@ fn part_name(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// What a picture is of: the charts, or the XY plot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Picture {
+    Charts,
+    Xy,
+}
+
+impl Picture {
+    /// For messages.
+    fn name(self) -> &'static str {
+        match self {
+            Picture::Charts => "charts",
+            Picture::Xy => "XY plot",
+        }
+    }
+
+    /// For its file's name.
+    fn file_word(self) -> &'static str {
+        match self {
+            Picture::Charts => "charts",
+            Picture::Xy => "xy",
+        }
+    }
+
+    fn not_shown(self) -> &'static str {
+        match self {
+            Picture::Charts => "The charts are not on screen.",
+            Picture::Xy => "The XY plot is not open.",
+        }
+    }
+}
+
 /// The part of a screenshot inside `rect` (in points), as PNG bytes.
 pub fn crop_png(image: &egui::ColorImage, rect: egui::Rect, pixels_per_point: f32) -> Result<Vec<u8>, String> {
     let [w, h] = image.size;
@@ -147,7 +179,7 @@ pub fn crop_png(image: &egui::ColorImage, rect: egui::Rect, pixels_per_point: f3
     let x1 = ((rect.max.x * pixels_per_point).ceil().max(0.0) as usize).min(w);
     let y1 = ((rect.max.y * pixels_per_point).ceil().max(0.0) as usize).min(h);
     if x1 <= x0 || y1 <= y0 {
-        return Err("the charts were not on screen".into());
+        return Err("it was not on screen".into());
     }
     let mut bytes = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
     for y in y0..y1 {
@@ -312,21 +344,26 @@ impl SpyApp {
         }
     }
 
-    /// Ask the window for a screenshot; the charts' part is saved when it arrives.
-    pub fn request_png(&mut self) {
-        if self.charts_rect.is_none() {
-            self.toast(Level::Warn, "The charts are not on screen.");
+    fn picture_rect(&self, what: Picture) -> Option<egui::Rect> {
+        match what {
+            Picture::Charts => self.charts_rect,
+            Picture::Xy => self.xy_rect,
+        }
+    }
+
+    /// Ask the window for a screenshot; the part showing `what` is saved when it arrives.
+    pub fn request_png(&mut self, what: Picture) {
+        if self.picture_rect(what).is_none() {
+            self.toast(Level::Warn, what.not_shown());
             return;
         }
-        self.png_pending = true;
+        self.png_pending = Some(what);
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
     }
 
-    /// A screenshot arrived: crop it to the charts and save it.
+    /// A screenshot arrived: crop it to what was asked for and save it.
     pub fn take_screenshot(&mut self, ctx: &egui::Context) {
-        if !self.png_pending {
-            return;
-        }
+        let Some(what) = self.png_pending else { return };
         let shot = ctx.input(|i| {
             i.raw.events.iter().find_map(|e| match e {
                 egui::Event::Screenshot { image, .. } => Some(image.clone()),
@@ -334,16 +371,15 @@ impl SpyApp {
             })
         });
         let Some(image) = shot else { return };
-        self.png_pending = false;
-        let Some(rect) = self.charts_rect else { return };
-        let result = crop_png(&image, rect, ctx.pixels_per_point()).and_then(|bytes| {
-            let p = self.export_path("charts", "png")?;
+        self.png_pending = None;
+        let result = self.picture_rect(what).ok_or_else(|| what.not_shown().to_string()).and_then(|rect| crop_png(&image, rect, ctx.pixels_per_point())).and_then(|bytes| {
+            let p = self.export_path(what.file_word(), "png")?;
             std::fs::write(&p, bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
             Ok(p)
         });
         match result {
             Ok(p) => {
-                self.toast(Level::Info, format!("Saved the charts to {}", p.display()));
+                self.toast(Level::Info, format!("Saved the {} to {}", what.name(), p.display()));
                 self.last_folder = p.parent().map(Path::to_path_buf);
             }
             Err(e) => self.toast(Level::Error, format!("Could not save the picture: {e}")),

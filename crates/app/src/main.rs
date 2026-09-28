@@ -21,6 +21,7 @@ mod sets;
 mod settings;
 mod theme;
 mod view;
+mod xy;
 
 #[cfg(test)]
 mod ui_tests;

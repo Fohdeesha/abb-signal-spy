@@ -38,9 +38,10 @@ impl Src {
 
 /// One line on the charts, and one row of the cursor table.
 #[derive(Clone)]
-struct Member {
-    id: String,
-    lane: (u32, String),
+pub(crate) struct Member {
+    pub(crate) id: String,
+    /// The chart's lane and the display unit.
+    pub(crate) lane: (u32, String),
     color: egui::Color32,
     factor: f64,
     hold: bool,
@@ -48,12 +49,31 @@ struct Member {
     /// For the legend.
     name: String,
     /// For a chart's title and the cursor table.
-    title: String,
+    pub(crate) title: String,
     frozen: bool,
-    health: Health,
+    pub(crate) health: Health,
     /// Nothing yet in the store.
     src: Option<Src>,
 }
+
+impl Member {
+    /// Its samples over `[from, to)` as the chart draws them: in the display unit, a
+    /// zero-filled signal's padding undone (the hold primed from just before).
+    pub(crate) fn values(&self, from: i64, to: i64) -> Vec<(i64, f64)> {
+        let Some(src) = &self.src else { return Vec::new() };
+        let ring = src.lock();
+        let mut zh = view::ZeroHold::new();
+        let prime = if self.hold { from - view::ZERO_HOLD_MS.ceil() as i64 - 1 } else { from };
+        ring.range(prime, to)
+            .filter_map(|(t, v)| {
+                let v = if self.hold { zh.apply_at(t, v) } else { v };
+                (t >= from).then_some((t, v * self.factor))
+            })
+            .collect()
+    }
+}
+
+pub const XY_HOVER: &str = "Plot one channel against another over the stretch in view (pause and scroll to pick it)";
 
 pub const WINDOWS: [(f64, &str); 9] = [(1.0, "1 s"), (2.0, "2 s"), (5.0, "5 s"), (10.0, "10 s"), (30.0, "30 s"), (60.0, "1 min"), (120.0, "2 min"), (300.0, "5 min"), (600.0, "10 min")];
 
@@ -83,7 +103,7 @@ pub fn range_stats(values: impl Iterator<Item = f64>) -> RangeStats {
 impl SpyApp {
     /// Whether a channel gets a chart: not a text signal (text is not a number), and
     /// not one the controller refused (it has nothing to draw; the table says why).
-    fn charted(&self, i: usize, st: &spy_core::session::Status) -> bool {
+    pub(crate) fn charted(&self, i: usize, st: &spy_core::session::Status) -> bool {
         let c = &self.chans[i];
         if self.catalogue.get(c.key.signal).is_some_and(|s| s.value_type.as_deref() == Some("string")) {
             return false;
@@ -120,7 +140,7 @@ impl SpyApp {
     }
 
     /// Everything charted, channels first, in the order `lanes` gives their charts.
-    fn members(&self, charted: &[bool], st: &Status) -> Vec<Member> {
+    pub(crate) fn members(&self, charted: &[bool], st: &Status) -> Vec<Member> {
         let connected = view::session_live(&st.phase);
         let store = self.session.store();
         let mut out = Vec::new();
@@ -408,7 +428,11 @@ impl SpyApp {
                 self.export_live_csv();
             }
             if ui.button("Save PNG").on_hover_text("Save a picture of the charts to the recordings folder").clicked() {
-                self.request_png();
+                self.request_png(crate::export::Picture::Charts);
+            }
+            ui.separator();
+            if ui.selectable_label(self.xy.is_some(), "XY").on_hover_text(XY_HOVER).clicked() {
+                self.toggle_xy();
             }
         });
     }

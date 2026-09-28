@@ -58,6 +58,11 @@ impl ReviewState {
     fn t_of(&self, x: f64) -> i64 {
         self.review.start.saturating_add((x * 1000.0).round() as i64)
     }
+
+    /// The stretch in view on the recording's time axis, `[from, to)`.
+    pub(crate) fn stretch(&self) -> (i64, i64) {
+        (self.t_of(self.view.0), self.t_of(self.view.1).saturating_add(1))
+    }
 }
 
 pub type ReviewJob = (PathBuf, JoinHandle<Result<Review, String>>);
@@ -252,6 +257,7 @@ impl SpyApp {
     /// own unit, on the recording's clock, free to drag and zoom.
     pub fn review_charts(&mut self, ui: &mut egui::Ui) {
         let (mut save_csv, mut save_png) = (false, false);
+        let (xy_open, mut toggle_xy) = (self.xy.is_some(), false);
         let Some(rs) = &mut self.review else { return };
         let dur = rs.duration();
         ui.horizontal_wrapped(|ui| {
@@ -272,13 +278,18 @@ impl SpyApp {
             if ui.button("Save PNG").on_hover_text("Save a picture of the charts to the recordings folder").clicked() {
                 save_png = true;
             }
+            ui.separator();
+            toggle_xy = ui.selectable_label(xy_open, "XY").on_hover_text(crate::charts::XY_HOVER).clicked();
         });
+        if toggle_xy {
+            self.toggle_xy();
+        }
         if save_csv || save_png {
             if save_csv {
                 self.export_review_csv();
             }
             if save_png {
-                self.request_png();
+                self.request_png(crate::export::Picture::Charts);
             }
             return;
         }
@@ -479,7 +490,7 @@ impl SpyApp {
     /// is live.
     pub fn review_table(&mut self, ui: &mut egui::Ui) {
         let Some(rs) = &self.review else { return };
-        let (from, to) = (rs.t_of(rs.view.0), rs.t_of(rs.view.1).saturating_add(1));
+        let (from, to) = rs.stretch();
         let stats = self.review_stats_cached(0, from, to);
         let Some(rs) = &self.review else { return };
         let r = &rs.review;

@@ -532,11 +532,11 @@ fn what_is_in_view_saves_as_csv_and_png() {
     // The picture: the screenshot the window asks for arrives as an event.
     h.get_by_label("Save PNG").click();
     let _ = h.run_ok();
-    assert!(h.state().png_pending, "a screenshot was asked for");
+    assert_eq!(h.state().png_pending, Some(crate::export::Picture::Charts), "a screenshot was asked for");
     let image = std::sync::Arc::new(egui::ColorImage::filled([1400, 900], egui::Color32::DARK_GRAY));
     h.event(egui::Event::Screenshot { viewport_id: egui::ViewportId::ROOT, user_data: egui::UserData::default(), image });
     let _ = h.run_ok();
-    assert!(!h.state().png_pending);
+    assert_eq!(h.state().png_pending, None);
     let pngs = files_ending(&rec, " charts.png");
     assert_eq!(pngs.len(), 1, "{pngs:?}");
     assert!(std::fs::read(&pngs[0]).unwrap().starts_with(b"\x89PNG"));
@@ -1719,6 +1719,133 @@ fn toasts_left_unseen_are_kept_to_the_newest_few() {
     assert!(h.query_by_label("said 29").is_some() && h.query_by_label("said 22").is_some());
     assert!(h.query_by_label("said 21").is_none(), "{} toasts on screen", h.state().toasts.len());
     assert!(h.state().log.since(0).iter().any(|e| e.text == "said 0"), "the older ones are in the log");
+}
+
+/// A speed on every tick (4001), the same at the 24 ms group's ticks (318), a torque
+/// from it (4002 = 2 x 4001 + 3), an angle in radians (1298), and a zero-filled joint
+/// speed (6010, as measured): pairs with a known line.
+fn xy_signals() -> Behaviour {
+    fn speed(t: u64) -> f32 {
+        10.0 * (t as f32 / 300.0).sin()
+    }
+    let mut b = padded_speed();
+    b.signals.insert(4001, SignalDef { source: SignalSource::float(|(t, _, _)| speed(t)), sample_ms: 4.032 });
+    b.signals.insert(4002, SignalDef { source: SignalSource::float(|(t, _, _)| 2.0 * speed(t) + 3.0), sample_ms: 4.032 });
+    b.signals.insert(318, SignalDef { source: SignalSource::float(|(t, _, _)| speed(t)), sample_ms: 24.192 });
+    b.signals.insert(1298, SignalDef { source: SignalSource::float(|(t, _, _)| (t % 1000) as f32 * 0.001), sample_ms: 4.032 });
+    b
+}
+
+/// The XY plot's last pairs, and the channels they are of.
+fn xy_pairs(a: &SpyApp) -> Option<(&crate::xy::Key, &crate::xy::Pairs)> {
+    a.xy.as_ref()?.cache.as_ref().map(|(k, p)| (k, p))
+}
+
+/// Every pair on the line `y = 2 x + 3` (the fake's values are single precision).
+fn on_the_line(p: &crate::xy::Pairs) -> bool {
+    p.points.iter().all(|&(_, x, y)| (y - (2.0 * x + 3.0)).abs() < 1e-4)
+}
+
+#[test]
+fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
+    let fake = FakeController::start(xy_signals()).unwrap();
+    let mut h = harness(temp_dir("xy"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    for n in [4001, 4002, 318, 1298, 6010] {
+        add_via_dialog(&mut h, n, "Add");
+    }
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 5 && a.session.status().channels.iter().all(|c| c.samples > 40)));
+    h.get_by_label("XY").click();
+    // The first two charted, until the person chooses: torque against speed, a pair
+    // on every tick, every one on the line.
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.y == "4002/ROB_1/J1" && p.points.len() > 200)));
+    let (_, p) = xy_pairs(h.state()).unwrap();
+    assert!(on_the_line(p), "a pair of two different ticks");
+    let f = p.fit.unwrap();
+    assert!((f.slope - 2.0).abs() < 1e-5 && (f.offset - 3.0).abs() < 1e-4 && f.r.unwrap() > 0.99999, "{f:?}");
+    assert!(h.query_all_by_label_contains("r = 1.0000").next().is_some(), "the correlation is not shown");
+    assert!(h.query_all_by_label_contains("line: Y = 2.00000 × X + 3.00000 Nm").next().is_some(), "the line is not shown");
+
+    // The 24 ms group against a signal on every tick: a pair at each of its samples,
+    // with the sample of that same tick (the two are one quantity: y = x exactly).
+    h.state_mut().xy.as_mut().unwrap().y = Some("318/ROB_1/J1".into());
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.y == "318/ROB_1/J1" && p.points.len() > 20)));
+    let (_, p) = xy_pairs(h.state()).unwrap();
+    assert!(p.points.iter().all(|&(_, x, y)| x == y), "paired with a neighbouring tick");
+    assert!(p.points.len() + 1 >= p.counts.1 && p.points.len() * 5 < p.counts.0, "{} pairs of {:?} samples", p.points.len(), p.counts);
+
+    // In the unit the charts show: radians as degrees.
+    h.state_mut().xy.as_mut().unwrap().x = Some("1298/ROB_1/J1".into());
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.x == "1298/ROB_1/J1" && !p.points.is_empty())));
+    let (_, p) = xy_pairs(h.state()).unwrap();
+    let most = p.points.iter().map(|q| q.1).fold(f64::MIN, f64::max);
+    assert!(most > 50.0 && most < 57.3, "an angle of up to 1 rad reads {most} at most");
+    // A zero-filled speed as the chart reads it: its padding is the speed, not a
+    // stop (only zeros before its first value in the history are zeros).
+    h.state_mut().xy.as_mut().unwrap().x = Some("6010/ROB_1/J1".into());
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.x == "6010/ROB_1/J1" && p.points.len() > 100)));
+    let (_, p) = xy_pairs(h.state()).unwrap();
+    let zeros = p.points.iter().filter(|q| q.1 == 0.0).count();
+    assert!(zeros <= 3 && p.points.iter().all(|q| q.1 == 0.0 || (q.1 - 28.64788975654116).abs() < 1e-9), "{zeros} padding zeros plotted as a stop");
+
+    // Nothing arriving: said, the pairs kept as the last received.
+    fake.with(|b| b.freeze = true);
+    assert!(wait(&mut h, 5000, |a| a.chans.iter().all(|c| a.session.status().channels.iter().any(|s| s.key == c.key && s.stale))), "the channels did not go stale");
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains("the plot shows the last pairs received").next().is_some(), "a stale plot is not said to be");
+}
+
+#[test]
+fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
+    let fake = FakeController::start(xy_signals()).unwrap();
+    let dir = temp_dir("xy-review");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4001, "Add");
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 20)));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(1500));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let rec = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    h.state_mut().open_recording(rec);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+
+    h.get_by_label("XY").click();
+    let recorded = h.state().review.as_ref().unwrap().review.channel("4001/ROB_1/J1").unwrap().v.len();
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(_, p)| p.points.len() + 2 >= recorded)), "the whole recording is in view: {recorded} samples");
+    assert!(h.query_by_label("XY plot · reviewing, not live").is_some(), "the plot does not say it is not live");
+    let (_, p) = xy_pairs(h.state()).unwrap();
+    assert!(on_the_line(p) && p.points.len() <= recorded);
+
+    // The first half in view: the pairs of the first half.
+    let all = p.points.len();
+    {
+        let rs = h.state_mut().review.as_mut().unwrap();
+        rs.view.1 /= 2.0;
+        rs.fresh = true;
+    }
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(_, p)| p.points.len() < all * 6 / 10 && p.points.len() > all * 4 / 10)), "the plot is not of the stretch in view");
+
+    // Its picture: the plot's part of the window.
+    h.get_all_by_label("Save PNG").last().unwrap().click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().png_pending, Some(crate::export::Picture::Xy), "the plot's Save PNG asked for the charts");
+    let image = std::sync::Arc::new(egui::ColorImage::filled([1400, 900], egui::Color32::DARK_GRAY));
+    h.event(egui::Event::Screenshot { viewport_id: egui::ViewportId::ROOT, user_data: egui::UserData::default(), image });
+    let _ = h.run_ok();
+    let pngs = files_ending(&dir.join("recordings"), " xy.png");
+    assert_eq!(pngs.len(), 1, "{pngs:?}");
+    let png = std::fs::read(&pngs[0]).unwrap();
+    assert!(png.starts_with(b"\x89PNG"));
+    // The plot's part, not the charts': its header's width and height are the plot's.
+    let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as f32;
+    let r = h.state().xy_rect.unwrap();
+    assert!((size(16) - r.width()).abs() <= 2.0 && (size(20) - r.height()).abs() <= 2.0, "{} x {} for a plot of {r:?}", size(16), size(20));
 }
 
 #[test]

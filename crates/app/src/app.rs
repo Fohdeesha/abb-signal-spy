@@ -171,7 +171,10 @@ pub struct SpyApp {
     /// screen, for saving what is in view; a picture of them asked for.
     pub view_ms: Option<(i64, i64)>,
     pub charts_rect: Option<egui::Rect>,
-    pub png_pending: bool,
+    pub png_pending: Option<crate::export::Picture>,
+    /// The XY plot, while its window is open, and where its plot is on screen.
+    pub xy: Option<crate::xy::XyState>,
+    pub xy_rect: Option<egui::Rect>,
     /// A CSV being written, and what to add to its "saved" message.
     pub export_job: Option<crate::export::ExportJob>,
     pub export_note: &'static str,
@@ -311,7 +314,9 @@ impl SpyApp {
             phone_built: Instant::now(),
             view_ms: None,
             charts_rect: None,
-            png_pending: false,
+            png_pending: None,
+            xy: None,
+            xy_rect: None,
             export_job: None,
             export_note: "",
             export_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1297,6 +1302,7 @@ impl eframe::App for SpyApp {
 
         self.recordings_window(&ctx);
         self.rws_window(&ctx);
+        self.xy_window(&ctx);
         self.add_dialog(&ctx);
         self.sets_dialog(&ctx);
         self.approval_dialog(&ctx);

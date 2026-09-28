@@ -165,30 +165,35 @@ impl Derived {
     /// order): a value at every instant all of them have a sample for.
     pub fn combine(&self, inputs: &[&[(i64, f64)]]) -> Vec<(i64, f64)> {
         let mut out = Vec::new();
-        if !self.is_set() || inputs.is_empty() || inputs.len() != self.inputs().len() {
-            return out;
-        }
-        let mut at = vec![0usize; inputs.len()];
-        let mut vals = vec![0.0; inputs.len()];
-        'samples: for &(t, v0) in inputs[0] {
-            vals[0] = v0;
-            for k in 1..inputs.len() {
-                let s = inputs[k];
-                while at[k] < s.len() && s[at[k]].0 < t - SAME_TICK_MS {
-                    at[k] += 1;
-                }
-                // The same tick: the closest sample within SAME_TICK_MS.
-                let near = [at[k], at[k] + 1].into_iter().filter_map(|i| s.get(i).map(|&(tk, vk)| ((tk - t).abs(), vk))).filter(|&(d, _)| d <= SAME_TICK_MS).min_by_key(|&(d, _)| d);
-                match near {
-                    Some((_, vk)) => vals[k] = vk,
-                    None => continue 'samples,
-                }
-            }
-            if let Some(x) = self.value(&vals) {
-                out.push((t, x));
-            }
+        if self.is_set() && inputs.len() == self.inputs().len() {
+            same_ticks(inputs, |t, v| out.extend(self.value(v).map(|x| (t, x))));
         }
         out
+    }
+}
+
+/// Every controller tick all the series (each in time order) have a sample of: each
+/// of the first series' samples, with every other series' closest sample within
+/// [`SAME_TICK_MS`] of it. None is a gap, never filled from a neighbour. `f` gets the
+/// first series' time and the values, in `inputs` order.
+pub fn same_ticks(inputs: &[&[(i64, f64)]], mut f: impl FnMut(i64, &[f64])) {
+    let Some((first, rest)) = inputs.split_first() else { return };
+    let mut at = vec![0usize; rest.len()];
+    let mut vals = vec![0.0; inputs.len()];
+    'samples: for &(t, v0) in *first {
+        vals[0] = v0;
+        for (k, s) in rest.iter().enumerate() {
+            while at[k] < s.len() && s[at[k]].0 < t - SAME_TICK_MS {
+                at[k] += 1;
+            }
+            // The same tick: the closest sample within SAME_TICK_MS.
+            let near = [at[k], at[k] + 1].into_iter().filter_map(|i| s.get(i).map(|&(tk, vk)| ((tk - t).abs(), vk))).filter(|&(d, _)| d <= SAME_TICK_MS).min_by_key(|&(d, _)| d);
+            match near {
+                Some((_, vk)) => vals[k + 1] = vk,
+                None => continue 'samples,
+            }
+        }
+        f(t, &vals);
     }
 }
 
