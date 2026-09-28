@@ -652,6 +652,27 @@ fn the_same_channel_twice_in_one_request_is_added_once() {
 }
 
 #[test]
+fn streaming_with_nothing_arriving_does_not_read_as_streaming() {
+    // Another program connected InfoStream first and gets every sample (s25 item 7):
+    // this one is set up, and nothing arrives. Seen on the VC as a green STREAMING
+    // beside the advice.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut other = std::net::TcpStream::connect(("127.0.0.1", fake.port())).unwrap();
+    use std::io::Write;
+    other.write_all(&spy_core::request::Command::StreamConnect.frame(1, "127.0.0.1")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let mut h = harness(temp_dir("not-receiving"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 8000, |a| a.session.status().advice.is_some()), "no advice with nothing arriving");
+    let _ = h.run_ok();
+    assert!(h.query_by_label("NOT RECEIVING").is_some(), "the status word");
+    assert!(h.query_by_label("STREAMING").is_none(), "STREAMING shown while nothing arrives");
+    drop(other);
+}
+
+#[test]
 fn a_channel_set_adds_or_replaces_in_one_go() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let mut h = harness(temp_dir("sets"), AskPolicy::Remote);

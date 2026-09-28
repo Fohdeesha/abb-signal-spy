@@ -781,6 +781,9 @@ impl SpyApp {
                 Phase::Handshaking => ("HANDSHAKE".into(), theme::WARN),
                 Phase::AwaitingApproval => ("WAITING FOR YOUR ANSWER".into(), theme::WARN),
                 Phase::SettingUp => ("SETTING UP".into(), theme::WARN),
+                // Set up, and nothing arriving (another program gets the samples, a VC
+                // paused): the advice beside it says why. Not a green STREAMING.
+                Phase::Streaming if st.advice.is_some() => ("NOT RECEIVING".into(), theme::WARN),
                 Phase::Streaming => ("STREAMING".into(), theme::OK),
                 Phase::Reconnecting { attempt, retry_in } => (format!("RECONNECTING (attempt {attempt}, every {:.0} s)", retry_in.as_secs_f64()), theme::WARN),
                 Phase::TearingDown => ("DISCONNECTING".into(), theme::WARN),
@@ -1108,6 +1111,7 @@ impl SpyApp {
     fn update_title(&mut self, ctx: &egui::Context) {
         let st = self.session.status();
         let state = match &st.phase {
+            Phase::Streaming if st.advice.is_some() => "NOT RECEIVING",
             Phase::Streaming => "STREAMING",
             Phase::Reconnecting { .. } => "RECONNECTING",
             Phase::Stopped { .. } => "STOPPED",

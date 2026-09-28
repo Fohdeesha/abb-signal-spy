@@ -16,11 +16,13 @@
 //! * sample frames on service 8, cause 1, txn 0, one sample per stream per frame,
 //!   24 ms signals every sixth tick, integer signals as `LogsrvIntMsg`
 //! * ONE subscription id for every client, and single tenancy: every sample frame
-//!   goes to the connection that subscribed first; either client's StopStream,
-//!   StartStream or StreamUndefineAll acts on everyone's streams. When that
-//!   connection closes, a client that subscribed meanwhile gets nothing, whatever it
-//!   sends (StartStream, SUBSCRIBE again); only a connection that subscribes after
-//!   it becomes the new tenant (measured 2026-09-25, `tools/abb_vc_handover.py`)
+//!   goes to the connection that first sent StreamConnect or SUBSCRIBE, whichever
+//!   (a StreamConnect alone takes the samples: s25 item 7, 2026-09-28); either
+//!   client's StopStream, StartStream or StreamUndefineAll acts on everyone's
+//!   streams. When that connection closes, a client that connected InfoStream
+//!   meanwhile gets nothing, whatever it sends (StartStream, SUBSCRIBE again); only a
+//!   connection that does so after it becomes the new tenant (measured 2026-09-25,
+//!   `tools/abb_vc_handover.py`, and 2026-09-28, `tools/abb_vc_tenancy_order.py`)
 //! * a define or undefine while streaming stops delivery until StartStream
 //! * a closed connection's streams are reaped, and more (measured 2026-09-26,
 //!   tunemaster-testsignals.md s24 items 9-11): when the tenant's connection closes,
@@ -746,7 +748,19 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
             }
             (OK, String::new(), None)
         }
-        "StreamConnect" => (0, String::new(), None),
+        "StreamConnect" => {
+            // The first connection to send StreamConnect gets every sample, subscribed
+            // or not (RW6 VC 2026-09-28, s25 item 7); one that sends it while another
+            // is the tenant is starved, as with SUBSCRIBE.
+            let tenant_now = tenant(st);
+            if let Some(c) = st.conns.get_mut(&conn)
+                && !c.subscribed
+            {
+                c.subscribed = true;
+                c.orphan = tenant_now.is_some();
+            }
+            (0, String::new(), None)
+        }
         "StopStream" => {
             st.streaming = false; // controller-wide, measured
             (OK, String::new(), None)

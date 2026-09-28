@@ -1951,7 +1951,7 @@ impl Worker {
                     "every stream stopped at once when {} disconnected from the controller (a program that had set up test signals ends InfoStream for every program connected when it leaves); nobody is taking it, so connecting again, once",
                     names(&left)
                 );
-                self.log.warn(format!("{}.", capitalize(&why)));
+                // Logged once, by the reconnect it leaves for (with its timing).
                 self.baseline = Some(now_list);
                 self.leaver_retry_next = true;
                 // This program leaves cleanly, but the controller may list its old

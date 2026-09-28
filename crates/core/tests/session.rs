@@ -1367,25 +1367,46 @@ fn a_different_controller_at_the_address_is_not_streamed_from_unasked() {
 }
 
 #[test]
-fn a_program_leaving_that_ends_infostream_is_named_and_connected_again_once() {
-    // The leaver was connected first, with a stream of its own (its samples come
-    // here, the tenant, counted as another client's). When it leaves, its exit ends
-    // InfoStream for every connection (s24 item 11); only a new connection is served.
+fn the_first_program_to_connect_infostream_gets_the_samples_subscribed_or_not() {
+    // Measured on the RW6 VC (tunemaster-testsignals.md s25 item 7): a connection that
+    // only sent StreamConnect, before this one, gets every sample; this one none.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let mut other = OtherTool::connect(&fake, Duration::from_millis(20));
     other.send(Command::StreamConnect);
-    other.define(0, 4002, 1);
+    let s = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || matches!(state(&s, &k), Some(ChannelState::Defined { .. })) && phase(&s) == Phase::Streaming));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(samples(&s, &k), 0, "the program that connected InfoStream first is the tenant");
+    drop(other);
+}
+
+#[test]
+fn a_program_leaving_that_ends_infostream_is_named_and_connected_again_once() {
+    // The leaver is connected before this program (so listed in its handshake) but
+    // sets nothing up until later: one that set up first would be the tenant
+    // (s25 item 7). It then connects InfoStream, defines a stream and leaves, as a tool
+    // that exits or crashes after its setup: its define pauses this program's feed,
+    // its exit ends it (s24 item 11), and only a new connection is served. The same
+    // sequence was verified on the VC with tools/abb_leaver.py (s25 item 7).
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut other = OtherTool::connect(&fake, Duration::from_millis(20));
     let a = spawn(opts());
     let k = key(6000, "ROB_1", 1);
     a.set_channels(vec![k.clone()]);
     a.connect(target(&fake));
     assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&k))), "{}", log_text(&a));
+    other.send(Command::StreamConnect);
+    other.define(0, 4002, 1);
     drop(other);
     assert!(wait_for(5000, || fake.connections_total() == 3 && phase(&a) == Phase::Streaming && samples(&a, &k) > 0 && a.status().counters.reconnects == 1), "{:?}\n{}", phase(&a), log_text(&a));
     let n = samples(&a, &k);
     assert!(wait_for(3000, || samples(&a, &k) > n + 50), "{}", log_text(&a));
     let log = log_text(&a);
     assert!(log.contains("disconnected from the controller") && log.contains("connecting again, once"), "{log}");
+    assert_eq!(log.matches("connecting again, once").count(), 1, "the same long reason logged twice: {log}");
 }
 
 #[test]
