@@ -673,6 +673,39 @@ fn a_restarted_virtual_controller_is_followed_to_its_new_port() {
 }
 
 #[test]
+fn a_restarted_vc_whose_own_robotstudio_took_infostream_says_connect_again() {
+    // Measured on the RW6 VC (2026-09-28, s25 item 9): RobotStudio's own connection,
+    // listed all along, reconnects at every VC start and takes InfoStream first;
+    // this program leaving ends that hold, and the next connection gets the samples.
+    let mut old = FakeController::start(Behaviour::default()).unwrap();
+    let mut rs = OtherTool::connect(&old, Duration::from_millis(20));
+    rs.s.write_all(&spy_core::request::hello(1)).unwrap();
+    let ports = Arc::new(Mutex::new(vec![old.port()]));
+    let s = spawn(Options { find_vc: finder(ports.clone()), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&old));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    old.stop();
+    ports.lock().unwrap().clear();
+    let new = FakeController::start(Behaviour::default()).unwrap();
+    let mut rs = OtherTool::connect(&new, Duration::from_millis(20));
+    rs.s.write_all(&spy_core::request::hello(1)).unwrap();
+    rs.send(Command::StreamConnect);
+    ports.lock().unwrap().push(new.port());
+    let reason = {
+        assert!(wait_for(15000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+        stopped_reason(&s)
+    };
+    assert!(reason.contains("RobotStudio's own") && reason.contains("Connect again"), "{reason}");
+    // As it says: connected again, this program gets the samples.
+    let n = samples(&s, &k);
+    s.connect(target(&new));
+    assert!(wait_for(5000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 20), "{:?}\n{}", phase(&s), log_text(&s));
+    drop(rs);
+}
+
+#[test]
 fn a_controller_found_somewhere_new_at_every_look_is_followed_once_per_attempt() {
     // Each look finds it on yet another port, where nothing then answers: following
     // on from there would chase it inside one attempt, never retrying or stopping.
@@ -1179,7 +1212,12 @@ fn samples_going_to_a_program_that_was_there_first_are_explained() {
     assert_eq!(log_text(&s).matches("sends them all").count(), 1, "said once");
     // Shown where the person looks, not only in the log, and gone once it no longer
     // applies.
-    assert!(wait_for(1000, || s.status().advice.as_deref().is_some_and(|a| a.contains("connect again"))), "{:?}", s.status().advice);
+    // Over loopback, as on a VC: where the samples most likely go, and what ends it.
+    assert!(
+        wait_for(1000, || s.status().advice.as_deref().is_some_and(|a| a.contains("RobotStudio's") && a.contains("Disconnect and Connect again"))),
+        "{:?}",
+        s.status().advice
+    );
     s.disconnect();
     assert!(wait_for(3000, || phase(&s) == Phase::Idle));
     assert!(wait_for(1000, || s.status().advice.is_none()));
@@ -1817,6 +1855,32 @@ fn a_virtual_controller_that_pauses_is_waited_for() {
     assert_eq!(phase(&s), Phase::Streaming, "{}", log_text(&s));
     assert!(log_text(&s).contains("sending again"), "{}", log_text(&s));
     assert_eq!(s.status().advice, None);
+}
+
+#[test]
+fn a_pause_is_timed_from_the_last_sample() {
+    // Seen on the RW6 VC (2026-09-28): a pause of about 2 s, whose liveness check was
+    // answered only as the samples came back, was logged as "after 0.0 s".
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(Options { stall_after: Duration::from_secs(5), ..patient() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.with(|b| {
+        b.freeze = true;
+        b.hold_delivery = true;
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    fake.with(|b| {
+        b.hold_delivery = false;
+        b.freeze = false;
+    });
+    assert!(wait_for(3000, || log_text(&s).contains("sending again")), "{}", log_text(&s));
+    let log = log_text(&s);
+    let line = log.lines().find(|l| l.contains("sending again")).unwrap();
+    let secs: f64 = line.split("after ").nth(1).and_then(|r| r.split(' ').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{line}"));
+    assert!((1.3..3.0).contains(&secs), "the pause was about 1.5 s: {line}\n{log}");
 }
 
 #[test]

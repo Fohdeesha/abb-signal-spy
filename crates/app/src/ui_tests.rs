@@ -132,7 +132,7 @@ fn a_starved_session_says_what_to_do_where_it_is_seen() {
     add_via_dialog(&mut h, 4002, "Add");
     assert!(wait(&mut h, 8000, |a| a.session.status().advice.is_some()), "{:?}", phase(h.state()));
     let _ = h.run_ok();
-    assert!(h.query_all_by_label_contains("is getting all of them: close its signal view").next().is_some(), "the advice is not on screen");
+    assert!(h.query_all_by_label_contains("Disconnect and Connect again").next().is_some(), "the advice is not on screen");
     drop(other);
 }
 

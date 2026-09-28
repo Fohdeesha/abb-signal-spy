@@ -2196,9 +2196,16 @@ impl Worker {
             // found nobody new in its client list; so another program has most likely
             // taken InfoStream meanwhile from an address that was listed already.
             // Stop, once: going again would end its InfoStream each time (s24 item 11).
+            // On this PC the connection with InfoStream is most likely RobotStudio's
+            // own: it reconnects at every start of a virtual controller and takes
+            // InfoStream first, with twelve streams of its own, and a program that set
+            // up streams ends that hold when it leaves (measured, s25 item 9).
+            let on_vc = self.conn.as_ref().is_some_and(|c| is_loopback(c.peer.ip()));
             if nothing_yet && self.auto_reconnect && self.delivered_before {
                 let reason = if self.leaver_retry {
                     "Connected again once, after another program's exit had ended InfoStream, but no samples arrive: another program may have taken InfoStream since. Connect again when it is free.".to_string()
+                } else if on_vc {
+                    "Connected again after the connection was lost, but no samples arrive: another connection has InfoStream. On a virtual controller that is usually RobotStudio's own, which takes it whenever the controller starts, and this program leaving ends that: Connect again. (If a program on this PC is showing test signals, TuneMaster or RobotStudio's Signal Analyzer, close it first.)".to_string()
                 } else {
                     "Connected again after the connection was lost, but no samples arrive: another program has most likely taken InfoStream while the connection was down (the controller sends every sample to one program). Connect again when it is free.".to_string()
                 };
@@ -2213,12 +2220,23 @@ impl Worker {
             let programs = self.others.iter().filter(|o| !o.pendant).count();
             if nothing_yet && !self.told_no_samples && programs > 0 {
                 self.told_no_samples = true;
+                let (what, advice) = if on_vc {
+                    (
+                        "one of them gets every sample (InfoStream sends them all to one program). On a virtual controller that is usually RobotStudio's own connection, which takes InfoStream whenever the controller starts: Disconnect and Connect again, and this program leaving ends that hold. If a program on this PC is showing test signals (TuneMaster, RobotStudio's Signal Analyzer), close it first.",
+                        "No samples yet: another connection gets them all. On a virtual controller that is usually RobotStudio's own, which takes InfoStream whenever the controller starts: Disconnect and Connect again. If a program is showing test signals (TuneMaster, RobotStudio's Signal Analyzer), close it first.",
+                    )
+                } else {
+                    (
+                        "if one of them is showing test signals, it is getting every sample (InfoStream sends them all to one program): close its signal view (RobotStudio, TuneMaster), then connect again.",
+                        "No samples yet. If another program connected to this controller is showing test signals, it is getting all of them: close its signal view (RobotStudio, TuneMaster), then connect again.",
+                    )
+                };
                 self.log.warn(format!(
-                    "No samples at all in {:.0} s. {} other program(s) are connected to this controller. If one of them is showing test signals, it is getting every sample (InfoStream sends them all to one program): close its signal view (RobotStudio, TuneMaster), then connect again. If this program's own earlier connection broke, the controller lets go of it after about 16 s: connect again then.",
+                    "No samples at all in {:.0} s. {} other program(s) are connected to this controller, and {what} If this program's own earlier connection broke, the controller lets go of it after about 16 s: connect again then.",
                     self.opt.stall_after.as_secs_f64(),
                     programs
                 ));
-                self.advice = Some("No samples yet. If another program connected to this controller is showing test signals, it is getting all of them: close its signal view (RobotStudio, TuneMaster), then connect again.".into());
+                self.advice = Some(advice.into());
                 self.dirty = true;
             }
             // Only a channel that has delivered on this connection can say the feed
@@ -2657,9 +2675,12 @@ impl Worker {
             }
             self.delivered_before = true;
             self.advice = None;
-            self.last_any_sample = Some(at);
-            if let Some(p) = self.vc_paused_since.take() {
-                self.log.info(format!("The virtual controller is sending again, after {:.1} s.", p.elapsed().as_secs_f64()));
+            // Timed from the last sample: the check that found the pause may have been
+            // answered only as the samples came back (the VC pauses its answers too).
+            let silent_since = self.last_any_sample.replace(at);
+            if self.vc_paused_since.take().is_some() {
+                let silent = silent_since.map(|t| at.saturating_duration_since(t)).unwrap_or_default();
+                self.log.info(format!("The virtual controller is sending again, after {:.1} s without samples.", silent.as_secs_f64()));
             }
             if taps_active {
                 batches.push(SampleBatch { key: self.chans[idx].key.clone(), kind: rec.kind, raw_ms, timeline_ms: tl, values, arrived });
