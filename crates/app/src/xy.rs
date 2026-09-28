@@ -8,6 +8,7 @@
 //! were identified (a resolver angle against the motor angle: slope 0.9999 to 1.0001).
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
 use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Points};
@@ -61,6 +62,25 @@ pub(crate) struct Pairs {
     pub(crate) fit: Option<Fit>,
     /// How many samples each had in the stretch.
     pub(crate) counts: (usize, usize),
+    /// The smallest and largest x, and y.
+    extent: Option<((f64, f64), (f64, f64))>,
+    /// When they were paired, and how long that took.
+    at: Instant,
+    took: Duration,
+}
+
+/// The plot spends at most about one part in this of its time pairing: a live view of
+/// ten minutes (150,000 pairs, measured: 73 % of a core with the plot open against 41 %
+/// without, pairing every frame) moves on a few times a second instead of every frame.
+const PAIRING_SHARE: u32 = 10;
+
+/// Whether to pair again for `key`: at once for other channels; for a moved stretch
+/// or new data, once the last pairing's cost has been paid back [`PAIRING_SHARE`] times.
+fn pair_again(cache: Option<&(Key, Pairs)>, key: &Key) -> bool {
+    match cache {
+        None => true,
+        Some((k, p)) => k.x != key.x || k.y != key.y || (k != key && p.at.elapsed() >= p.took * PAIRING_SHARE),
+    }
 }
 
 /// The least-squares line `y = slope x + offset` and the correlation, where y changes.
@@ -227,14 +247,16 @@ impl SpyApp {
             // whole stretch of them, not the view of the last ones.
             let chosen_again = xy.cache.as_ref().is_none_or(|(k, _)| k.x != cx.id || k.y != cy.id);
             let key = Key { x: cx.id.clone(), y: cy.id.clone(), from, to, data };
-            if xy.cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            if pair_again(xy.cache.as_ref(), &key) {
+                let at = Instant::now();
                 let (xs, ys) = (cx.values(from, to), cy.values(from, to));
                 let mut points = Vec::new();
                 same_ticks(&[&xs, &ys], |t, v| points.push((t, v[0], v[1])));
                 let fit = fit(&points);
-                xy.cache = Some((key, Pairs { points, fit, counts: (xs.len(), ys.len()) }));
+                let extent = extent(points.iter().map(|q| q.1)).zip(extent(points.iter().map(|q| q.2)));
+                xy.cache = Some((key, Pairs { points, fit, extent, counts: (xs.len(), ys.len()), at, took: at.elapsed() }));
             }
-            let Some((_, p)) = &xy.cache else { return };
+            let Some((k, p)) = &xy.cache else { return };
             for c in [cx, cy] {
                 if let Some(h) = c.health()
                     && (!streaming || h != Health::Live)
@@ -242,8 +264,8 @@ impl SpyApp {
                     ui.colored_label(theme::WARN, format!("{} is {}: the plot shows the last pairs received.", c.title, if streaming { h.word() } else { "not streaming" }));
                 }
             }
-            ui.label(pairs_text(p, cx, cy, (to - from) as f64 / 1000.0));
-            let (Some(xr), Some(yr)) = (extent(p.points.iter().map(|q| q.1)), extent(p.points.iter().map(|q| q.2))) else { return };
+            ui.label(pairs_text(p, cx, cy, (k.to - k.from) as f64 / 1000.0));
+            let Some((xr, yr)) = p.extent else { return };
             let (xb, yb) = (autoscale(xr.0, xr.1, min_span(&cx.units)), autoscale(yr.0, yr.1, min_span(&cy.units)));
             let (xu, yu) = (cx.units.clone(), cy.units.clone());
             // egui_plot fits its bounds to the whole stretch (the items drawn never reach
@@ -361,6 +383,29 @@ mod tests {
         assert_eq!(fit(&[(0, 1.0, 2.0), (1, 1.0, 3.0)]), None, "x does not change: no line");
         assert_eq!(fit(&[(0, 1.0, 2.0), (1, 2.0, 2.0)]).unwrap().r, None, "y does not change: no correlation");
         assert_eq!(fit(&[(0, 1.0, 2.0)]), None);
+    }
+
+    #[test]
+    fn a_moving_view_is_paired_again_once_its_last_pairing_is_paid_back() {
+        let key = |x: &str, y: &str, to: i64| Key { x: x.into(), y: y.into(), from: 0, to, data: Data::Live(Some(to), 0) };
+        let paired = |took_ms: u64, ago_ms: u64| Pairs {
+            points: Vec::new(),
+            fit: None,
+            counts: (0, 0),
+            extent: None,
+            at: Instant::now().checked_sub(Duration::from_millis(ago_ms)).unwrap(),
+            took: Duration::from_millis(took_ms),
+        };
+        let (x, y) = ("4001/ROB_1/J1", "4002/ROB_1/J1");
+        let k = key(x, y, 1000);
+        assert!(pair_again(None, &k), "nothing paired yet");
+        let just = (k.clone(), paired(20, 0));
+        assert!(!pair_again(Some(&just), &k), "nothing changed");
+        assert!(!pair_again(Some(&just), &key(x, y, 1004)), "moved on 4 ms: the last pairing's 20 ms are not paid back yet");
+        assert!(pair_again(Some(&just), &key("318/ROB_1/J1", y, 1000)) && pair_again(Some(&just), &key(x, "318/ROB_1/J1", 1000)), "other channels are paired at once");
+        let older = (k.clone(), paired(20, 250));
+        assert!(pair_again(Some(&older), &key(x, y, 1004)), "paid back ten times over by now");
+        assert!(!pair_again(Some(&older), &k), "nothing changed, however long ago");
     }
 
     #[test]
