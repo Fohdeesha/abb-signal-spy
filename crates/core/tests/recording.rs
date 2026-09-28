@@ -41,7 +41,7 @@ fn streaming(keys: &[ChannelKey]) -> (FakeController, Session) {
 
 fn streaming_with(b: Behaviour, keys: &[ChannelKey]) -> (FakeController, Session) {
     let fake = FakeController::start(b).unwrap();
-    let opts = Options { ask: AskPolicy::Never, ladder: vec![Duration::from_millis(100)], ..Options::default() };
+    let opts = Options { ask: AskPolicy::Never, ladder: vec![Duration::from_millis(100)], find_vc: spy_core::discovery::VcFinder::none(), ..Options::default() };
     let s = Session::spawn(opts, Arc::new(LogBook::new()), Arc::new(Store::new()), Arc::new(|| {}));
     s.set_channels(keys.to_vec());
     s.connect(Target { host: "127.0.0.1".into(), port: fake.port() });

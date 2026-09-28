@@ -6,10 +6,11 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use std::io::Write;
-use std::net::TcpListener;
-use std::sync::Arc;
+use std::net::{SocketAddr, TcpListener};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use spy_core::discovery::{self, VcFinder};
 use spy_core::fake::{Behaviour, FakeController, IdPools, SignalDef, SignalSource};
 use spy_core::log::LogBook;
 use spy_core::request::{Axis, Command, Define, MechUnit};
@@ -35,7 +36,15 @@ fn opts() -> Options {
         // The fake is reached over loopback like a VC; its tests are of the fast exit
         // a real controller gets, except where a test turns this on.
         vc_pause_patience: Duration::ZERO,
+        // Never this PC's own virtual controllers: only the tests that hand in fakes.
+        find_vc: VcFinder::none(),
     }
+}
+
+/// Handshakes these ports, as the product handshakes every port a VC process
+/// listens on, and gives each one that answered with its system id.
+fn finder(ports: Arc<Mutex<Vec<u16>>>) -> VcFinder {
+    VcFinder::new(move |timeout| ports.lock().unwrap().iter().filter_map(|&p| discovery::hello(SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect())
 }
 
 /// Requests (by property) from connections other than those listed.
@@ -239,6 +248,8 @@ fn unreachable_controllers_fail_fast_and_clearly() {
     assert!(wait_for(5000, || matches!(phase(&s), Phase::Stopped { .. })));
     let Phase::Stopped { reason } = phase(&s) else { unreachable!() };
     assert!(reason.contains("refused") || reason.contains("no answer"), "{reason}");
+    // On this PC it is most likely a virtual controller started again since.
+    assert!(reason.contains("new port at every start"), "{reason}");
 
     // A host that drops the SYN (TEST-NET-1, RFC 5737): bounded by the connect
     // timeout, and shutdown must not hang behind it.
@@ -248,6 +259,7 @@ fn unreachable_controllers_fail_fast_and_clearly() {
     let t0 = Instant::now();
     s.connect(Target { host: "192.0.2.1".into(), port: 5515 });
     assert!(wait_for(4000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}", phase(&s));
+    assert!(!stopped_reason(&s).contains("virtual controller"), "no VC hint for a controller on the network: {}", stopped_reason(&s));
     assert!(t0.elapsed() < Duration::from_secs(4));
     let t1 = Instant::now();
     assert!(s.shutdown(Duration::from_secs(3)));
@@ -623,6 +635,114 @@ fn a_controller_restart_rebases_the_timeline_forward() {
     fake.drop_connections();
     assert!(wait_for(5000, || s.status().counters.clock_resets == 1), "{}", log_text(&s));
     assert!(wait_for(3000, || s.store().get(&k).unwrap().lock().last().unwrap().0 > t_before + 50));
+}
+
+#[test]
+fn a_restarted_virtual_controller_is_followed_to_its_new_port() {
+    // A VC takes a new port at every start, a warm restart included (the RW6 VC's
+    // moved from 45198 to 62097 on 2026-09-28): the old port refuses from then on,
+    // and retrying it forever never reconnects.
+    let mut old = FakeController::start(Behaviour::default()).unwrap();
+    let ports = Arc::new(Mutex::new(vec![old.port()]));
+    let s = spawn(Options { find_vc: finder(ports.clone()), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&old));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let from = target(&old);
+    let held = history(&s, &k).len();
+    // Restarting: its port closes, and nothing answers anywhere yet (the product
+    // handshakes only the ports a VC process listens on).
+    old.stop();
+    ports.lock().unwrap().clear();
+    // A refused connection on Windows loopback takes about 2 s (the SYN is retried).
+    assert!(wait_for(12000, || matches!(phase(&s), Phase::Reconnecting { attempt: 3.., .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    let new = FakeController::start(Behaviour::default()).unwrap();
+    ports.lock().unwrap().push(new.port());
+    assert!(
+        wait_for(8000, || phase(&s) == Phase::Streaming && s.status().target == Some(target(&new)) && history(&s, &k).len() > held + 20),
+        "{:?} {:?}\n{}",
+        phase(&s),
+        s.status().target,
+        log_text(&s)
+    );
+    assert_eq!(s.status().moved, Some((from, target(&new))));
+    assert!(log_text(&s).contains(&format!("now answers on port {}", new.port())), "{}", log_text(&s));
+    assert_eq!(history(&s, &k)[..held].len(), held, "the same controller: its history carries on");
+    assert!(new.seen_props().iter().any(|p| p == "StreamDefine"));
+}
+
+#[test]
+fn a_controller_found_somewhere_new_at_every_look_is_followed_once_per_attempt() {
+    // Each look finds it on yet another port, where nothing then answers: following
+    // on from there would chase it inside one attempt, never retrying or stopping.
+    let mut fake = FakeController::start(Behaviour::default()).unwrap();
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = looks.clone();
+    let finder = VcFinder::new(move |_| {
+        n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        vec![(port, Some(spy_core::fake::SYSTEM_ID.to_string()))]
+    });
+    let s = spawn(Options { find_vc: finder, connect_timeout: Duration::from_millis(300), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.stop();
+    assert!(wait_for(8000, || log_text(&s).matches("Cannot connect").count() >= 3), "{:?}\n{}", phase(&s), log_text(&s));
+    s.disconnect();
+    assert!(wait_for(3000, || phase(&s) == Phase::Idle));
+    let (tries, follows) = (log_text(&s).matches("Cannot connect").count(), log_text(&s).matches("now answers on port").count());
+    assert_eq!(follows, tries, "one follow per attempt:\n{}", log_text(&s));
+    assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), tries);
+}
+
+#[test]
+fn a_controller_answering_on_two_new_ports_is_not_guessed_at() {
+    // Two copies of one system in two stations, say: which one was being read?
+    let mut fake = FakeController::start(Behaviour::default()).unwrap();
+    let finder = VcFinder::new(|_| vec![(40001, Some(spy_core::fake::SYSTEM_ID.to_string())), (40002, Some(spy_core::fake::SYSTEM_ID.to_string()))]);
+    let s = spawn(Options { find_vc: finder, connect_timeout: Duration::from_millis(300), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let at = target(&fake);
+    fake.stop();
+    assert!(wait_for(8000, || log_text(&s).matches("Cannot connect").count() >= 3), "{:?}\n{}", phase(&s), log_text(&s));
+    assert_eq!(s.status().target, Some(at));
+    assert_eq!(s.status().moved, None);
+    assert_eq!(log_text(&s).matches("answers on more than one port (40001, 40002): not guessing").count(), 1, "said once:\n{}", log_text(&s));
+}
+
+#[test]
+fn another_virtual_controller_is_never_taken_for_a_restarted_one() {
+    let mut old = FakeController::start(Behaviour::default()).unwrap();
+    let mut b = Behaviour::default();
+    b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into();
+    let other = FakeController::start(b).unwrap();
+    let ports = Arc::new(Mutex::new(vec![old.port(), other.port()]));
+    let s = spawn(Options { find_vc: finder(ports.clone()), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&old));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    old.stop();
+    ports.lock().unwrap().retain(|&p| p == other.port());
+    assert!(wait_for(15000, || log_text(&s).matches("Cannot connect").count() >= 4), "{:?}\n{}", phase(&s), log_text(&s));
+    assert_eq!(s.status().target, Some(target(&old)), "it keeps trying its own controller's address");
+    assert_eq!(s.status().moved, None);
+    assert!(other.seen().is_empty(), "nothing but handshakes went to the other controller: {:?}", other.seen_props());
+    let log = log_text(&s);
+    assert_eq!(log.matches("{0000000B-0000-4000-8000-00000000000B}").count(), 1, "the other one is named, once:\n{log}");
+
+    // Back where it was, then gone again: a new outage, named again.
+    let port = old.port();
+    let mut back = FakeController::start_on(port, Behaviour::default()).unwrap();
+    assert!(wait_for(8000, || phase(&s) == Phase::Streaming && back.seen_props().iter().any(|p| p == "StartStream")), "{}", log_text(&s));
+    back.stop();
+    assert!(wait_for(15000, || log_text(&s).matches("{0000000B-0000-4000-8000-00000000000B}").count() == 2), "{}", log_text(&s));
 }
 
 #[test]

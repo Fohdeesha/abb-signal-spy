@@ -15,7 +15,7 @@ use spy_core::discovery::{self, LocalController};
 use spy_core::log::{Level, LogBook};
 use spy_core::recording::{ChannelInfo, Recorder};
 use spy_core::request::{Axis, MechUnit};
-use spy_core::session::{AskPolicy, Options, Phase, Session, Target, ROBAPI_PORT};
+use spy_core::session::{Options, Phase, Session, Target, ROBAPI_PORT};
 use spy_core::store::{ChannelKey, Store};
 
 use crate::net::{self, Hostnames};
@@ -94,8 +94,12 @@ pub struct AddDialog {
 pub struct SpyApp {
     pub ctx: egui::Context,
     pub session: Session,
-    /// When to ask before taking InfoStream (the product: `Remote`).
-    pub ask: AskPolicy,
+    /// The connection worker's options, for starting a new one (the product's: the
+    /// defaults, which ask before taking InfoStream only on a remote controller).
+    pub session_opts: Options,
+    /// The address the session was last asked to connect to; it follows the session
+    /// to a restarted virtual controller's new port.
+    pub connected_to: Option<Target>,
     pub log: Arc<LogBook>,
     pub catalogue: Catalogue,
     pub settings: Settings,
@@ -194,12 +198,13 @@ pub fn chan_color(i: usize) -> Color32 {
 
 impl SpyApp {
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, another_instance: bool) -> SpyApp {
-        SpyApp::with_policy(cc, data_dir, another_instance, AskPolicy::Remote)
+        SpyApp::with_options(cc, data_dir, another_instance, Options::default())
     }
 
-    /// `ask`: when to ask before taking InfoStream from other clients. The product
-    /// always uses `Remote`; the tests ask on loopback too, to reach the question.
-    pub fn with_policy(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, another_instance: bool, ask: AskPolicy) -> SpyApp {
+    /// `opts`: the connection worker's. The product always uses the defaults; the
+    /// tests ask on loopback too, to reach the question, and hand in their own
+    /// virtual controllers rather than look for this PC's.
+    pub fn with_options(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, another_instance: bool, opts: Options) -> SpyApp {
         let ctx = cc.egui_ctx.clone();
         let settings_path = data_dir.join("settings.json");
         let first_run = !settings_path.exists();
@@ -241,8 +246,7 @@ impl SpyApp {
 
         let repaint_ctx = ctx.clone();
         let store = Arc::new(Store::new());
-        let opts = Options { ask, ..Options::default() };
-        let session = Session::spawn(opts, log.clone(), store, Arc::new(move || repaint_ctx.request_repaint()));
+        let session = Session::spawn(opts.clone(), log.clone(), store, Arc::new(move || repaint_ctx.request_repaint()));
 
         let (host_input, port_input) = match &settings.last_target {
             Some(t) => (t.host.clone(), t.port.to_string()),
@@ -252,7 +256,8 @@ impl SpyApp {
         let mut app = SpyApp {
             ctx,
             session,
-            ask,
+            session_opts: opts,
+            connected_to: None,
             log,
             catalogue,
             settings,
@@ -484,7 +489,7 @@ impl SpyApp {
                     self.log.warn("The connection worker had stopped after an internal error; starting a new one.");
                     let c = self.ctx.clone();
                     let store = self.session.store().clone();
-                    self.session = Session::spawn(Options { ask: self.ask, ..Options::default() }, self.log.clone(), store, Arc::new(move || c.request_repaint()));
+                    self.session = Session::spawn(self.session_opts.clone(), self.log.clone(), store, Arc::new(move || c.request_repaint()));
                     self.sync_channels();
                 }
                 // Another controller: a running recording must not carry on with a
@@ -506,10 +511,38 @@ impl SpyApp {
                 }
                 self.settings.remember(&t);
                 self.mark_settings_dirty();
+                self.connected_to = Some(t.clone());
                 self.session.connect(t);
             }
             Err(e) => self.toast(Level::Error, e),
         }
+    }
+
+    /// The session followed a restarted virtual controller to its new port: the
+    /// address above, the recent list and a saved entry follow it too, or the next
+    /// Connect would go back to the port nothing listens on any more (and finish a
+    /// recording as if for another controller).
+    fn follow_moved_controller(&mut self) {
+        let Some((from, to)) = self.session.status().moved.clone() else { return };
+        // A move from somewhere else: already followed, or one reported just before
+        // the person connected elsewhere.
+        if self.connected_to.as_ref() != Some(&from) {
+            return;
+        }
+        // Not over what the person is typing.
+        if self.parse_target().ok().as_ref() == Some(&from) {
+            self.port_input = to.port.to_string();
+        }
+        self.settings.recent.retain(|t| t != &from);
+        self.settings.remember(&to);
+        for c in &mut self.settings.controllers {
+            if c.host == from.host && c.port == from.port {
+                c.port = to.port;
+            }
+        }
+        self.mark_settings_dirty();
+        self.toast(Level::Info, format!("The virtual controller restarted, on port {} (it was on {}): connecting there. A virtual controller takes a new port at every start.", to.port, from.port));
+        self.connected_to = Some(to);
     }
 
     // ------------------------------------------------------------------ top bar
@@ -1208,6 +1241,7 @@ impl eframe::App for SpyApp {
         self.poll_review();
         self.poll_export();
         self.poll_rws();
+        self.follow_moved_controller();
         self.take_dropped(&ctx);
         self.take_screenshot(&ctx);
         self.shortcuts(&ctx);

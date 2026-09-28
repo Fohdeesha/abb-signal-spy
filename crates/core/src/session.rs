@@ -57,6 +57,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::discovery::{self, VcFinder};
 use crate::log::LogBook;
 use crate::reply::{self, Announce, Reply};
 use crate::request::{self, Axis, Command, Define};
@@ -143,6 +144,11 @@ pub struct Options {
     /// over. A real controller never did (s24 item 3), and there the fast exit stands.
     /// Zero: no patience (the tests of the fast exit, which run over loopback).
     pub vc_pause_patience: Duration,
+    /// Where the local virtual controllers answer. A VC takes a new port at every
+    /// start, so a loopback connection refused where one was is looked for there,
+    /// and followed only to that same controller ([`discovery::restarted_port`]).
+    /// The tests hand in their fakes; [`VcFinder::none`] never follows.
+    pub find_vc: VcFinder,
 }
 
 /// When to ask before taking InfoStream while other RobAPI clients are connected.
@@ -176,6 +182,7 @@ impl Default for Options {
             held_wait: Duration::from_secs(30),
             held_poll: Duration::from_secs(2),
             vc_pause_patience: Duration::from_secs(120),
+            find_vc: VcFinder::local(),
         }
     }
 }
@@ -307,6 +314,9 @@ pub struct Status {
     /// Something the person should do, while it applies (for the window's status
     /// line, not only the log).
     pub advice: Option<String>,
+    /// The last time a restarted virtual controller was followed to its new port:
+    /// from, to. The window's address follows it.
+    pub moved: Option<(Target, Target)>,
 }
 
 impl Default for Status {
@@ -326,6 +336,7 @@ impl Default for Status {
             streaming_since: None,
             timeline: Timeline::new(),
             advice: None,
+            moved: None,
         }
     }
 }
@@ -771,6 +782,11 @@ struct Worker {
     /// The system id of the controller at this target, as last seen: a different one
     /// at the same address (a cable moved to the next robot) is another controller.
     system_id: Option<String>,
+    /// The last restarted virtual controller followed to its new port (from, to).
+    moved: Option<(Target, Target)>,
+    /// A local VC answered while this one was looked for, but none as this
+    /// controller: said once until the next connection.
+    told_other_vc: bool,
     /// Requests with no answer past their time, by kind: said once each.
     told_unanswered: BTreeSet<&'static str>,
     /// A virtual controller paused every stream while still answering: waited out
@@ -867,6 +883,8 @@ impl Worker {
             leaver_retry: false,
             leaver_retry_next: false,
             system_id: None,
+            moved: None,
+            told_other_vc: false,
             told_unanswered: BTreeSet::new(),
             vc_paused_since: None,
             last_probe_at: None,
@@ -1189,6 +1207,12 @@ impl Worker {
     }
 
     fn open(&mut self) {
+        self.open_once(true);
+    }
+
+    /// `may_follow`: a refused connection may be followed to where the controller
+    /// restarted (once: the port it moved to is tried, not looked past).
+    fn open_once(&mut self, may_follow: bool) {
         let Some(target) = self.target.clone() else { return };
         self.set_phase(Phase::Connecting);
         let addrs: Vec<SocketAddr> = match (target.host.as_str(), target.port).to_socket_addrs() {
@@ -1210,7 +1234,22 @@ impl Worker {
             }
         }
         let Some((stream, peer)) = stream else {
-            self.connect_failed(&format!("cannot connect to {target}: {last_err}"));
+            if may_follow && let Some(port) = self.restarted_port(&target, &addrs) {
+                let to = Target { host: target.host.clone(), port };
+                self.log.info(format!("The controller now answers on port {port}, not {}: a virtual controller takes a new port at every start. Connecting there.", target.port));
+                self.moved = Some((target, to.clone()));
+                self.target = Some(to);
+                self.open_once(false);
+                return;
+            }
+            // Refused on this PC with nothing to follow (a first connect knows no
+            // system id): most likely a virtual controller started again since.
+            let hint = if !self.established && discovery::on_this_pc(&addrs) {
+                "; a virtual controller takes a new port at every start, and the list of local controllers has its current one"
+            } else {
+                ""
+            };
+            self.connect_failed(&format!("cannot connect to {target}: {last_err}{hint}"));
             return;
         };
         let _ = stream.set_nodelay(true);
@@ -1258,6 +1297,7 @@ impl Worker {
         self.restart_needed = false;
         self.last_start = None;
         self.told_no_samples = false;
+        self.told_other_vc = false;
         self.advice = None;
         self.newest_raw = None;
         self.newest_at = None;
@@ -1296,6 +1336,30 @@ impl Worker {
             self.log.error(format!("{}.", capitalize(why)));
             self.set_phase(Phase::Stopped { reason: capitalize(why) });
         }
+    }
+
+    /// A connection refused on this PC where a controller was: the port that same
+    /// controller answers on now, if it restarted as a virtual controller does, onto
+    /// another. Local VCs that answer, but not as it, are named once.
+    fn restarted_port(&mut self, target: &Target, addrs: &[SocketAddr]) -> Option<u16> {
+        let system = self.system_id.clone()?;
+        if !discovery::on_this_pc(addrs) {
+            return None;
+        }
+        let found = self.opt.find_vc.find(self.opt.handshake_timeout);
+        let port = discovery::restarted_port(&system, target.port, &found);
+        let elsewhere: Vec<&(u16, Option<String>)> = found.iter().filter(|(p, _)| *p != target.port).collect();
+        if port.is_none() && !elsewhere.is_empty() && !self.told_other_vc {
+            self.told_other_vc = true;
+            let same: Vec<String> = elsewhere.iter().filter(|(_, id)| id.as_deref() == Some(system.as_str())).map(|(p, _)| p.to_string()).collect();
+            if same.len() > 1 {
+                self.log.warn(format!("The controller (system {system}) answers on more than one port ({}): not guessing which. Connect to one from the list.", same.join(", ")));
+            } else if same.is_empty() {
+                let others = elsewhere.iter().map(|(p, id)| format!("port {p}, system {}", id.as_deref().unwrap_or("unknown"))).collect::<Vec<_>>().join("; ");
+                self.log.warn(format!("A virtual controller answers on this PC ({others}), but not the one connected to before (system {system}): not following it. Connect to it from the list if it is the one wanted."));
+            }
+        }
+        port
     }
 
     fn schedule_reconnect(&mut self, why: &str) {
@@ -2762,6 +2826,7 @@ impl Worker {
         s.streaming_since = self.streaming_since;
         s.timeline = self.timeline.clone();
         s.advice = if self.conn.is_some() { self.advice.clone() } else { None };
+        s.moved = self.moved.clone();
         s.channels = self
             .chans
             .iter()

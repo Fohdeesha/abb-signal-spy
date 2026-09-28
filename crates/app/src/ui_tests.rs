@@ -12,8 +12,9 @@ use eframe::egui;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
+use spy_core::discovery::VcFinder;
 use spy_core::fake::{Behaviour, FakeController, SignalDef, SignalSource};
-use spy_core::session::{AskPolicy, Phase};
+use spy_core::session::{AskPolicy, Options, Phase};
 
 use crate::app::SpyApp;
 use crate::view;
@@ -26,8 +27,13 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn harness(dir: PathBuf, ask: AskPolicy) -> Harness<'static, SpyApp> {
+    // Never this PC's own virtual controllers.
+    harness_with(dir, Options { ask, find_vc: VcFinder::none(), ..Options::default() })
+}
+
+fn harness_with(dir: PathBuf, opts: Options) -> Harness<'static, SpyApp> {
     Harness::builder().with_size((1400.0, 900.0)).with_max_steps(20).build_eframe(move |cc| {
-        let mut app = SpyApp::with_policy(cc, dir.clone(), false, ask);
+        let mut app = SpyApp::with_options(cc, dir.clone(), false, opts.clone());
         app.settings.record_dir = Some(dir.join("recordings"));
         app.show_guide = false;
         app
@@ -303,6 +309,54 @@ fn connecting_to_another_controller_finishes_the_recording() {
     let loaded = spy_core::recording::read(&rec).unwrap();
     assert!(loaded.meta.complete);
     assert_eq!(loaded.meta.controller, format!("127.0.0.1:{}", first.port()));
+}
+
+#[test]
+fn a_restarted_virtual_controller_is_followed_and_the_recording_carries_on() {
+    // A VC takes a new port at every start, a warm restart included: the session
+    // follows the same controller there, and the window follows the session.
+    let mut old = FakeController::start(Behaviour::default()).unwrap();
+    let ports = std::sync::Arc::new(std::sync::Mutex::new(vec![old.port()]));
+    let found = ports.clone();
+    let finder = VcFinder::new(move |timeout| {
+        found.lock().unwrap().iter().filter_map(|&p| spy_core::discovery::hello(std::net::SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect()
+    });
+    let dir = temp_dir("vcmoved");
+    let mut h = harness_with(dir.clone(), Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
+    connect(&mut h, &old);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    let old_port = old.port();
+    h.state_mut().settings.controllers.push(crate::settings::SavedController { name: "RobotStudio".into(), host: "127.0.0.1".into(), port: old_port });
+    // Restarting: its port closes, and no VC port answers yet.
+    old.stop();
+    ports.lock().unwrap().clear();
+    assert!(wait(&mut h, 3000, |a| phase(a) != Phase::Streaming));
+    let before = h.state().session.status().channels[0].samples;
+    let new = FakeController::start(Behaviour::default()).unwrap();
+    ports.lock().unwrap().push(new.port());
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming && a.port_input == new.port().to_string()), "{:?} port {}", phase(h.state()), h.state().port_input);
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels[0].samples > before + 20));
+    let a = h.state();
+    assert!(a.recorder.is_some(), "the same controller: the recording carries on");
+    assert_eq!(a.settings.last_target.as_ref().map(|t| t.port), Some(new.port()), "the next start goes to the new port");
+    assert!(!a.settings.recent.iter().any(|t| t.port == old_port), "nothing listens on the old one any more");
+    assert_eq!(a.settings.controllers[0].port, new.port(), "a saved entry for it follows too");
+    assert_eq!(a.toasts.iter().filter(|t| t.text.contains(&format!("on port {}", new.port()))).count(), 1, "the person is told, once");
+
+    // Connect again as it stands: the same controller, so nothing is finished.
+    h.get_by_label("Disconnect").click();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+    h.get_by_label("Connect").click();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state().recorder.is_some(), "the address followed, so Connect is not to another controller");
+    let dir_rec = h.state_mut().recorder.take().unwrap().stop().dir;
+    let loaded = spy_core::recording::read(&dir_rec).unwrap();
+    assert!(loaded.meta.complete && !loaded.meta.notes.contains("Closed when"), "{:?}", loaded.meta.notes);
+    assert!(loaded.meta.events.iter().any(|e| e.text.contains(&format!("connected to 127.0.0.1:{}", new.port()))), "{:?}", loaded.meta.events);
 }
 
 #[test]

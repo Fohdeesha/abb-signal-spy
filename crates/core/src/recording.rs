@@ -648,8 +648,11 @@ impl Writer {
                 // Another controller: a cable moved to the next robot at the same
                 // service address, or a reconnect that reached a different one. Its
                 // samples must not continue this recording under the same channel ids.
+                // The same system at another address is the same controller: a virtual
+                // controller takes a new port at every start, and the session follows it.
                 let other = match (&self.meta.system_id, &system_id) {
                     (Some(was), Some(now)) if was != now => Some(format!("the controller at {target} is a different one (system {now}; this recording is of system {was})")),
+                    (Some(_), Some(_)) => None,
                     _ if !self.meta.controller.is_empty() && self.meta.controller != target => Some(format!("the program connected to {target}; this recording is of {}", self.meta.controller)),
                     _ => None,
                 };

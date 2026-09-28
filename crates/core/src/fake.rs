@@ -314,7 +314,12 @@ fn lock(s: &Mutex<State>) -> MutexGuard<'_, State> {
 
 impl FakeController {
     pub fn start(behaviour: Behaviour) -> std::io::Result<FakeController> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
+        FakeController::start_on(0, behaviour)
+    }
+
+    /// On this port (0: one the OS picks), as a controller back where it was.
+    pub fn start_on(port: u16, behaviour: Behaviour) -> std::io::Result<FakeController> {
+        let listener = TcpListener::bind(("127.0.0.1", port))?;
         let addr = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let state = Arc::new(Mutex::new(State {

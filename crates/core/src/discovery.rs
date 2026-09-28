@@ -177,6 +177,59 @@ pub fn local_controllers(timeout: Duration) -> Result<Vec<LocalController>, Stri
     Ok(out)
 }
 
+/// Where the local virtual controllers answer RobAPI now: each port that answered
+/// the handshake, with the system id it gave. The product asks Windows and
+/// handshakes every VC port ([`local_controllers`]); tests hand in their fakes, and
+/// [`VcFinder::none`] looks nowhere.
+#[derive(Clone)]
+pub struct VcFinder(Option<std::sync::Arc<FindFn>>);
+
+type FindFn = dyn Fn(Duration) -> Vec<(u16, Option<String>)> + Send + Sync;
+
+impl VcFinder {
+    pub fn local() -> VcFinder {
+        VcFinder::new(|timeout| local_controllers(timeout).unwrap_or_default().into_iter().filter_map(|c| c.hello.ok().map(|a| (c.port, a.system_id))).collect())
+    }
+    pub fn none() -> VcFinder {
+        VcFinder(None)
+    }
+    pub fn new(f: impl Fn(Duration) -> Vec<(u16, Option<String>)> + Send + Sync + 'static) -> VcFinder {
+        VcFinder(Some(std::sync::Arc::new(f)))
+    }
+    pub fn find(&self, timeout: Duration) -> Vec<(u16, Option<String>)> {
+        self.0.as_ref().map(|f| f(timeout)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for VcFinder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "VcFinder" } else { "VcFinder(none)" })
+    }
+}
+
+/// Whether an address resolved to this PC only: where a virtual controller runs. A
+/// controller reached over the network is never looked for among the local VCs,
+/// whose systems may well be copies of it.
+pub fn on_this_pc(addrs: &[SocketAddr]) -> bool {
+    !addrs.is_empty() && addrs.iter().all(|a| a.ip().is_loopback())
+}
+
+/// The port a restarted virtual controller answers on now. A VC takes a new port at
+/// every start, a warm restart included (the RW6 VC's moved from 45198 to 62097,
+/// 2026-09-28), so a connection refused where one was is looked for among the
+/// local VC ports. Only the controller seen before (its system id) is followed, and
+/// only when exactly one port answers with it: another VC, or two ports answering
+/// alike, is never guessed at, and the old port answering means it has not moved.
+pub fn restarted_port(system: &str, from: u16, found: &[(u16, Option<String>)]) -> Option<u16> {
+    let mut ports: Vec<u16> = found.iter().filter(|(_, id)| id.as_deref() == Some(system)).map(|(p, _)| *p).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    match ports[..] {
+        [p] if p != from => Some(p),
+        _ => None,
+    }
+}
+
 #[cfg(all(test, feature = "fake"))]
 mod tests {
     use super::*;
@@ -206,6 +259,30 @@ mod tests {
         let e = hello(addr, Duration::from_secs(2)).unwrap_err();
         assert!(e.contains("not a RobAPI port"), "{e}");
         t.join().unwrap();
+    }
+
+    #[test]
+    fn only_the_same_controller_on_exactly_one_new_port_is_followed() {
+        let s = |p: u16, id: &str| (p, Some(id.to_string()));
+        assert_eq!(restarted_port("A", 45198, &[s(62097, "A")]), Some(62097));
+        // Among other VCs, and seen twice on the same port (two answers to one scan).
+        assert_eq!(restarted_port("A", 45198, &[s(1111, "B"), (2222, None), s(62097, "A"), s(62097, "A")]), Some(62097));
+        assert_eq!(restarted_port("A", 45198, &[s(62097, "B")]), None, "another controller is never taken");
+        assert_eq!(restarted_port("A", 45198, &[(62097, None)]), None, "nor one that gave no system id");
+        assert_eq!(restarted_port("A", 45198, &[s(62097, "A"), s(62100, "A")]), None, "two ports answering alike: no guess");
+        assert_eq!(restarted_port("A", 45198, &[s(45198, "A")]), None, "still on its port: it has not moved");
+        assert_eq!(restarted_port("A", 45198, &[s(45198, "A"), s(62097, "A")]), None);
+        assert_eq!(restarted_port("A", 45198, &[]), None);
+    }
+
+    #[test]
+    fn only_an_address_on_this_pc_is_looked_for_among_its_vcs() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        assert!(on_this_pc(&[a("127.0.0.1:45198")]));
+        assert!(on_this_pc(&[a("[::1]:45198"), a("127.0.0.1:45198")]), "localhost");
+        assert!(!on_this_pc(&[a("192.168.125.1:5515")]));
+        assert!(!on_this_pc(&[a("127.0.0.1:5515"), a("192.0.2.77:5515")]), "a name that also reaches the network");
+        assert!(!on_this_pc(&[]));
     }
 
     #[cfg(windows)]
