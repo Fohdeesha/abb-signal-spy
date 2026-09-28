@@ -230,9 +230,24 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
         if !on {
             continue;
         }
+        let mark = events.mark();
         match events.look(&mut c) {
             Ok(n) if n.events.is_empty() && !n.skipped && n.unreadable == 0 && !n.renumbered => {}
-            Ok(n) => send(RwsMsg::Events(n, offset)),
+            Ok(n) => {
+                // The clock read again: set on or back during the look, it leaves these
+                // events stamped on either clock, placed by neither reading for sure.
+                // Read again at the next look, with the clock settled.
+                match read_offset(&mut c) {
+                    Ok(o) if (o - offset).abs() >= 1000 => {
+                        events.restore(mark);
+                        offset = o;
+                        send(RwsMsg::Clock(o));
+                        next_look = Instant::now();
+                    }
+                    Err(e) if ends_session(&e) => return send(RwsMsg::Failed(why(e))),
+                    _ => send(RwsMsg::Events(n, offset)),
+                }
+            }
             Err(e) if ends_session(&e) => return send(RwsMsg::Failed(why(e))),
             Err(e) => send(RwsMsg::Trouble(e.to_string())),
         }

@@ -681,6 +681,16 @@ impl EventPoll {
         EventPoll { newest: Some(newest) }
     }
 
+    /// Where the poll stands, to go back to (a look whose events cannot be used).
+    pub fn mark(&self) -> Option<u64> {
+        self.newest
+    }
+
+    /// Back to a mark: the next look reads again what was read since.
+    pub fn restore(&mut self, mark: Option<u64>) {
+        self.newest = mark;
+    }
+
     /// The first look takes the newest page as it stands; later ones read back until
     /// an event already seen. A log whose newest entry is older than the newest seen
     /// was cleared or renumbered (its ids start again): read afresh, and said, rather

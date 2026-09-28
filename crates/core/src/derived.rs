@@ -32,6 +32,11 @@ pub const ON_TARGET_DEG: f64 = 0.25;
 pub const PLATEAU_MS: i64 = 2000;
 /// A plateau needs at least this much of that stretch to have arrived.
 pub const PLATEAU_MIN_MS: i64 = 1500;
+/// A plateau below this is not an armed drive's DC link: motors off it read 16 V on
+/// the cell, armed 378-397 V (tunemaster-testsignals.md s24), and every IRC5 drive's
+/// charged link is hundreds of volts. Set below it, every sag after arming would read
+/// about the whole link (the operator's decision, 2026-09-28).
+pub const PLATEAU_MIN_V: f64 = 50.0;
 /// What the three duty ratios add up to under space-vector modulation.
 pub const DUTY_SUM: f64 = 1.5;
 /// The three PWM leg duty ratios (knowledge TSV: confirmed; which leg is U, V or W

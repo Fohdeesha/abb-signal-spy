@@ -52,6 +52,10 @@ pub struct RwsBehaviour {
     /// Answer this many of the next requests that logged in with 503 (the login taken,
     /// its session given, the answer itself lost).
     pub fail_after_login: u32,
+    /// Set the clock on by this many seconds just before the event log's next first
+    /// page is served, and log event 99998 on the new clock: a clock set between a
+    /// client's clock read and its events read.
+    pub clock_step_at_events: i64,
 }
 
 impl Default for RwsBehaviour {
@@ -72,6 +76,7 @@ impl Default for RwsBehaviour {
             challenge_cookie: false,
             identity: true,
             fail_after_login: 0,
+            clock_step_at_events: 0,
         }
     }
 }
@@ -261,6 +266,12 @@ fn serve(mut s: TcpStream, st: &Mutex<State>) {
     let doc = |items: String| format!("{{\"_links\":{{\"base\": {{ \"href\": \"http://127.0.0.1/\" }}}},\"_embedded\" :{{ \"_state\":[ {items} ] }}}}");
     if p == "/ctrl/identity" && !g.b.identity {
         return respond(&mut s, "404 Not Found", &set_cookie, "");
+    }
+    if p == "/rw/elog/0" && g.b.clock_step_at_events != 0 && query.contains("start=1") {
+        g.b.clock_offset_s += std::mem::take(&mut g.b.clock_step_at_events);
+        let id = g.b.events.last().map_or(1000, |e| e.id + 1);
+        let time = pc_now() + g.b.clock_offset_s;
+        g.b.events.push(FakeEvent { id, code: 99998, severity: 1, time, title: "after the clock was set".into() });
     }
     if p == "/rw/system" && g.b.fail_system > 0 {
         g.b.fail_system -= 1;

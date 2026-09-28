@@ -983,6 +983,14 @@ fn a_plateau_of_no_voltage_is_refused() {
     let _ = h.run_ok();
     assert!(!h.state().derived[0].live.def().is_set(), "a plateau of 0 V: every sag after it is the whole link");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("No plateau")), "not said");
+    // Motors off, the link reads 16 V on the cell (s24): steady, and still no plateau.
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 }));
+    std::thread::sleep(Duration::from_millis(2300));
+    let _ = h.run_ok();
+    h.get_by_label("Set the plateau").click();
+    let _ = h.run_ok();
+    assert!(!h.state().derived[0].live.def().is_set(), "a motors-off plateau (16 V) taken: every sag after arming reads -360 V");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("arm")), "not told to arm the robot");
 }
 
 #[test]
@@ -1248,14 +1256,31 @@ fn the_clock_offset_follows_a_change_of_the_controllers_clock() {
     let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-clock");
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    // Its clock set an hour on (a DST change, or someone correcting it).
+    // Its clock set an hour on (a DST change, or someone correcting it): the window
+    // follows within a look, and events after it are placed through it.
     rws.with(|b| b.clock_offset_s += 3600);
+    assert!(wait(&mut h, 3000, |a| a.rws.as_ref().is_some_and(|l| (l.offset_ms + 3 * 3_600_000).abs() < 2000)), "the offset did not follow the clock");
+    assert!(wait(&mut h, 1000, |_| true) && h.query_by_label_contains("-3 h 00 min from UTC (its local time").is_some(), "the window still shows the old offset");
     rws.push_event(10010, 1, "after the change");
     assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 10010)));
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
     let e = h.state().controller_events.iter().find(|e| e.code == 10010).unwrap().clone();
     assert!((now_ms - e.utc_ms).abs() < 3000, "placed {} s from when it happened", (now_ms - e.utc_ms) / 1000);
-    assert!(wait(&mut h, 2000, |_| true) && h.query_by_label_contains("-3 h 00 min from UTC (its local time").is_some(), "the window still shows the old offset");
+}
+
+#[test]
+fn an_event_logged_as_the_clock_is_set_mid_look_is_placed_through_the_new_clock() {
+    // The clock set on between a look's clock read and its events read, and an event
+    // logged on the new clock: placed through the old offset it would be an hour off
+    // (and a recording would take it for one from before its start).
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-clock-mid-look");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    rws.with(|b| b.clock_step_at_events = 3600);
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 99998)));
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let e = h.state().controller_events.iter().find(|e| e.code == 99998).unwrap().clone();
+    assert!((now_ms - e.utc_ms).abs() < 3000, "placed {} s from when it happened", (now_ms - e.utc_ms) / 1000);
 }
 
 #[test]

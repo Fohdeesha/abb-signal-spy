@@ -317,9 +317,10 @@ impl SpyApp {
             Ok(x) => x,
             Err(e) => return self.toast(Level::Error, format!("No plateau: {e}.")),
         };
-        // Nothing to sag from, and a percentage below it meaningless.
-        if mean.is_nan() || mean <= 0.0 {
-            self.toast(Level::Error, format!("No plateau: the DC link reads {} V, not a charged link. Set it with the robot armed (motors on) and still.", view::fmt(mean)));
+        // Not an armed drive's link (motors off, or no link at all): every sag after
+        // arming would read about the whole link.
+        if mean.is_nan() || mean < derived::PLATEAU_MIN_V {
+            self.toast(Level::Error, format!("No plateau: the DC link reads {} V, not an armed drive's (below {} V). Arm the robot (motors on), keep it still, then set the plateau.", view::fmt(mean), derived::PLATEAU_MIN_V));
             return;
         }
         if sd > mean.abs() * PLATEAU_STEADY {
