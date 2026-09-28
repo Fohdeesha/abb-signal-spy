@@ -30,6 +30,11 @@ pub struct XyState {
     pub x: Option<String>,
     pub y: Option<String>,
     pub(crate) cache: Option<(Key, Pairs)>,
+    /// The person dragged or zoomed the plot (G27): it keeps their view until a
+    /// double-click, or other channels, bring back the whole stretch.
+    pub(crate) zoomed: bool,
+    /// The ranges of x and y the plot showed last, which its points were thinned for.
+    pub(crate) shown: Option<((f64, f64), (f64, f64))>,
 }
 
 /// What pairs were computed from: the channels, the stretch, and the data then.
@@ -206,6 +211,9 @@ impl SpyApp {
                 if ui.button("Save PNG").on_hover_text("Save a picture of the plot to the recordings folder").clicked() {
                     png = true;
                 }
+                if xy.zoomed {
+                    ui.label(RichText::new("Zoomed: double-click the plot for the whole stretch.").weak()).on_hover_text("The numbers below are of every pair in the stretch, not only those in view.");
+                }
             });
             let (Some(cx), Some(cy)) = (find(&xy.x), find(&xy.y)) else {
                 ui.label(RichText::new(if cands.len() < 2 { "Chart at least two channels to plot one against the other." } else { "Choose a channel for X and one for Y." }).weak());
@@ -215,6 +223,9 @@ impl SpyApp {
                 ui.label(RichText::new("Nothing charted yet.").weak());
                 return;
             };
+            // Other channels than those last paired (or the window just opened): the
+            // whole stretch of them, not the view of the last ones.
+            let chosen_again = xy.cache.as_ref().is_none_or(|(k, _)| k.x != cx.id || k.y != cy.id);
             let key = Key { x: cx.id.clone(), y: cy.id.clone(), from, to, data };
             if xy.cache.as_ref().is_none_or(|(k, _)| *k != key) {
                 let (xs, ys) = (cx.values(from, to), cy.values(from, to));
@@ -235,15 +246,19 @@ impl SpyApp {
             let (Some(xr), Some(yr)) = (extent(p.points.iter().map(|q| q.1)), extent(p.points.iter().map(|q| q.2))) else { return };
             let (xb, yb) = (autoscale(xr.0, xr.1, min_span(&cx.units)), autoscale(yr.0, yr.1, min_span(&cy.units)));
             let (xu, yu) = (cx.units.clone(), cy.units.clone());
+            // egui_plot fits its bounds to the whole stretch (the items drawn never reach
+            // past it) until the person drags or zooms; a double-click fits them again.
             let resp = Plot::new("xy-plot")
                 .x_axis_label(format!("{}  [{}]", cx.title, cx.units))
                 .y_axis_label(format!("{}  [{}]", cy.title, cy.units))
                 .y_axis_min_width(56.0)
-                .allow_drag(false)
-                .allow_zoom(false)
-                .allow_scroll(false)
+                .include_x(xb.0)
+                .include_x(xb.1)
+                .include_y(yb.0)
+                .include_y(yb.1)
+                .set_margin_fraction(egui::Vec2::ZERO)
                 .allow_boxed_zoom(false)
-                .allow_double_click_reset(false)
+                .allow_double_click_reset(true)
                 .label_formatter(move |pos| {
                     let p = match pos {
                         HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position } => *position,
@@ -251,20 +266,30 @@ impl SpyApp {
                     Some(format!("X {} {xu}\nY {} {yu}", view::fmt(p.x), view::fmt(p.y)))
                 })
                 .show(ui, |pu| {
+                    if chosen_again {
+                        pu.set_auto_bounds(true);
+                    }
+                    let auto = pu.auto_bounds();
+                    let whole = chosen_again || (auto.x && auto.y);
+                    let (vx, vy) = if whole {
+                        (xb, yb)
+                    } else {
+                        let b = pu.plot_bounds();
+                        ((b.min()[0], b.max()[0]), (b.min()[1], b.max()[1]))
+                    };
                     let size = pu.response().rect.size();
-                    let pts = thin(&p.points, xb, yb, size.x as usize, size.y as usize);
+                    let pts = thin(&p.points, vx, vy, size.x as usize, size.y as usize);
                     pu.points(Points::new("pairs", PlotPoints::from(pts)).radius(1.5).color(POINT));
-                    if let Some(f) = p.fit {
-                        let line = vec![[xb.0, f.slope * xb.0 + f.offset], [xb.1, f.slope * xb.1 + f.offset]];
-                        pu.line(Line::new("least-squares line", PlotPoints::from(line)).color(theme::IDLE).style(egui_plot::LineStyle::dashed_loose()));
+                    if let Some(line) = p.fit.and_then(|f| line_in(f, vx, vy)) {
+                        pu.line(Line::new("least-squares line", PlotPoints::from(line.to_vec())).color(theme::IDLE).style(egui_plot::LineStyle::dashed_loose()));
                     }
                     // Where it is now.
                     if !reviewing && let Some(&(_, x, y)) = p.points.last() {
                         pu.points(Points::new("newest", PlotPoints::from(vec![[x, y]])).radius(4.5).color(theme::WARN));
                     }
-                    pu.set_plot_bounds_x(xb.0..=xb.1);
-                    pu.set_plot_bounds_y(yb.0..=yb.1);
+                    (!whole, (vx, vy))
                 });
+            (xy.zoomed, xy.shown) = (resp.inner.0, Some(resp.inner.1));
             rect = Some(resp.response.rect);
         });
         self.xy_rect = rect;
@@ -273,6 +298,20 @@ impl SpyApp {
             self.request_png(Picture::Xy);
         }
     }
+}
+
+/// The part of the line `y = slope x + offset` inside the ranges `x` by `y`: drawn
+/// past them, it would widen the bounds the plot fits to the pairs.
+pub fn line_in(f: Fit, x: (f64, f64), y: (f64, f64)) -> Option<[[f64; 2]; 2]> {
+    let (mut x0, mut x1) = x;
+    if f.slope != 0.0 {
+        let (a, b) = ((y.0 - f.offset) / f.slope, (y.1 - f.offset) / f.slope);
+        x0 = x0.max(a.min(b));
+        x1 = x1.min(a.max(b));
+    } else if !(y.0..=y.1).contains(&f.offset) {
+        return None;
+    }
+    (x0 < x1).then_some([[x0, f.slope * x0 + f.offset], [x1, f.slope * x1 + f.offset]])
 }
 
 fn extent(v: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
@@ -322,6 +361,17 @@ mod tests {
         assert_eq!(fit(&[(0, 1.0, 2.0), (1, 1.0, 3.0)]), None, "x does not change: no line");
         assert_eq!(fit(&[(0, 1.0, 2.0), (1, 2.0, 2.0)]).unwrap().r, None, "y does not change: no correlation");
         assert_eq!(fit(&[(0, 1.0, 2.0)]), None);
+    }
+
+    #[test]
+    fn the_line_is_drawn_only_inside_the_plot() {
+        let line = |slope, offset| Fit { slope, offset, r: Some(1.0) };
+        let (x, y) = ((0.0, 10.0), (0.0, 10.0));
+        assert_eq!(line_in(line(2.0, 3.0), x, y), Some([[0.0, 3.0], [3.5, 10.0]]), "cut where it leaves the top");
+        assert_eq!(line_in(line(-2.0, 13.0), x, y), Some([[1.5, 10.0], [6.5, 0.0]]), "falling, cut at both");
+        assert_eq!(line_in(line(0.0, 5.0), x, y), Some([[0.0, 5.0], [10.0, 5.0]]));
+        assert_eq!(line_in(line(0.0, 50.0), x, y), None, "flat, above the plot");
+        assert_eq!(line_in(line(1.0, 100.0), x, y), None, "passes the plot by");
     }
 
     #[test]

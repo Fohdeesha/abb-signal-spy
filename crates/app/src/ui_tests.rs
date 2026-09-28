@@ -1767,10 +1767,50 @@ fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
     assert!(h.query_all_by_label_contains("r = 1.0000").next().is_some(), "the correlation is not shown");
     assert!(h.query_all_by_label_contains("line: Y = 2.00000 × X + 3.00000 Nm").next().is_some(), "the line is not shown");
 
+    // Its own zoom (G27): dragged, it keeps the person's view and says how to get the
+    // whole stretch back; a double-click does, and so do other channels.
+    let zoomed = |h: &Harness<'static, SpyApp>| h.state().xy.as_ref().unwrap().zoomed;
+    let drag = |h: &mut Harness<'static, SpyApp>| {
+        let c = h.state().xy_rect.unwrap().center();
+        h.hover_at(c);
+        h.drag_at(c);
+        let _ = h.run_ok();
+        h.hover_at(c + egui::vec2(60.0, 30.0));
+        let _ = h.run_ok();
+        h.drop_at(c + egui::vec2(60.0, 30.0));
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+    };
+    assert!(!zoomed(&h));
+    let shown = |h: &Harness<'static, SpyApp>| h.state().xy.as_ref().unwrap().shown.unwrap();
+    let whole = shown(&h);
+    drag(&mut h);
+    assert!(zoomed(&h), "a drag did not move the plot");
+    // Dragged right and down, the view moves left and up, and the points are thinned
+    // for it (for the whole stretch, a view zoomed in would be drawn sparse).
+    let (moved, width) = (shown(&h), whole.0.1 - whole.0.0);
+    assert!(whole.0.0 - moved.0.0 > 0.05 * width && moved.1.0 > whole.1.0, "the points are thinned for {whole:?}, not the view {moved:?}");
+    assert!(h.query_by_label("Zoomed: double-click the plot for the whole stretch.").is_some());
+    // A double-click: the harness takes a quarter second a frame, too slow for one.
+    let c = h.state().xy_rect.unwrap().center();
+    h.hover_at(c);
+    h.step();
+    let t0 = h.ctx.input(|i| i.time);
+    for (k, pressed) in [true, false, true, false].into_iter().enumerate() {
+        h.input_mut().time = Some(t0 + 0.05 * (k + 1) as f64);
+        h.event(egui::Event::PointerButton { pos: c, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    let _ = h.run_ok();
+    assert!(!zoomed(&h), "a double-click did not bring back the whole stretch");
+    drag(&mut h);
+    assert!(zoomed(&h));
+
     // The 24 ms group against a signal on every tick: a pair at each of its samples,
     // with the sample of that same tick (the two are one quantity: y = x exactly).
     h.state_mut().xy.as_mut().unwrap().y = Some("318/ROB_1/J1".into());
     assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.y == "318/ROB_1/J1" && p.points.len() > 20)));
+    assert!(!zoomed(&h), "other channels kept the last ones' view");
     let (_, p) = xy_pairs(h.state()).unwrap();
     assert!(p.points.iter().all(|&(_, x, y)| x == y), "paired with a neighbouring tick");
     assert!(p.points.len() + 1 >= p.counts.1 && p.points.len() * 5 < p.counts.0, "{} pairs of {:?} samples", p.points.len(), p.counts);
