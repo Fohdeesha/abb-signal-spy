@@ -45,11 +45,7 @@ pub fn reading(sig: Option<&Signal>) -> Reading {
     }
 }
 
-/// How long a zero-filled signal's padding may run. Measured on the cell (2026-09-02
-/// motion data, all twelve joint-speed signals, every joint moving): the longest run
-/// of padding zeros inside motion was 11 samples, 44 ms. Twice that and more; a joint
-/// that stops reads 0 within it.
-pub const ZERO_HOLD_MS: f64 = 100.0;
+pub use spy_core::reading::{ZeroHold, ZERO_HOLD_MS};
 
 /// The F3 readout window.
 pub const READOUT_MS: i64 = 150;
@@ -58,37 +54,6 @@ pub const READOUT_MS: i64 = 150;
 /// wrapping angle is moving too fast for an average to mean anything: the newest
 /// sample is shown instead. 0.99 is a spread of about 8 degrees.
 const STEADY_ANGLE: f64 = 0.99;
-
-/// Undoes a zero-filled signal's padding, sample by sample in time order.
-#[derive(Debug, Clone, Copy)]
-pub struct ZeroHold {
-    held: f64,
-    zeros: u32,
-    max: u32,
-}
-
-impl ZeroHold {
-    pub fn new(sample_ms: f64) -> ZeroHold {
-        let ms = if sample_ms.is_finite() && sample_ms > 0.1 { sample_ms } else { 4.032 };
-        ZeroHold { held: 0.0, zeros: 0, max: (ZERO_HOLD_MS / ms).ceil() as u32 }
-    }
-
-    pub fn apply(&mut self, v: f64) -> f64 {
-        if !v.is_finite() {
-            return v;
-        }
-        if v != 0.0 {
-            self.held = v;
-            self.zeros = 0;
-            return v;
-        }
-        self.zeros = self.zeros.saturating_add(1);
-        if self.zeros > self.max {
-            self.held = 0.0;
-        }
-        self.held
-    }
-}
 
 /// The last `window_ms` of a ring as the signal means it, oldest first: padding
 /// undone for a zero-filled signal (with the hold primed from before the window).
@@ -139,13 +104,23 @@ pub fn value_at(ring: &Ring, r: Reading, t: i64) -> Option<f64> {
 /// Statistics of a stretch as the signal means it, in the native unit: padding
 /// undone; for a wrapping angle the mean and standard deviation on the circle.
 pub fn window_stats(ring: &Ring, r: Reading, from: i64, to: i64) -> crate::charts::RangeStats {
-    let v = read_window(ring, r, from, to);
+    stats_of(&read_window(ring, r, from, to), r)
+}
+
+/// Statistics of values already read as the signal means them (padding undone), in
+/// the native unit; for a wrapping angle the mean and standard deviation on the
+/// circle. The live window and a reviewed recording both use it.
+pub fn stats_of(v: &[f64], r: Reading) -> crate::charts::RangeStats {
     let mut s = crate::charts::range_stats(v.iter().copied());
+    let circle = |v: &mut dyn Iterator<Item = f64>, n: usize| {
+        let (sn, cs) = v.fold((0.0, 0.0), |(a, b), x| (a + x.sin(), b + x.cos()));
+        let len = ((sn * sn + cs * cs).sqrt() / n as f64).clamp(1e-12, 1.0);
+        (sn.atan2(cs), (-2.0 * len.ln()).sqrt())
+    };
     if r == Reading::Wrapping && s.n > 0 {
-        let (sn, cs) = v.iter().filter(|x| x.is_finite()).fold((0.0, 0.0), |(a, b), x| (a + x.sin(), b + x.cos()));
-        let len = ((sn * sn + cs * cs).sqrt() / s.n as f64).clamp(1e-12, 1.0);
-        s.mean = sn.atan2(cs).rem_euclid(std::f64::consts::TAU);
-        s.sd = (-2.0 * len.ln()).sqrt();
+        let (mean, sd) = circle(&mut v.iter().copied().filter(|x| x.is_finite()), s.n);
+        s.mean = mean.rem_euclid(std::f64::consts::TAU);
+        s.sd = sd;
     }
     s
 }

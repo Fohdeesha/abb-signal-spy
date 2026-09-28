@@ -142,6 +142,13 @@ pub struct SpyApp {
     pub phone_snapshot: Arc<Mutex<Snapshot>>,
     pub phone_built: Instant,
 
+    /// A recording open for review, and one being opened.
+    pub review: Option<crate::review_view::ReviewState>,
+    pub review_job: Option<crate::review_view::ReviewJob>,
+    pub show_recordings: bool,
+    pub recordings_list: Option<Vec<(PathBuf, spy_core::recording::Meta)>>,
+    pub recording_path_input: String,
+
     pub confirm_reset: bool,
     pub show_about: bool,
     pub show_diag: bool,
@@ -256,6 +263,11 @@ impl SpyApp {
             phone: None,
             phone_snapshot: Arc::new(Mutex::new(Snapshot::default())),
             phone_built: Instant::now(),
+            review: None,
+            review_job: None,
+            show_recordings: false,
+            recordings_list: None,
+            recording_path_input: String::new(),
             confirm_reset: false,
             show_about: false,
             show_diag: false,
@@ -426,6 +438,16 @@ impl SpyApp {
     fn menu(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if ui.button("Open a recording...").on_hover_text("Chart a recording made earlier. The live session carries on meanwhile.").clicked() {
+                    self.show_recordings = true;
+                    self.recordings_list = None;
+                    ui.close();
+                }
+                if self.review.is_some() && ui.button("Close the recording").clicked() {
+                    self.review = None;
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Open the recordings folder").clicked() {
                     let d = self.record_dir();
                     let _ = std::fs::create_dir_all(&d);
@@ -825,6 +847,8 @@ impl SpyApp {
             ui.label("Values show on the right (a 150 ms average); charts are raw. Space pauses the charts so you can scroll back through the last 10 minutes. A reading that stops updating is dimmed and marked STALE, never shown as live.");
             ui.label(RichText::new("5. Record").strong());
             ui.label("REC records every sample. 'Save last' saves what just happened, even if nothing was recording. 'Slow log' logs averages for runs of hours. M drops a marker.");
+            ui.label(RichText::new("6. Look back").strong());
+            ui.label("File > Open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live.");
             ui.add_space(6.0);
             ui.label(RichText::new("Angles are in degrees; click an angle's unit in the channel table to switch it to radians.").weak());
         });
@@ -1061,6 +1085,8 @@ impl eframe::App for SpyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_background();
+        self.poll_review();
+        self.take_dropped(&ctx);
         self.shortcuts(&ctx);
         self.update_stats();
 
@@ -1071,12 +1097,21 @@ impl eframe::App for SpyApp {
             }
             self.controller_bar(ui);
             self.session_line(ui);
+            self.review_banner(ui);
         });
         egui::Panel::bottom("log").resizable(true).default_size(130.0).min_size(60.0).show(ui, |ui| self.log_pane(ui));
         egui::Panel::left("catalogue").resizable(true).default_size(330.0).min_size(240.0).show(ui, |ui| self.browser(ui));
-        egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.channel_table(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.charts(ui));
+        // While a recording is reviewed it has the charts and the right panel; the
+        // live session carries on underneath, and its line above says so.
+        if self.review.is_some() {
+            egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.review_table(ui));
+            egui::CentralPanel::default().show(ui, |ui| self.review_charts(ui));
+        } else {
+            egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.channel_table(ui));
+            egui::CentralPanel::default().show(ui, |ui| self.charts(ui));
+        }
 
+        self.recordings_window(&ctx);
         self.add_dialog(&ctx);
         self.approval_dialog(&ctx);
         self.reset_dialog(&ctx);

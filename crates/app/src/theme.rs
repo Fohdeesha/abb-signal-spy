@@ -24,6 +24,10 @@ pub const WARN: Color32 = Color32::from_rgb(0xE8, 0xB0, 0x30);
 pub const BAD: Color32 = Color32::from_rgb(0xE0, 0x55, 0x4B);
 pub const IDLE: Color32 = Color32::from_rgb(0x8B, 0x93, 0xA1);
 pub const REC: Color32 = Color32::from_rgb(0xE0, 0x3C, 0x3C);
+/// Reviewing a recording: a colour of its own, used for nothing live.
+pub const REVIEW: Color32 = Color32::from_rgb(0x9B, 0x7B, 0xE0);
+/// Behind the reviewing banner; readable under both themes' text.
+pub const REVIEW_BG: Color32 = Color32::from_rgba_premultiplied(0x3A, 0x2C, 0x5C, 0x70);
 
 /// egui's built-in fonts lack many symbols (● ■ ▾ ★ and the like render as empty
 /// boxes). Windows' own symbol and UI fonts are added as fallbacks, which also

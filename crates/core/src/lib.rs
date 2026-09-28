@@ -8,9 +8,11 @@
 pub mod catalogue;
 pub mod discovery;
 pub mod log;
+pub mod reading;
 pub mod recording;
 pub mod reply;
 pub mod request;
+pub mod review;
 pub mod sample;
 pub mod session;
 pub mod store;

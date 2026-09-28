@@ -825,11 +825,19 @@ pub struct Loaded {
     pub bad_rows: Vec<usize>,
 }
 
-/// Read a recording folder. Rows that do not parse are skipped and reported, not
-/// fatal: a recording cut short by a crash ends in a partial line. The CSV is read
-/// as CSV (a quoted string may hold commas, quotes and line breaks), a row at a
-/// time.
-pub fn read(dir: &Path) -> Result<Loaded, String> {
+/// The recordings in `base`'s subfolders, newest first (by when they started). A
+/// folder without a readable description is not a recording and is left out.
+pub fn list(base: &Path) -> Vec<(PathBuf, Meta)> {
+    let Ok(entries) = std::fs::read_dir(base) else { return Vec::new() };
+    let mut out: Vec<(PathBuf, Meta)> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).filter_map(|p| read_meta(&p).ok().map(|m| (p, m))).collect();
+    out.sort_by(|a, b| b.1.started_utc.cmp(&a.1.started_utc).then_with(|| b.0.cmp(&a.0)));
+    out
+}
+
+/// A recording's description, checked, with every channel under the id this program
+/// writes now, whichever form the file has (format 1 wrote the bare axis number); an
+/// id that does not parse stays as it is.
+pub fn read_meta(dir: &Path) -> Result<Meta, String> {
     let meta_text = std::fs::read_to_string(dir.join("recording.json")).map_err(|e| format!("cannot read recording.json: {e}"))?;
     let mut meta: Meta = serde_json::from_str(crate::util::strip_bom(&meta_text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
     if meta.format != FORMAT {
@@ -838,15 +846,22 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
     if meta.version > VERSION {
         return Err(format!("recording format {} is newer than this program ({VERSION})", meta.version));
     }
-    // Every channel under the id this program writes now, whichever form the file has
-    // (format 1 wrote the bare axis number); an id that does not parse stays as is.
+    for c in &mut meta.channels {
+        c.id = ChannelKey::parse_id(&c.id).map(|k| k.id()).unwrap_or_else(|| c.id.clone());
+    }
+    Ok(meta)
+}
+
+/// Read a recording folder. Rows that do not parse are skipped and reported, not
+/// fatal: a recording cut short by a crash ends in a partial line. The CSV is read
+/// as CSV (a quoted string may hold commas, quotes and line breaks), a row at a
+/// time.
+pub fn read(dir: &Path) -> Result<Loaded, String> {
+    let meta = read_meta(dir)?;
     let mut ids: HashMap<String, String> = HashMap::new();
     let mut canonical = |id: &str| -> String {
         ids.entry(id.to_string()).or_insert_with(|| ChannelKey::parse_id(id).map(|k| k.id()).unwrap_or_else(|| id.to_string())).clone()
     };
-    for c in &mut meta.channels {
-        c.id = canonical(&c.id);
-    }
     let file = if meta.kind == Kind::Slow { "slow.csv" } else { "data.csv" };
     let f = File::open(dir.join(file)).map_err(|e| format!("cannot read {file}: {e}"))?;
     let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None };
@@ -891,12 +906,12 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
 
 /// RFC 4180 rows from a reader: fields split on commas, a quoted field may hold
 /// commas, doubled quotes and line breaks.
-struct CsvRows<R: std::io::BufRead> {
-    r: R,
-    line: usize,
+pub(crate) struct CsvRows<R: std::io::BufRead> {
+    pub(crate) r: R,
+    pub(crate) line: usize,
     /// A read failed (a share gone, a bad sector): the rows end there, and the
     /// reason is kept for the caller rather than retried forever.
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 /// Longer than any row this program writes by far; bounds what an unterminated
@@ -904,11 +919,11 @@ struct CsvRows<R: std::io::BufRead> {
 const MAX_ROW: usize = 1 << 20;
 
 /// A row: the line it started on, and each field with whether it was quoted.
-type CsvRow = (usize, Vec<(String, bool)>);
+pub(crate) type CsvRow = (usize, Vec<(String, bool)>);
 
 impl<R: std::io::BufRead> CsvRows<R> {
     /// The next row, `Err(line)` for one that is malformed, `None` at the end.
-    fn next_row(&mut self) -> Option<Result<CsvRow, usize>> {
+    pub(crate) fn next_row(&mut self) -> Option<Result<CsvRow, usize>> {
         if self.error.is_some() {
             return None;
         }
@@ -1292,6 +1307,24 @@ mod tests {
         assert_eq!(back.meta.channels[0].id, "4002/ROB_1/J2");
         assert_eq!(back.data["not/a/channel"], vec![(18, 3.0)], "an id it cannot parse is kept as written");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recordings_are_listed_newest_first_and_other_folders_left_out() {
+        let base = temp("list");
+        for (name, started) in [("a", "2026-09-27T10:00:00.000Z"), ("b", "2026-09-27T12:00:00.000Z"), ("c", "2026-09-26T09:00:00.000Z")] {
+            let d = base.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            let mut m = Meta::new(Kind::Full, name, "t", None);
+            m.started_utc = started.into();
+            write_meta(&d, &m).unwrap();
+        }
+        std::fs::create_dir_all(base.join("not a recording")).unwrap();
+        std::fs::write(base.join("stray.txt"), "x").unwrap();
+        let names: Vec<String> = list(&base).into_iter().map(|(_, m)| m.label).collect();
+        assert_eq!(names, vec!["b", "a", "c"]);
+        assert!(list(&base.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

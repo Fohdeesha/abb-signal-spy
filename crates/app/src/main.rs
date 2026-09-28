@@ -13,6 +13,7 @@ mod net;
 mod paths;
 mod phone;
 mod record;
+mod review_view;
 mod settings;
 mod theme;
 mod view;
@@ -62,11 +63,32 @@ fn connect_arg() -> Option<spy_core::session::Target> {
     Some(spy_core::session::Target { host, port })
 }
 
+/// A recording folder (or a file in one) given as an argument: what Windows passes
+/// when a recording's folder is dropped onto the program's icon.
+fn review_arg() -> Option<PathBuf> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut skip_next = false;
+    for a in &args {
+        if std::mem::take(&mut skip_next) {
+            continue;
+        }
+        if a == "--connect" {
+            skip_next = true;
+            continue;
+        }
+        if let Some(d) = review_view::recording_dir(std::path::Path::new(a)) {
+            return Some(d);
+        }
+    }
+    None
+}
+
 fn main() {
     let data_dir = paths::data_dir();
     install_crash_file(data_dir.clone());
     let another = net::another_instance();
     let connect = connect_arg();
+    let review = review_arg();
 
     // wgpu (DirectX 12) first; if it cannot start, OpenGL: a remote desktop session
     // or a PC without a usable graphics driver should still get a window. The
@@ -79,6 +101,7 @@ fn main() {
     for renderer in renderers {
         let dir = data_dir.clone();
         let connect = connect.clone();
+        let review = review.clone();
         let result = eframe::run_native(
             "ABB Signal Spy",
             options(renderer),
@@ -88,6 +111,9 @@ fn main() {
                     a.host_input = t.host;
                     a.port_input = t.port.to_string();
                     a.connect();
+                }
+                if let Some(d) = review {
+                    a.open_recording(d);
                 }
                 Ok(Box::new(a))
             }),

@@ -36,15 +36,19 @@ fn harness(dir: PathBuf, ask: AskPolicy) -> Harness<'static, SpyApp> {
 /// Step the window until `f` holds, as a person waits for the screen to change.
 fn wait(h: &mut Harness<'static, SpyApp>, ms: u64, mut f: impl FnMut(&SpyApp) -> bool) -> bool {
     let end = Instant::now() + Duration::from_millis(ms);
-    while Instant::now() < end {
+    loop {
         let _ = h.run_ok();
         if f(h.state()) {
+            // Drawn once more: the worker may have moved on after the frame just drawn,
+            // and a query would read that older frame.
+            let _ = h.run_ok();
             return true;
+        }
+        if Instant::now() >= end {
+            return false;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = h.run_ok();
-    f(h.state())
 }
 
 fn phase(a: &SpyApp) -> Phase {
@@ -373,6 +377,42 @@ fn an_internal_error_last_time_is_said_once_at_the_next_start() {
     drop(h);
     let h = harness(dir, AskPolicy::Remote);
     assert!(!h.state().toasts.iter().any(|t| t.text.contains("internal error last time")), "said again");
+}
+
+#[test]
+fn a_recording_opens_for_review_and_is_never_shown_as_live() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("review");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(800));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+
+    // File, Open a recording: the recordings folder's recordings are listed.
+    h.state_mut().show_recordings = true;
+    let _ = h.run_ok();
+    assert!(h.query_by_label("every sample").is_some(), "the recording is listed");
+    h.get_all_by_label("Open").next().expect("an Open button per recording").click();
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()), "the recording did not open");
+    let _ = h.run_ok();
+    assert!(h.query_by_label("REVIEWING").is_some(), "the banner says what is shown");
+    assert!(h.query_all_by_label_contains("Not live.").next().is_some());
+    assert!(h.query_by_label("LIVE").is_none(), "no status word of the live cards while reviewing");
+    let r = h.state().review.as_ref().unwrap().review.clone();
+    assert!(r.wall_clock && r.channel("4002/ROB_1/J1").is_some_and(|c| c.v.len() > 100 && c.v.iter().all(|&v| v == 101.0)));
+    assert!(h.query_all_by_label_contains("samples in view").next().is_some(), "statistics of the stretch in view");
+    assert_eq!(phase(h.state()), Phase::Streaming, "the live session carries on underneath");
+
+    h.get_by_label("Close the recording").click();
+    let _ = h.run_ok();
+    assert!(h.state().review.is_none());
+    assert!(wait(&mut h, 2000, |a| a.review.is_none()) && h.query_by_label("LIVE").is_some(), "back to live");
 }
 
 #[test]
