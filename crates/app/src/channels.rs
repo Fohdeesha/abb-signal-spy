@@ -62,11 +62,11 @@ impl SpyApp {
             let r = ch.lock();
             let from = if c.stats.upto == i64::MIN { i64::MIN } else { c.stats.upto + 1 };
             let mut last = c.stats.upto;
-            let hold = c.stats.hold.get_or_insert_with(|| view::ZeroHold::new(r.sample_ms));
+            let hold = c.stats.hold.get_or_insert_with(view::ZeroHold::new);
             let mut hold = *hold;
             for (t, v) in r.range(from, i64::MAX) {
                 last = t;
-                let v = if reading == view::Reading::ZeroFilled { hold.apply(v) } else { v };
+                let v = if reading == view::Reading::ZeroFilled { hold.apply_at(t, v) } else { v };
                 if v.is_finite() {
                     c.stats.n += 1;
                     c.stats.sum += v;

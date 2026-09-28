@@ -179,6 +179,12 @@ impl Ring {
     /// `transform` sees the samples in time order, so it may carry state (the
     /// "hold last non-zero" display of a zero-filled signal does).
     pub fn decimate(&self, from: i64, to: i64, columns: usize, mut transform: impl FnMut(f64) -> f64) -> Vec<Vec<Column>> {
+        self.decimate_at(from, to, columns, |_, v| transform(v))
+    }
+
+    /// [`Ring::decimate`], the transform given each sample's time too (a zero-filled
+    /// signal's hold is by time).
+    pub fn decimate_at(&self, from: i64, to: i64, columns: usize, mut transform: impl FnMut(i64, f64) -> f64) -> Vec<Vec<Column>> {
         let mut segments: Vec<Vec<Column>> = Vec::new();
         if columns == 0 || to <= from {
             return segments;
@@ -193,7 +199,7 @@ impl Ring {
         let end = (self.lower_bound(to) + 1).min(self.t.len());
         for i in start..end {
             let (t, raw) = (self.t[i], self.v[i]);
-            let v = transform(raw);
+            let v = transform(t, raw);
             if let Some(p) = prev_t
                 && (t - p) as f64 > gap && !current.is_empty() {
                     segments.push(std::mem::take(&mut current));

@@ -195,7 +195,7 @@ impl SpyApp {
             let def = d.live.def();
             let samples: Vec<(i64, f64)> = d.live.lock().range(from, to).collect();
             total += samples.len();
-            series.push(Series { id: def.id(), name: self.derived_label(def), units: def.units().into(), samples: Box::new(samples.into_iter().map(|(t, v)| (t, Value::Number(v)))) });
+            series.push(Series { id: def.id(), name: crate::derived_view::file_name(def), units: def.units().into(), samples: Box::new(samples.into_iter().map(|(t, v)| (t, Value::Number(v)))) });
         }
         let note = if skipped_text { " (text signals are not kept in the live history: record them with REC)" } else { "" };
         self.start_export(total, note, move |p| write_csv(p, from, utc_offset, series));
@@ -214,7 +214,9 @@ impl SpyApp {
             .iter()
             .map(|ch| {
                 let (units, factor) = crate::review_view::display_of(ch);
-                (units, factor, crate::review_view::name_of(&self.catalogue, ch))
+                // A derived channel with the setting it was computed with.
+                let name = ch.derived.as_ref().map_or_else(|| crate::review_view::name_of(&self.catalogue, ch), crate::derived_view::file_name);
+                (units, factor, name)
             })
             .collect();
         let within = |t: &[i64]| t.partition_point(|&x| x < to) - t.partition_point(|&x| x < from);

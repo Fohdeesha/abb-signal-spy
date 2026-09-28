@@ -239,6 +239,10 @@ fn derived(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<Str
                     notes.push(format!("derived channel {} (a target that is not a number)", i + 1));
                     continue;
                 }
+                if !d.def.legs_valid() {
+                    notes.push(format!("derived channel {} (not the three PWM legs of one axis)", i + 1));
+                    continue;
+                }
                 if out.iter().any(|o| o.def.same(&d.def)) {
                     notes.push(format!("derived channel {} (a second time)", i + 1));
                     continue;
@@ -399,13 +403,15 @@ mod tests {
                 {"def": {"kind": "sag", "link": {"signal": 5027, "unit": "ROB_1", "axis": 1}, "plateau_v": 356.5}, "lane": 2},
                 {"def": {"kind": "turn", "angle": {"signal": 5138, "unit": "ROB_1", "axis": 9}}},
                 {"def": {"kind": "sag", "link": {"signal": 5027, "unit": "ROB_1", "axis": 1}}},
-                {"def": {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5021, "unit": "ROB_1", "axis": 2}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]}}
+                {"def": {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5021, "unit": "ROB_1", "axis": 2}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]}},
+                {"def": {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 3}, {"signal": 4002, "unit": "ROB_1", "axis": 3}, {"signal": 5022, "unit": "ROB_1", "axis": 3}]}}
             ]}"#,
         )
         .unwrap();
         let (s, note) = Settings::load(&p);
         let note = note.unwrap();
         assert!(note.contains("derived channel 2") && note.contains("derived channel 3 (a second time)"), "{note}");
+        assert!(note.contains("derived channel 5 (not the three PWM legs of one axis)"), "any three channels summed as a duty sum: {note}");
         assert_eq!(s.derived.len(), 2);
         assert_eq!(s.derived[0].def, spy_core::derived::Derived::Sag { link: key(5027, "ROB_1", 1), plateau_v: None }, "a plateau in the file is not used");
         assert_eq!(s.derived[0].lane, 2);

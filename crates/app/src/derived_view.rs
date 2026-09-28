@@ -31,6 +31,10 @@ pub struct DerivedView {
     pub stats: Stats,
     /// A turn's target as it is being typed.
     pub target_text: String,
+    /// The system id of the controller a turn's target was read from (its commutator
+    /// offset): that controller's, like a plateau, so it goes when another is streaming
+    /// and is not saved. `None` for a target the person typed.
+    pub target_from: Option<String>,
 }
 
 /// What a channel of this signal can be an input of.
@@ -47,6 +51,25 @@ pub fn offers(sig: Option<&Signal>, key: &ChannelKey) -> Vec<Derived> {
         v.push(Derived::Sag { link: key.clone(), plateau_v: None });
     }
     v
+}
+
+/// The MOTOR_CALIB instance whose commutator offset can be this turn's target, or why
+/// none can.
+pub fn commutator_instance(angle: &ChannelKey) -> Result<String, &'static str> {
+    if angle.signal != derived::RESOLVER_ANGLE {
+        return Err("A commutator offset is what the resolver angle 5138 reads at the commutation position. 5000 and 7325 read the resolver a fixed offset away from it, and the electrical angles (5028, 5029, 7022) turn five times per motor turn: add a turn on 5138 for this.");
+    }
+    spy_core::rws::calib_instance(angle.unit.as_str(), angle.axis.one_based()).ok_or("Only a robot's axes (ROB_1, ROB_2, ...) have their calibration named this way.")
+}
+
+/// A derived channel's name in a file, with the setting it was computed with: a
+/// turn's or a sag's values mean nothing without their target or plateau.
+pub fn file_name(def: &Derived) -> String {
+    match def {
+        Derived::Turn { target_deg: Some(t), .. } => format!("{}, target {} deg", def.name(), view::fmt(*t)),
+        Derived::Sag { plateau_v: Some(p), .. } => format!("{}, plateau {} V", def.name(), view::fmt(*p)),
+        _ => def.name(),
+    }
 }
 
 /// The card menu's entry for offering it.
@@ -144,7 +167,7 @@ impl SpyApp {
         self.next_lane += 1;
         let label = self.derived_label(&def);
         let color = chan_color(self.chans.len() + self.derived.len());
-        self.derived.push(DerivedView { live: Live::new(def), color, lane, stats: Stats::default(), target_text: String::new() });
+        self.derived.push(DerivedView { live: Live::new(def), color, lane, stats: Stats::default(), target_text: String::new(), target_from: None });
         self.derived_changed(Some(format!("Added {label}.")));
         true
     }
@@ -181,8 +204,22 @@ impl SpyApp {
     /// Each frame: bring every derived history up to date, and its statistics.
     pub fn update_derived(&mut self) {
         let store = self.session.store().clone();
+        let streaming = self.session.status().announce.as_ref().and_then(|a| a.system_id.clone());
         let mut dropped = Vec::new();
+        let mut targets_gone = Vec::new();
         for d in &mut self.derived {
+            // A target read from a controller is that controller's commutator offset:
+            // not this one's, when another is streaming now.
+            if let (Some(from), Some(now)) = (&d.target_from, &streaming)
+                && !from.eq_ignore_ascii_case(now)
+                && let Derived::Turn { angle, .. } = d.live.def().clone()
+            {
+                d.live.set(Derived::Turn { angle, target_deg: None });
+                d.target_from = None;
+                d.target_text.clear();
+                d.stats = Stats::default();
+                targets_gone.push(d.live.def().clone());
+            }
             let before = d.live.def().is_set();
             d.live.update(&store);
             if before && !d.live.def().is_set() {
@@ -206,6 +243,18 @@ impl SpyApp {
             self.toast(Level::Warn, text.clone());
             self.derived_changed(Some(text));
         }
+        for def in targets_gone {
+            let text = format!("The target of {} was cleared: it was the commutator offset of another controller than the one streaming now. Read it again from this one, or type one.", self.derived_label(&def));
+            self.toast(Level::Warn, text.clone());
+            self.derived_changed(Some(text));
+        }
+    }
+
+    /// Statistics from now on: a new target or plateau does not take in the history
+    /// computed again against it.
+    fn stats_from_now(&self, def: &Derived) -> Stats {
+        let upto = def.inputs().iter().filter_map(|k| self.session.store().get(k).and_then(|c| c.lock().last().map(|(t, _)| t))).min().unwrap_or(i64::MIN);
+        Stats { upto, ..Stats::default() }
     }
 
     /// A derived channel's one status word: the least live of its inputs', WAITING
@@ -243,8 +292,10 @@ impl SpyApp {
         let Derived::Turn { angle, .. } = self.derived[i].live.def().clone() else { return };
         let def = Derived::Turn { angle, target_deg: Some(t) };
         let label = self.derived_label(&def);
+        self.derived[i].stats = self.stats_from_now(&def);
         self.derived[i].live.set(def);
-        self.derived[i].stats = Stats::default();
+        // Typed: the person's (a target read from the controller is marked after this).
+        self.derived[i].target_from = None;
         self.derived_changed(Some(format!("{label}: target set to {} deg.", view::fmt(t))));
     }
 
@@ -266,14 +317,19 @@ impl SpyApp {
             Ok(x) => x,
             Err(e) => return self.toast(Level::Error, format!("No plateau: {e}.")),
         };
+        // Nothing to sag from, and a percentage below it meaningless.
+        if mean.is_nan() || mean <= 0.0 {
+            self.toast(Level::Error, format!("No plateau: the DC link reads {} V, not a charged link. Set it with the robot armed (motors on) and still.", view::fmt(mean)));
+            return;
+        }
         if sd > mean.abs() * PLATEAU_STEADY {
             self.toast(Level::Error, format!("No plateau: the DC link was not steady (mean {} V, standard deviation {} V over the last two seconds). Set it with the robot armed and still.", view::fmt(mean), view::fmt(sd)));
             return;
         }
         let def = Derived::Sag { link, plateau_v: Some(mean) };
         let label = self.derived_label(&def);
+        self.derived[i].stats = self.stats_from_now(&def);
         self.derived[i].live.set(def);
-        self.derived[i].stats = Stats::default();
         let text = format!("{label}: plateau set to {} V (the mean of the last two seconds; standard deviation {} V).", view::fmt(mean), view::fmt(sd));
         self.toast(Level::Info, text.clone());
         self.derived_changed(Some(text));
@@ -373,10 +429,13 @@ impl SpyApp {
                             }
                         });
                         if let Derived::Turn { angle, .. } = &def {
-                            let named = spy_core::rws::calib_instance(angle.unit.as_str(), angle.axis.one_based()).is_some();
-                            let why = if !rws { "Log in to the controller's RWS first (Controller menu)." } else { "Only a robot's axes (ROB_1, ROB_2, ...) have their calibration named this way." };
+                            let instance = commutator_instance(angle);
+                            let why: &str = match &instance {
+                                Err(why) => why,
+                                Ok(_) => "Log in to the controller's RWS first (Controller menu).",
+                            };
                             if ui
-                                .add_enabled(rws && named, egui::Button::new("Commutator offset").small())
+                                .add_enabled(rws && instance.is_ok(), egui::Button::new("Commutator offset").small())
                                 .on_hover_text("Read this motor's Commutator Offset (MOTOR_CALIB com_offset) from the controller as the target: what the resolver reads at the commutation position.")
                                 .on_disabled_hover_text(why)
                                 .clicked()
@@ -449,6 +508,30 @@ mod tests {
         assert_eq!(kinds(5027), ["DC-link sag"]);
         assert!(kinds(4002).is_empty() && kinds(6000).is_empty() && kinds(5013).is_empty(), "not a torque, a joint angle, or Uq (volts per axis)");
         assert!(offers(None, &key(5138, 1)).is_empty(), "nothing for a signal the catalogue does not know");
+    }
+
+    #[test]
+    fn the_commutator_offset_is_a_target_only_for_the_resolver_angle() {
+        // com_offset is what 5138 reads at the commutation position (its frame is the
+        // calibration's, tunemaster-testsignals.md s13.6); 5000 and 7325 carry a fixed
+        // offset from it, and 5028, 5029 and 7022 turn five times per motor turn.
+        assert_eq!(commutator_instance(&key(5138, 2)).as_deref(), Ok("rob1_2"));
+        for n in [5000, 7325, 5028, 5029, 7022] {
+            let why = commutator_instance(&key(n, 2)).expect_err("offered for an angle it does not describe");
+            assert!(why.contains("5138"), "{n}: {why}");
+        }
+        let stn = ChannelKey { signal: 5138, unit: MechUnit::new("STN_1").unwrap(), axis: Axis::new(1).unwrap() };
+        assert!(commutator_instance(&stn).is_err());
+    }
+
+    #[test]
+    fn a_derived_channel_in_a_file_says_what_it_was_computed_with() {
+        let t = Derived::Turn { angle: key(5138, 1), target_deg: Some(90.0) };
+        assert!(file_name(&t).contains("target 90"), "{}", file_name(&t));
+        let s = Derived::Sag { link: key(5027, 1), plateau_v: Some(356.5) };
+        assert!(file_name(&s).contains("plateau 356.5"), "{}", file_name(&s));
+        let d = Derived::duty_sum(&key(5020, 1));
+        assert_eq!(file_name(&d), d.name(), "nothing to add for a duty sum");
     }
 
     #[test]

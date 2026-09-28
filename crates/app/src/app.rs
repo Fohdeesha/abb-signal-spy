@@ -362,7 +362,7 @@ impl SpyApp {
                 spy_core::derived::Derived::Turn { target_deg: Some(t), .. } => view::fmt(*t),
                 _ => String::new(),
             };
-            app.derived.push(crate::derived_view::DerivedView { live: spy_core::derived::Live::new(d.def), color, lane, stats: Stats::default(), target_text });
+            app.derived.push(crate::derived_view::DerivedView { live: spy_core::derived::Live::new(d.def), color, lane, stats: Stats::default(), target_text, target_from: None });
         }
         // On screen, not only in the log: something the person wrote was not used.
         if let Some(n) = note {
@@ -395,13 +395,15 @@ impl SpyApp {
             .iter()
             .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane })
             .collect();
-        // A plateau is not kept: it was measured on the controller of the moment.
+        // A plateau is not kept: it was measured on the controller of the moment; nor a
+        // target read from a controller (its commutator offset). A typed target is.
         self.settings.derived = self
             .derived
             .iter()
             .map(|d| {
                 let def = match d.live.def() {
                     spy_core::derived::Derived::Sag { link, .. } => spy_core::derived::Derived::Sag { link: link.clone(), plateau_v: None },
+                    spy_core::derived::Derived::Turn { angle, .. } if d.target_from.is_some() => spy_core::derived::Derived::Turn { angle: angle.clone(), target_deg: None },
                     other => other.clone(),
                 };
                 crate::settings::SavedDerived { def, lane: d.lane }
@@ -1152,12 +1154,18 @@ impl SpyApp {
             let def = self.derived[i].live.def();
             let v = view::readout(&self.derived[i].live.lock(), crate::derived_view::reading(def));
             let (value, on_target) = crate::derived_view::value_text(def, v, h.is_live());
+            // The number too: a snapshot the window stops updating is shown with it,
+            // never with ON TARGET (the phone server's rule).
+            let (number, _) = crate::derived_view::value_text(def, v, false);
             chans.push(serde_json::json!({
                 "name": self.derived_label(def),
                 "value": value,
                 "units": if on_target { "" } else { def.units() },
                 "stale": !h.is_live(),
                 "status": h.word(),
+                "on_target": on_target,
+                "number": number,
+                "number_units": def.units(),
             }));
         }
         let state = match &st.phase {

@@ -39,6 +39,10 @@ pub const DUTY_SUM: f64 = 1.5;
 pub const PWM_LEGS: [u32; 3] = [5020, 5021, 5022];
 /// Two inputs' samples this close (ms) are the same controller tick.
 pub const SAME_TICK_MS: i64 = 1;
+/// The resolver angle in the calibration's own frame, `(cal_offset + motor) mod 2pi`
+/// (tunemaster-testsignals.md s13.6, s16): the frame a motor's commutator offset is
+/// in. 5000 and 7325 read the resolver too, but a fixed per-axis offset away.
+pub const RESOLVER_ANGLE: u32 = 5138;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -101,10 +105,12 @@ impl Derived {
         }
     }
 
-    /// For people, in the form channel labels take: what, then where.
+    /// For people, in the form channel labels take: what, then where. A turn names its
+    /// angle's signal: several wrapping angles can each have one on the same axis.
     pub fn name(&self) -> String {
         match self {
-            Derived::Turn { angle: k, .. } | Derived::DutySum { legs: [k, ..] } => format!("{}  {} J{}", self.kind_name(), k.unit, k.axis.one_based()),
+            Derived::Turn { angle: k, .. } => format!("{}  {} {} J{}", self.kind_name(), k.signal, k.unit, k.axis.one_based()),
+            Derived::DutySum { legs: [k, ..] } => format!("{}  {} J{}", self.kind_name(), k.unit, k.axis.one_based()),
             Derived::Sag { link, .. } => format!("{}  {}", self.kind_name(), link.unit),
         }
     }
@@ -120,6 +126,15 @@ impl Derived {
     /// The same derivation (a changed target or plateau is still the same one).
     pub fn same(&self, other: &Derived) -> bool {
         self.id() == other.id()
+    }
+
+    /// A duty sum is of the three PWM legs of one axis, in order (a hand-edited file
+    /// could name any three channels); the others have nothing to check.
+    pub fn legs_valid(&self) -> bool {
+        match self {
+            Derived::DutySum { legs } => legs.iter().zip(PWM_LEGS).all(|(k, s)| k.signal == s && k.unit == legs[0].unit && k.axis == legs[0].axis),
+            _ => true,
+        }
     }
 
     /// Whether it has what it needs to give values (a target, a plateau).
@@ -174,11 +189,12 @@ impl Derived {
 
 /// The plateau for a sag: the mean of the newest [`PLATEAU_MS`] of a DC link's
 /// history, with its standard deviation. Refused, with the reason, when too little
-/// of that stretch has arrived.
+/// of that stretch has arrived: counted in samples, so a gap inside it is not coverage.
 pub fn plateau(ring: &Ring) -> Result<(f64, f64), String> {
     let Some((last, _)) = ring.last() else { return Err("nothing has arrived from the DC link yet".into()) };
     let v: Vec<(i64, f64)> = ring.range(last - PLATEAU_MS + 1, last + 1).filter(|(_, v)| v.is_finite()).collect();
-    let covered = v.last().zip(v.first()).map(|(b, a)| b.0 - a.0).unwrap_or(0);
+    let gap = ring.gap_ms();
+    let covered: i64 = v.windows(2).map(|w| w[1].0 - w[0].0).filter(|&step| step as f64 <= gap).sum();
     if v.len() < 2 || covered < PLATEAU_MIN_MS {
         return Err(format!("only {:.1} s of the DC link has arrived; it needs {:.0} s", covered as f64 / 1000.0, PLATEAU_MS as f64 / 1000.0));
     }
@@ -247,13 +263,14 @@ impl Live {
         }
         // Every input has reached `newest`, and a stream's samples arrive in order: a
         // partner stamped up to SAME_TICK_MS after its tick's first sample is in (the
-        // next tick is 2 ms or more on). A partner stamped up to that much before is
-        // looked for from that much before.
+        // next tick is 2 ms or more on), even for the first input's sample at `newest`
+        // itself, whose partner can be stamped just after it. A partner stamped up to
+        // that much before is looked for from that much before.
         let from = self.upto.saturating_add(1);
         let series: Vec<Vec<(i64, f64)>> = chans
             .iter()
             .enumerate()
-            .map(|(k, c)| c.lock().range(if k == 0 { from } else { from.saturating_sub(SAME_TICK_MS) }, newest + 1).collect())
+            .map(|(k, c)| if k == 0 { c.lock().range(from, newest + 1).collect() } else { c.lock().range(from.saturating_sub(SAME_TICK_MS), newest.saturating_add(SAME_TICK_MS + 1)).collect() })
             .collect();
         let sample_ms = chans[0].lock().sample_ms;
         let refs: Vec<&[(i64, f64)]> = series.iter().map(|s| s.as_slice()).collect();
@@ -403,6 +420,56 @@ mod tests {
         fill(&store, &c, &[(23, 0.5)]);
         live.update(&store);
         assert_eq!(all(&live), vec![(16, 1.5), (20, 1.3)]);
+    }
+
+    #[test]
+    fn the_live_history_joins_a_partner_stamped_just_after_the_newest() {
+        // The first input the earlier-stamping group: its newest sample's partner,
+        // stamped 1 ms later, is already in. Not left out, and not lost for good.
+        let store = Store::new();
+        let [a, b, c] = PWM_LEGS.map(|s| key(s, 1));
+        let mut live = Live::new(Derived::duty_sum(&a));
+        fill(&store, &a, &[(0, 0.5)]);
+        fill(&store, &b, &[(0, 0.5)]);
+        fill(&store, &c, &[(1, 0.5)]);
+        live.update(&store);
+        assert_eq!(live.lock().range(i64::MIN, i64::MAX).collect::<Vec<_>>(), vec![(0, 1.5)]);
+        fill(&store, &a, &[(4, 0.5)]);
+        fill(&store, &b, &[(4, 0.5)]);
+        fill(&store, &c, &[(5, 0.5)]);
+        live.update(&store);
+        assert_eq!(live.lock().range(i64::MIN, i64::MAX).map(|(t, _)| t).collect::<Vec<_>>(), vec![0, 4]);
+    }
+
+    #[test]
+    fn a_plateau_needs_two_seconds_of_samples_not_of_span() {
+        // Samples from 1.6 s to 2.0 s, a gap, then 3.2 s to 3.6 s: the newest two
+        // seconds run from first sample to last, but only 0.8 s of them has samples.
+        let mut r = Ring::new(4.0);
+        for i in 0..=100 {
+            r.push(1600 + i * 4, 356.0);
+        }
+        for i in 0..=100 {
+            r.push(3200 + i * 4, 356.0);
+        }
+        assert!(plateau(&r).is_err(), "0.8 s of samples in a 2 s stretch: {:?}", plateau(&r));
+    }
+
+    #[test]
+    fn a_turn_names_its_angle() {
+        let a = Derived::Turn { angle: key(5138, 1), target_deg: None };
+        let b = Derived::Turn { angle: key(5000, 1), target_deg: None };
+        assert_ne!(a.name(), b.name(), "two turns on one axis read the same everywhere");
+        assert!(a.name().contains("5138"), "{}", a.name());
+    }
+
+    #[test]
+    fn a_duty_sum_is_of_the_three_legs_of_one_axis() {
+        assert!(Derived::duty_sum(&key(5021, 3)).legs_valid());
+        let mixed = Derived::DutySum { legs: [key(5020, 1), key(5021, 2), key(5022, 1)] };
+        let wrong = Derived::DutySum { legs: [key(5020, 1), key(4002, 1), key(5022, 1)] };
+        assert!(!mixed.legs_valid() && !wrong.legs_valid(), "any three channels summed and called a duty sum");
+        assert!(Derived::Turn { angle: key(5138, 1), target_deg: None }.legs_valid());
     }
 
     #[test]

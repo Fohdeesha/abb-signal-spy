@@ -21,6 +21,27 @@ const IO_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 /// Ports tried after the one asked for, when it is taken by another program.
 const PORT_TRIES: u16 = 10;
+/// A snapshot older than this is not current: the window builds one every 250 ms, and
+/// one that stopped (minimised, busy) must not go on showing its values as live.
+const FROZEN_MS: u64 = 1000;
+
+/// A snapshot the window stopped updating: every value in it NOT CURRENT, and a turn
+/// shown by its number, never ON TARGET.
+fn frozen(body: &str) -> String {
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(body) else { return body.to_string() };
+    if let Some(chans) = doc["channels"].as_array_mut() {
+        for c in chans {
+            if c["on_target"] == true {
+                c["value"] = c["number"].clone();
+                c["units"] = c["number_units"].clone();
+                c["on_target"] = false.into();
+            }
+            c["stale"] = true.into();
+            c["status"] = "NOT CURRENT".into();
+        }
+    }
+    doc.to_string()
+}
 
 /// The snapshot the window publishes: a JSON body and when it was built.
 #[derive(Default)]
@@ -203,7 +224,7 @@ fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &[String], deadlin
                 let g = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                 let age = g.built.map(|b| b.elapsed().as_millis() as u64);
                 match age {
-                    Some(age) if !g.body.is_empty() => format!("{{\"age_ms\":{age},\"data\":{}}}", g.body),
+                    Some(age) if !g.body.is_empty() => format!("{{\"age_ms\":{age},\"data\":{}}}", if age > FROZEN_MS { frozen(&g.body) } else { g.body.clone() }),
                     _ => "{\"age_ms\":null,\"data\":null}".to_string(),
                 }
             };
@@ -359,6 +380,33 @@ mod tests {
         let srv = PhoneServer::start(0, Arc::new(Mutex::new(Snapshot::default()))).unwrap();
         assert!(get(srv.port(), "GET /data HTTP/1.1\r\nHost: evil.example\r\n\r\n").starts_with("HTTP/1.1 421"));
         assert!(get(srv.port(), &format!("GET /data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.port())).starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_snapshot_the_window_stopped_updating_shows_nothing_as_current() {
+        let snap = Arc::new(Mutex::new(Snapshot::default()));
+        let srv = PhoneServer::start(0, snap.clone()).unwrap();
+        let body = r#"{"state":"Streaming","channels":[{"name":"Turn to target  5138 ROB_1 J1","value":"ON TARGET","units":"","stale":false,"status":"LIVE","on_target":true,"number":"+0.100","number_units":"deg"},{"name":"Torque","value":"3.50000","units":"Nm","stale":false,"status":"LIVE"}]}"#;
+        let fetch = |age_ms: u64| {
+            {
+                let mut g = snap.lock().unwrap();
+                g.body = body.into();
+                g.built = Instant::now().checked_sub(Duration::from_millis(age_ms));
+            }
+            let data = get(srv.port(), &format!("GET /data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.port()));
+            let json = data.split("\r\n\r\n").nth(1).unwrap().to_string();
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()
+        };
+        let fresh = fetch(0);
+        assert_eq!(fresh["data"]["channels"][0]["value"], "ON TARGET", "a fresh snapshot as the window built it");
+        // The window stopped building it (minimised, busy): nothing in it is current.
+        let old = fetch(1500);
+        let ch = &old["data"]["channels"];
+        assert_eq!(ch[0]["value"], "+0.100", "ON TARGET shown from a frozen snapshot");
+        assert_eq!(ch[0]["units"], "deg");
+        for c in ch.as_array().unwrap() {
+            assert_eq!((c["stale"].as_bool(), c["status"].as_str()), (Some(true), Some("NOT CURRENT")), "{c}");
+        }
     }
 
     #[test]

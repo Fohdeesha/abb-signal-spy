@@ -436,8 +436,9 @@ impl SpyApp {
     /// Ask the controller for a turn's target: its motor's commutator offset.
     pub fn request_com_offset(&mut self, i: usize) {
         let Derived::Turn { angle, .. } = self.derived[i].live.def().clone() else { return };
-        let Some(instance) = rws::calib_instance(angle.unit.as_str(), angle.axis.one_based()) else {
-            return self.toast(Level::Warn, "Only a robot's axes (ROB_1, ROB_2, ...) have their calibration named this way.");
+        let instance = match crate::derived_view::commutator_instance(&angle) {
+            Ok(i) => i,
+            Err(why) => return self.toast(Level::Warn, why),
         };
         let id = self.derived[i].live.def().id();
         if let Some(l) = &self.rws {
@@ -452,6 +453,9 @@ impl SpyApp {
                 let deg = m.com_offset.to_degrees();
                 self.derived[i].target_text = view::fmt(deg);
                 self.set_target(i);
+                // This controller's value: it goes when another is streaming, and is
+                // not saved (a typed target is the person's).
+                self.derived[i].target_from = self.session.status().announce.as_ref().and_then(|a| a.system_id.clone());
                 let text = format!("Target from the controller: MOTOR_CALIB {} com_offset (Commutator Offset) {} rad = {} deg.", m.instance, m.com_offset, view::fmt(deg));
                 if m.com_valid {
                     self.toast(Level::Info, text);

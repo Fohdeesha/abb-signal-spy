@@ -658,7 +658,7 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
         let _ = h.run_ok();
         let body = h.state().phone_snapshot.lock().unwrap().body.clone();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        json["channels"].as_array().unwrap().iter().find(|c| c["name"] == "Turn to target  ROB_1 J1").cloned().unwrap_or_else(|| panic!("no turn in {body}"))
+        json["channels"].as_array().unwrap().iter().find(|c| c["name"] == "Turn to target  5138 ROB_1 J1").cloned().unwrap_or_else(|| panic!("no turn in {body}"))
     };
     let row = phone(&mut h);
     assert!(row["value"] == "ON TARGET" && row["stale"] == false, "{row}");
@@ -780,6 +780,86 @@ fn derived_channels_come_back_without_their_plateau() {
     assert!(matches!(defs[0], spy_core::derived::Derived::Turn { target_deg: Some(t), .. } if t == 90.0), "a target is the person's: kept");
     assert!(matches!(defs[1], spy_core::derived::Derived::Sag { plateau_v: None, .. }), "a plateau was the controller's of the moment: not kept");
     assert_eq!(h.state().derived[0].target_text, "90.0000");
+}
+
+#[test]
+fn a_commutator_offset_target_is_the_controllers_it_came_from() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+    let (fake, rws, mut h, dir) = with_rws(b, "rws-target-owner");
+    add_via_dialog(&mut h, 5138, "Add");
+    let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.get_by_label("Commutator offset").click();
+    assert!(wait(&mut h, 3000, |a| a.derived[0].live.def().is_set()));
+    // Not kept in the settings: it is this controller's, like a plateau.
+    h.state_mut().save_settings();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
+    assert!(saved["derived"][0]["def"]["target_deg"].is_null(), "a controller's commutator offset saved as a target: {}", saved["derived"]);
+    // Another controller behind the address: the target goes, and the person is told.
+    h.get_by_label("Disconnect").click();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+    fake.with(|b| b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
+    h.get_by_label("Connect").click();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(wait(&mut h, 3000, |a| !a.derived[0].live.def().is_set()), "another controller's commutator offset kept as the target");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("commutator offset")), "not said");
+    // A target typed over one read from the controller is the person's, and stays.
+    rws.with(|r| r.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.get_by_label("Commutator offset").click();
+    assert!(wait(&mut h, 3000, |a| a.derived[0].live.def().is_set()));
+    h.state_mut().derived[0].target_text = "12".into();
+    h.state_mut().set_target(0);
+    h.get_by_label("Disconnect").click();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+    fake.with(|b| b.system_id = "{0000000C-0000-4000-8000-00000000000C}".into());
+    h.get_by_label("Connect").click();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let _ = h.run_ok();
+    assert!(h.state().derived[0].live.def().is_set(), "a typed target dropped");
+}
+
+#[test]
+fn a_plateau_of_no_voltage_is_refused() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 0.0), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let mut h = harness(temp_dir("plateau-zero"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5027, "Add");
+    card_menu(&mut h, 0, "Sag below a plateau");
+    std::thread::sleep(Duration::from_millis(2300));
+    let _ = h.run_ok();
+    h.get_by_label("Set the plateau").click();
+    let _ = h.run_ok();
+    assert!(!h.state().derived[0].live.def().is_set(), "a plateau of 0 V: every sag after it is the whole link");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("No plateau")), "not said");
+}
+
+#[test]
+fn the_deepest_sag_counts_from_its_plateau_on() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let mut h = harness(temp_dir("plateau-deepest"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5027, "Add");
+    card_menu(&mut h, 0, "Sag below a plateau");
+    // Motors off (16 V) for a while, then on and steady.
+    std::thread::sleep(Duration::from_millis(800));
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 356.0), sample_ms: 4.032 }));
+    std::thread::sleep(Duration::from_millis(2300));
+    let _ = h.run_ok();
+    h.get_by_label("Set the plateau").click();
+    assert!(wait(&mut h, 2000, |a| a.derived[0].live.def().is_set() && a.derived[0].stats.n > 20));
+    let deepest = h.state().derived[0].stats.max;
+    assert!(deepest < 1.0, "deepest {deepest} V: the motors-off history before the plateau counted");
 }
 
 /// A fake controller and its RWS, one system, the app logged in to both.

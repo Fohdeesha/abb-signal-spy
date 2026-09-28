@@ -274,15 +274,10 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
         ch.gap_ms = sample_ms * 1.5;
         if !slow && ch.key.as_ref().is_some_and(|k| hold.contains(&k.signal)) {
             ch.raw = Some(ch.v.clone());
-            let mut h = ZeroHold::new(sample_ms);
-            let mut prev: Option<i64> = None;
+            // By time: the padding never spans a gap longer than the hold.
+            let mut h = ZeroHold::new();
             for (t, v) in ch.t.iter().zip(ch.v.iter_mut()) {
-                // A gap ends the hold: the padding never spans one.
-                if prev.is_some_and(|p| (*t - p) as f64 > ch.gap_ms) {
-                    h = ZeroHold::new(sample_ms);
-                }
-                prev = Some(*t);
-                *v = h.apply(*v);
+                *v = h.apply_at(*t, *v);
             }
         }
         ch.blocks = blocks(&ch.t, &ch.v, ch.band.as_ref(), ch.gap_ms);
@@ -330,6 +325,10 @@ fn derive(meta: &Meta, channels: &mut Vec<ReviewChannel>, notes: &mut Vec<String
     }
     let mut out = Vec::new();
     for def in &meta.derived {
+        if !def.legs_valid() {
+            notes.push(format!("{} was left out: it is not the three PWM legs of one axis (the recording's description was edited).", def.name()));
+            continue;
+        }
         let inputs: Option<Vec<&ReviewChannel>> = def.inputs().iter().map(|k| channels.iter().find(|c| c.id == k.id())).collect();
         let Some(inputs) = inputs else {
             notes.push(format!("{} could not be computed: an input of it is not in the recording.", def.name()));
@@ -553,6 +552,7 @@ mod tests {
         let anchors = r#"{"controller_ms": 10000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}, {"controller_ms": 10002, "utc": "2026-09-27T10:01:00.000Z", "row": 11}"#;
         let derived = r#", "derived": [
             {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5021, "unit": "ROB_1", "axis": 2}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]},
+            {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5027, "unit": "ROB_1", "axis": 1}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]},
             {"kind": "sag", "link": {"signal": 5027, "unit": "ROB_1", "axis": 1}, "plateau_v": 356.0},
             {"kind": "turn", "angle": {"signal": 5138, "unit": "ROB_1", "axis": 3}, "target_deg": 90.0}
         ], "events": [{"utc": "2026-09-27T10:00:30.000Z", "kind": "derived-setting", "text": "plateau set"}]"#;
@@ -567,6 +567,8 @@ mod tests {
         let sag = r.channel("sag:5027/ROB_1/J1").unwrap();
         assert!(sag.v.len() == 5 && sag.v.iter().all(|&v| v == 6.0));
         assert!(r.channel("turn:5138/ROB_1/J3").is_none());
+        assert_eq!(r.channels.iter().filter(|c| c.derived.is_some() && c.id.starts_with("duty-sum")).count(), 1, "a DC link summed with two duty legs as a duty sum");
+        assert!(r.notes.iter().any(|n| n.contains("not the three PWM legs")), "{:?}", r.notes);
         assert!(r.notes.iter().any(|n| n.contains("Turn to target") && n.contains("not in the recording")), "{:?}", r.notes);
         assert!(r.notes.iter().any(|n| n.contains("computed with the last one")), "a setting changed while recording: {:?}", r.notes);
         let _ = std::fs::remove_dir_all(&d);

@@ -64,10 +64,10 @@ const STEADY_ANGLE: f64 = 0.99;
 fn read_window(ring: &Ring, r: Reading, from: i64, to: i64) -> Vec<f64> {
     match r {
         Reading::ZeroFilled => {
-            let mut hold = ZeroHold::new(ring.sample_ms);
+            let mut hold = ZeroHold::new();
             let prime = from - ZERO_HOLD_MS.ceil() as i64 - 1;
             ring.range(prime, to).filter_map(|(t, v)| {
-                let x = hold.apply(v);
+                let x = hold.apply_at(t, v);
                 (t >= from).then_some(x)
             }).collect()
         }
@@ -99,9 +99,13 @@ pub fn readout(ring: &Ring, r: Reading) -> Option<f64> {
 }
 
 /// The value at timeline point `t` as the signal means it (the last sample at or
-/// before it, padding undone), for the cursors.
+/// before it, padding undone), for the cursors. Nothing in a gap, or long after the
+/// newest sample: the value before it is not the value there.
 pub fn value_at(ring: &Ring, r: Reading, t: i64) -> Option<f64> {
     let (at, v) = ring.at_or_before(t)?;
+    if (t - at) as f64 > ring.gap_ms() {
+        return None;
+    }
     match r {
         Reading::ZeroFilled => read_window(ring, r, at, at + 1).last().copied(),
         _ => Some(v),
@@ -333,6 +337,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cursor_in_a_gap_reads_nothing() {
+        let mut r = Ring::new(4.0);
+        for i in 0..10 {
+            r.push(i * 4, 1.0);
+        }
+        for i in 0..10 {
+            r.push(5000 + i * 4, 2.0);
+        }
+        assert_eq!(value_at(&r, Reading::Plain, 20), Some(1.0));
+        assert_eq!(value_at(&r, Reading::Plain, 22), Some(1.0), "between two samples");
+        assert_eq!(value_at(&r, Reading::Plain, 2500), None, "the last value before a gap, read inside it");
+        assert_eq!(value_at(&r, Reading::Plain, 5020), Some(2.0));
+        assert_eq!(value_at(&r, Reading::Plain, 9000), None, "long after the newest sample");
+    }
+
+    #[test]
     fn a_zero_filled_speed_reads_zero_once_the_joint_stops() {
         let mut values = vec![0.5; 100];
         values.extend(vec![0.0; 75]); // 300 ms at rest
@@ -340,16 +360,16 @@ mod tests {
         assert_eq!(readout(&r, Reading::ZeroFilled), Some(0.0), "a stopped joint must not keep its last speed");
         // The chart's hold lets go after the hold time too: a flat line at the last
         // speed forever was the old behaviour.
-        let mut h = ZeroHold::new(4.0);
-        let out: Vec<f64> = values.iter().map(|&x| h.apply(x)).collect();
+        let mut h = ZeroHold::new();
+        let out: Vec<f64> = values.iter().enumerate().map(|(i, &x)| h.apply_at(i as i64 * 4, x)).collect();
         assert_eq!(out[100], 0.5, "padding right after a value is held");
-        assert_eq!(out[100 + 24], 0.5, "held for the hold time (25 zeros of 4 ms)");
+        assert_eq!(out[100 + 24], 0.5, "held for the hold time (100 ms after the value)");
         assert_eq!(out[100 + 25], 0.0, "and not beyond it");
         assert_eq!(*out.last().unwrap(), 0.0);
         // A true value of zero amid motion is a sample like any other: the next
         // non-zero value is shown at once.
-        let mut h = ZeroHold::new(4.0);
-        assert_eq!([1.0, 0.0, -2.0, 0.0].map(|x| h.apply(x)), [1.0, 1.0, -2.0, -2.0]);
+        let mut h = ZeroHold::new();
+        assert_eq!([(0, 1.0), (4, 0.0), (8, -2.0), (12, 0.0)].map(|(t, x)| h.apply_at(t, x)), [1.0, 1.0, -2.0, -2.0]);
     }
 
     #[test]

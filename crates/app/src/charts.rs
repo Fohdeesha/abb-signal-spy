@@ -265,13 +265,13 @@ impl SpyApp {
                         // A zero-filled signal's padding, undone for at most the hold
                         // time: a longer run of zeros is a stop and is drawn as zero.
                         // Primed from just before the window, so its left edge is right.
-                        let mut zh = view::ZeroHold::new(ring.sample_ms);
+                        let mut zh = view::ZeroHold::new();
                         if hold {
-                            for (_, v) in ring.range(from - view::ZERO_HOLD_MS.ceil() as i64 - 1, from) {
-                                zh.apply(v);
+                            for (t, v) in ring.range(from - view::ZERO_HOLD_MS.ceil() as i64 - 1, from) {
+                                zh.apply_at(t, v);
                             }
                         }
-                        let segs = ring.decimate(from, to, px, |v| (if hold { zh.apply(v) } else { v }) * factor);
+                        let segs = ring.decimate_at(from, to, px, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor);
                         let last = ring.last().map(|(t, _)| t);
                         drop(ring);
                         for (si, seg) in segs.iter().enumerate() {
