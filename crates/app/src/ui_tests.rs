@@ -1565,6 +1565,162 @@ fn a_settings_file_that_puts_two_units_in_one_lane_gets_two_charts() {
     assert_eq!(lanes, vec![(3, "V".to_string()), (3, "deg".to_string())]);
 }
 
+/// One look of a minimised window, as eframe takes it: `logic` alone, no frame drawn.
+/// What it asked of the window (a new title, say) comes back.
+fn look_minimised(h: &mut Harness<'static, SpyApp>) -> Vec<egui::ViewportCommand> {
+    let ctx = h.ctx.clone();
+    let mut frame = eframe::Frame::_new_kittest();
+    let out = ctx.run_logic(&egui::RawInput::default(), |ctx| eframe::App::logic(h.state_mut(), ctx, &mut frame));
+    out.viewport_commands.into_values().flatten().collect()
+}
+
+/// Minimised: a look every 100 ms (eframe's pace for a hidden window) until `f` holds
+/// or `ms` pass. The titles set on the way are added to `titles`.
+fn minimised_until(h: &mut Harness<'static, SpyApp>, ms: u64, titles: &mut Vec<String>, mut f: impl FnMut(&SpyApp) -> bool) -> bool {
+    let end = Instant::now() + Duration::from_millis(ms);
+    loop {
+        for c in look_minimised(h) {
+            if let egui::ViewportCommand::Title(t) = c {
+                titles.push(t);
+            }
+        }
+        if f(h.state()) {
+            return true;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The phone view's snapshot: how old it is, and what it says.
+fn phone_snapshot(a: &SpyApp) -> (Duration, serde_json::Value) {
+    let g = a.phone_snapshot.lock().unwrap();
+    (g.built.map_or(Duration::MAX, |b| b.elapsed()), serde_json::from_str(&g.body).unwrap_or_default())
+}
+
+#[test]
+fn a_minimised_window_keeps_the_phone_the_turn_and_the_title_current() {
+    // Minimised, eframe draws no frame: it runs the upkeep alone (`logic`). Measured
+    // on the VC with the upkeep in `ui`: the phone read NOT CURRENT a second after
+    // minimising, for as long as the window stayed so, and the taskbar title, there
+    // to say whether it is live and recording, stopped following the session.
+    let turning = || {
+        let mut b = Behaviour::default();
+        b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+        b
+    };
+    let mut old = FakeController::start(turning()).unwrap();
+    let ports = std::sync::Arc::new(std::sync::Mutex::new(vec![old.port()]));
+    let found = ports.clone();
+    let finder = VcFinder::new(move |timeout| {
+        found.lock().unwrap().iter().filter_map(|&p| spy_core::discovery::hello(std::net::SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect()
+    });
+    let mut h = harness_with(temp_dir("minimised"), Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
+    h.state_mut().settings.phone_port = 0;
+    connect(&mut h, &old);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5138, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    card_menu(&mut h, 0, "Turn to a target...");
+    h.state_mut().derived[0].target_text = "57.3".into();
+    let _ = h.run_ok();
+    h.get_by_label("Set").click();
+    h.get_by_label("Phone view").click();
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 3000, |a| a.phone.is_some() && a.recorder.is_some()));
+    let turn = |a: &SpyApp| {
+        let (age, json) = phone_snapshot(a);
+        let row = json["channels"].as_array().and_then(|c| c.iter().find(|c| c["name"] == "Turn to target  5138 ROB_1 J1").cloned()).unwrap_or_default();
+        (age, json["controller"].as_str().unwrap_or_default().to_string(), row)
+    };
+
+    // Minimised from here on: not one frame drawn.
+    let mut titles = Vec::new();
+    let counted = h.state().chans[0].stats.n;
+    minimised_until(&mut h, 1500, &mut titles, |_| false);
+    let (age, _, row) = turn(h.state());
+    assert!(age < Duration::from_millis(500), "the phone's snapshot is {age:?} old: the phone says NOT CURRENT");
+    assert!(row["value"] == "ON TARGET" && row["stale"] == false, "{row}");
+    assert!(h.state().chans[0].stats.n > counted + 100, "the statistics since reset stopped counting");
+
+    // The virtual controller restarts, on another port, while nobody looks.
+    old.stop();
+    ports.lock().unwrap().clear();
+    assert!(minimised_until(&mut h, 3000, &mut titles, |a| phase(a) != Phase::Streaming));
+    let new = FakeController::start(turning()).unwrap();
+    ports.lock().unwrap().push(new.port());
+    let there = format!("127.0.0.1:{}", new.port());
+    assert!(
+        minimised_until(&mut h, 8000, &mut titles, |a| {
+            let (age, controller, row) = turn(a);
+            a.port_input == new.port().to_string() && age < Duration::from_millis(500) && controller == there && row["value"] == "ON TARGET" && row["stale"] == false
+        }),
+        "the address {}, the phone {:?}",
+        h.state().port_input,
+        turn(h.state())
+    );
+    assert!(titles.iter().any(|t| t.contains("RECONNECTING")), "{titles:?}");
+    assert_eq!(titles.last().map(String::as_str), Some(format!("ABB Signal Spy · STREAMING {there} · REC").as_str()), "the taskbar's title");
+    // Saved meanwhile: a PC shut down with the window minimised starts on the new port.
+    let path = h.state().settings_path.clone();
+    let saved = |_: &SpyApp| std::fs::read_to_string(&path).is_ok_and(|s| s.contains(&format!("\"port\": {}", new.port())));
+    assert!(minimised_until(&mut h, 4000, &mut titles, saved), "the settings were not saved while minimised");
+    h.state_mut().phone = None;
+}
+
+#[test]
+fn a_recording_that_closes_while_minimised_is_said_when_the_window_is_shown() {
+    let (fake, rws, mut h, dir) = with_rws(Behaviour::default(), "minimised-rec");
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+
+    // Minimised through a long run: the controller's events are filed as they come.
+    let mut titles = Vec::new();
+    rws.push_event(10010, 1, "Motors OFF state");
+    let rec = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    let filed = |_: &SpyApp| spy_core::recording::read_meta(&rec).is_ok_and(|m| m.events.iter().any(|e| e.text.starts_with("10010 ")));
+    assert!(minimised_until(&mut h, 5000, &mut titles, filed), "a controller event was not recorded while minimised");
+
+    // And the cable moves to the next robot (every IRC5's service port is
+    // 192.168.125.1): the automatic reconnect reaches it.
+    fake.with(|b| b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
+    fake.drop_connections();
+    assert!(minimised_until(&mut h, 8000, &mut titles, |a| a.recorder.is_none() && matches!(phase(a), Phase::Stopped { .. })), "{:?}", phase(h.state()));
+    let title = titles.last().cloned().unwrap_or_default();
+    assert!(title.contains("STOPPED") && !title.contains("REC"), "the taskbar still says it records: {titles:?}");
+    assert!(h.state().rws.is_none() && h.state().rws_form.password.is_empty(), "RWS and its password outlived the session");
+
+    // Longer than a toast stays up, then shown: what was said meanwhile is there (as
+    // a toast; the log pane has it too, after the time).
+    minimised_until(&mut h, 6500, &mut titles, |_| false);
+    let _ = h.run_ok();
+    let said = h.state().log.since(0).into_iter().find(|e| e.text.starts_with("Recording closed")).expect("not said at all").text;
+    assert!(h.query_by_label(&said).is_some(), "said while minimised, and gone unseen");
+
+    // Nothing else asks for a look now: the upkeep asks for its own, or it stops.
+    look_minimised(&mut h);
+    look_minimised(&mut h);
+    assert!(h.ctx.has_requested_repaint(), "a minimised window's upkeep stops for good when nothing else wakes it");
+}
+
+#[test]
+fn toasts_left_unseen_are_kept_to_the_newest_few() {
+    let mut h = harness(temp_dir("toasts"), AskPolicy::Remote);
+    for i in 0..30 {
+        h.state_mut().toast(spy_core::log::Level::Info, format!("said {i}"));
+    }
+    let _ = h.run_ok();
+    assert!(h.query_by_label("said 29").is_some() && h.query_by_label("said 22").is_some());
+    assert!(h.query_by_label("said 21").is_none(), "{} toasts on screen", h.state().toasts.len());
+    assert!(h.state().log.since(0).iter().any(|e| e.text == "said 0"), "the older ones are in the log");
+}
+
 #[test]
 fn channels_come_back_next_time() {
     let fake = FakeController::start(Behaviour::default()).unwrap();

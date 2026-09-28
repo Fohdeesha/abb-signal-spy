@@ -21,8 +21,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 /// Ports tried after the one asked for, when it is taken by another program.
 const PORT_TRIES: u16 = 10;
-/// A snapshot older than this is not current: the window builds one every 250 ms, and
-/// one that stopped (minimised, busy) must not go on showing its values as live.
+/// A snapshot older than this is not current: the window builds one every 250 ms,
+/// minimised too, and one that stopped (the window busy or hung) must not go on
+/// showing its values as live.
 const FROZEN_MS: u64 = 1000;
 
 /// A snapshot the window stopped updating: every value in it NOT CURRENT, and a turn
@@ -399,7 +400,7 @@ mod tests {
         };
         let fresh = fetch(0);
         assert_eq!(fresh["data"]["channels"][0]["value"], "ON TARGET", "a fresh snapshot as the window built it");
-        // The window stopped building it (minimised, busy): nothing in it is current.
+        // The window stopped building it (busy, hung): nothing in it is current.
         let old = fetch(1500);
         let ch = &old["data"]["channels"];
         assert_eq!(ch[0]["value"], "+0.100", "ON TARGET shown from a frozen snapshot");

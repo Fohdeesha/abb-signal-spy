@@ -164,17 +164,19 @@ impl SpyApp {
     /// A recorder that failed (disk full, folder gone), or closed itself (the
     /// controller behind the address changed), is reported and dropped.
     pub fn check_recorders(&mut self) {
+        let mut said = Vec::new();
         for slot in [&mut self.recorder, &mut self.slow] {
             let Some(r) = slot else { continue };
             let st = r.status();
-            let (text, level) = match st.state {
-                RecState::Failed(e) => (format!("Recording stopped: {e} ({})", st.dir.display()), Level::Error),
-                RecState::Ended(why) => (format!("Recording closed: {why} ({})", st.dir.display()), Level::Warn),
+            said.push(match st.state {
+                RecState::Failed(e) => (Level::Error, format!("Recording stopped: {e} ({})", st.dir.display())),
+                RecState::Ended(why) => (Level::Warn, format!("Recording closed: {why} ({})", st.dir.display())),
                 _ => continue,
-            };
+            });
             *slot = None;
-            self.toasts.push(crate::app::Toast { at: std::time::Instant::now(), text: text.clone(), level });
-            self.log.push(level, text);
+        }
+        for (level, text) in said {
+            self.toast(level, text);
         }
     }
 }

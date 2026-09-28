@@ -79,10 +79,16 @@ pub enum Discovery {
 }
 
 pub struct Toast {
-    pub at: Instant,
+    /// When it was first drawn: it stays six seconds from then, so one said while the
+    /// window was minimised is still there when the window is shown again.
+    pub shown: Option<Instant>,
     pub text: String,
     pub level: Level,
 }
+
+/// Toasts on screen at once; older ones are in the log pane. Unseen, they pile up
+/// while the window is minimised (a virtual controller restarting again and again).
+const MAX_TOASTS: usize = 8;
 
 /// What the add-channel dialog is adding.
 pub struct AddDialog {
@@ -389,7 +395,9 @@ impl SpyApp {
     pub fn toast(&mut self, level: Level, text: impl Into<String>) {
         let text = text.into();
         self.log.push(level, text.clone());
-        self.toasts.push(Toast { at: Instant::now(), text, level });
+        self.toasts.push(Toast { shown: None, text, level });
+        let excess = self.toasts.len().saturating_sub(MAX_TOASTS);
+        self.toasts.drain(..excess);
     }
 
     pub fn mark_settings_dirty(&mut self) {
@@ -1069,7 +1077,8 @@ impl SpyApp {
     }
 
     fn toasts(&mut self, ctx: &egui::Context) {
-        self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(6));
+        let now = Instant::now();
+        self.toasts.retain_mut(|t| now.duration_since(*t.shown.get_or_insert(now)) < Duration::from_secs(6));
         if self.toasts.is_empty() {
             return;
         }
@@ -1235,18 +1244,34 @@ pub fn short_id(id: &str) -> String {
 }
 
 impl eframe::App for SpyApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// The upkeep, which must not stop when the drawing does. eframe calls this before
+    /// every frame and, while the window is minimised, on its own whenever a repaint
+    /// was asked for, with no frame drawn: the phone view, the taskbar title, the
+    /// derived channels and the recorders' checks go on meanwhile (measured: with all
+    /// of it in `ui`, the phone read NOT CURRENT a second after minimising).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
         self.poll_review();
         self.poll_export();
         self.poll_rws();
         self.follow_moved_controller();
+        self.update_stats();
+        self.update_derived();
+        self.check_recorders();
+        self.publish_phone();
+        self.update_title(ctx);
+        if self.settings_dirty.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
+            self.save_settings();
+        }
+        // The next look, drawn or not: the phone's snapshot is built every 250 ms.
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.take_dropped(&ctx);
         self.take_screenshot(&ctx);
         self.shortcuts(&ctx);
-        self.update_stats();
-        self.update_derived();
 
         egui::Panel::top("top").show(ui, |ui| {
             self.menu(ui);
@@ -1278,18 +1303,10 @@ impl eframe::App for SpyApp {
         self.reset_dialog(&ctx);
         self.info_windows(&ctx);
         self.toasts(&ctx);
-        self.publish_phone();
-        self.check_recorders();
-        self.update_title(&ctx);
 
-        if self.settings_dirty.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
-            self.save_settings();
-        }
-        // Live charts move with the controller clock; nothing else needs a timer.
+        // Live charts move with the controller clock (the upkeep asks for its own look).
         if self.session.status().phase == Phase::Streaming && self.paused_at.is_none() {
             ctx.request_repaint_after(Duration::from_millis(33));
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
 
