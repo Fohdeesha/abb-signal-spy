@@ -27,7 +27,8 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    program that connected meanwhile (it asks, or stops and says why). If the controller at the address
    turns out to be a different one (a cable moved to the next robot), it stops rather than carry on.
 3. **Add channels.** Pick a signal in the catalogue and press Add. The dialog asks only what that signal
-   needs: the robot, the axis, or nothing. Up to 12 channels.
+   needs: the robot, the axis, or nothing. Up to 12 channels. *Channel sets...* adds a common group in
+   one go: the DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block.
 4. **Read and chart.** Values show as a 150 ms mean (for a joint speed that pads between its values
    with zeros, the mean of the values it reports; for an angle within one turn, the mean on the circle);
    charts show every sample. Space pauses the charts so you can scroll back through the last 10 minutes.

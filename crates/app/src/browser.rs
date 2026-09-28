@@ -93,6 +93,9 @@ impl SpyApp {
             ui.label(RichText::new("Signals").strong());
             ui.label(RichText::new(&self.catalogue.title).small().weak()).on_hover_text(format!("{}\n{}", self.catalogue.measured_on, self.catalogue.caveat));
         });
+        if ui.button("Channel sets...").on_hover_text("Both DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block, in one go").clicked() {
+            self.open_sets();
+        }
         ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search: number, name or unit").desired_width(f32::INFINITY));
         ui.horizontal_wrapped(|ui| {
             if ui.toggle_value(&mut self.settings.show_open, "open").on_hover_text("Also show signals that respond but are not yet identified").changed() {

@@ -528,6 +528,71 @@ fn a_reviewed_stretch_saves_as_csv() {
 }
 
 #[test]
+fn a_channel_set_adds_or_replaces_in_one_go() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut h = harness(temp_dir("sets"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let ids = |a: &SpyApp| a.chans.iter().map(|c| c.key.id()).collect::<Vec<_>>();
+
+    // The first set, the DC links, on both robots, in one chart.
+    h.get_by_label("Channel sets...").click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label_contains("no physical measurements").is_some(), "a virtual controller has no DC link, and the dialog says so");
+    h.get_by_label("Add").click();
+    let _ = h.run_ok();
+    assert!(h.state().sets.is_none(), "the dialog closes");
+    assert_eq!(ids(h.state()), ["5027/ROB_1/J1", "5027/ROB_2/J1"]);
+    assert_eq!(h.state().lanes(&[true; 2]).len(), 1);
+
+    // One robot's torques: the second robot's.
+    h.get_by_label("Channel sets...").click();
+    let _ = h.run_ok();
+    h.get_by_label("Torques").click();
+    let _ = h.run_ok();
+    h.state_mut().sets.as_mut().unwrap().unit = "ROB_2".into();
+    let _ = h.run_ok();
+    h.get_by_label("Add").click();
+    let _ = h.run_ok();
+    assert_eq!(ids(h.state())[2..], ["4002/ROB_2/J1", "4002/ROB_2/J2", "4002/ROB_2/J3", "4002/ROB_2/J4", "4002/ROB_2/J5", "4002/ROB_2/J6"]);
+    assert_eq!(h.state().lanes(&[true; 8]).len(), 2);
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().filter(|c| c.key.signal == 4002).all(|c| c.samples > 20)));
+    assert!(h.query_by_label("203.000").is_some(), "ROB_2 J3's torque (the fake's 203) is read");
+
+    // Six resolver angles do not fit in the four free: Add does nothing, Replace does.
+    h.get_by_label("Channel sets...").click();
+    let _ = h.run_ok();
+    h.get_by_label("Resolver angles").click();
+    let _ = h.run_ok();
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Add")).is_disabled(), "greyed out, its hover saying why");
+    h.get_by_label("Add").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans.len(), 8, "a set that does not fit is not half added");
+    assert!(h.state().sets.is_some());
+    h.get_by_label("Replace all 8 channels").click();
+    let _ = h.run_ok();
+    assert_eq!(ids(h.state()), (1..=6).map(|a| format!("5138/ROB_1/J{a}")).collect::<Vec<_>>());
+    assert_eq!(h.state().lanes(&[true; 6]).len(), 6, "a chart each");
+    assert!(wait(&mut h, 5000, |a| { let s = a.session.status(); s.channels.len() == 6 && s.channels.iter().all(|c| c.key.signal == 5138) }), "the session follows");
+
+    // Already there: nothing to add.
+    h.get_by_label("Channel sets...").click();
+    let _ = h.run_ok();
+    h.get_by_label("Resolver angles").click();
+    let _ = h.run_ok();
+    h.get_by_label("Add").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans.len(), 6);
+    h.get_by_label("Cancel").click();
+    let _ = h.run_ok();
+    assert!(h.state().sets.is_none());
+
+    // A replacement refused leaves the channels as they were.
+    assert!(!h.state_mut().replace_channels(Vec::new(), false));
+    assert_eq!(h.state().chans.len(), 6);
+}
+
+#[test]
 fn the_browser_shows_named_signals_and_finds_any_number() {
     let mut h = harness(temp_dir("browse"), AskPolicy::Remote);
     let get = |h: &Harness<'static, SpyApp>, n: u32| h.state().catalogue.get(n).unwrap().clone();

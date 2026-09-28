@@ -118,6 +118,7 @@ pub struct SpyApp {
     pub min_confidence: Option<spy_core::catalogue::Confidence>,
     pub only_favourites: bool,
     pub add: Option<AddDialog>,
+    pub sets: Option<crate::sets::SetDialog>,
 
     pub window_s: f64,
     pub paused_at: Option<i64>,
@@ -255,6 +256,7 @@ impl SpyApp {
             min_confidence: None,
             only_favourites: false,
             add: None,
+            sets: None,
             window_s,
             paused_at: None,
             pause_fresh: false,
@@ -856,7 +858,7 @@ impl SpyApp {
             ui.label(RichText::new("2. Only one program at a time").strong());
             ui.label("A controller streams test signals to one program at a time. Close TuneMaster's signal logging or RobotStudio's signal tools first. If other programs are connected, this program lists them and asks before taking over.");
             ui.label(RichText::new("3. Add channels").strong());
-            ui.label("Pick a signal in the catalogue on the left, then Add. The dialog asks only what that signal needs: the robot, the axis, or nothing. Up to 12 channels.");
+            ui.label("Pick a signal in the catalogue on the left, then Add. The dialog asks only what that signal needs: the robot, the axis, or nothing. 'Channel sets...' adds a common group in one go (both DC links, one robot's torques). Up to 12 channels.");
             ui.label(RichText::new("4. Read and chart").strong());
             ui.label("Values show on the right (a 150 ms average); charts are raw. Space pauses the charts so you can scroll back through the last 10 minutes. A reading that stops updating is dimmed and marked STALE, never shown as live.");
             ui.label(RichText::new("5. Record").strong());
@@ -1130,6 +1132,7 @@ impl eframe::App for SpyApp {
 
         self.recordings_window(&ctx);
         self.add_dialog(&ctx);
+        self.sets_dialog(&ctx);
         self.approval_dialog(&ctx);
         self.reset_dialog(&ctx);
         self.info_windows(&ctx);

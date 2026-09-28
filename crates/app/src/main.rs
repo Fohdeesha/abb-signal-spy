@@ -15,6 +15,7 @@ mod paths;
 mod phone;
 mod record;
 mod review_view;
+mod sets;
 mod settings;
 mod theme;
 mod view;
