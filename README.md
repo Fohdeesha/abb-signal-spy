@@ -43,7 +43,12 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    shown as more live than its inputs.
 7. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
    marked REVIEWING. *Save CSV* and *Save PNG* above the charts save what is in view, live or reviewed.
-8. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
+8. **Controller details** (Controller menu, optional): with the controller's RWS login, typed each
+   time and never stored, the window names the robot system and its RobotWare version, puts the
+   controller's event log on the charts and into recordings (a look every 5 s, which a setting turns
+   off), and a turn to target can take its target from the motor's commutator offset. Read-only, and
+   checked to be the same controller as the one streaming.
+9. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
    on the same network.
 
 The built-in catalogue was measured on an IRB 2600 with RobotWare 6.16. Another robot or RobotWare
@@ -86,8 +91,9 @@ wide = df.pivot_table(index="controller_ms", columns="channel", values="value")
 
 `signal-spy-probe` is the command-line side: `list` finds local virtual controllers, `hello` shows a
 controller's connected clients, `stream` records statistics for a set of signals, `typed` reports the
-record type of a list of numbers, `selftest` runs against a built-in stand-in. It tears its streams
-down on Ctrl+C.
+record type of a list of numbers, `selftest` runs against a built-in stand-in, `rws` reads what the
+window's controller details read (the password from `SPY_RWS_PASSWORD`). It tears its streams down
+on Ctrl+C.
 
 ## Building
 

@@ -57,6 +57,9 @@ pub struct Settings {
     pub units: Vec<String>,
     pub ui_scale: f32,
     pub derived: Vec<SavedDerived>,
+    /// RWS's port (no login is ever kept, G16), and whether its event log is looked at.
+    pub rws_port: u16,
+    pub rws_events: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +83,8 @@ impl Default for Settings {
             units: vec!["ROB_1".into(), "ROB_2".into()],
             ui_scale: 1.0,
             derived: Vec::new(),
+            rws_port: spy_core::rws::DEFAULT_PORT,
+            rws_events: true,
         }
     }
 }
@@ -130,6 +135,8 @@ impl Settings {
             units: field(&obj, "units", d.units, &mut notes),
             ui_scale: field(&obj, "ui_scale", d.ui_scale, &mut notes),
             derived: derived(&obj, &mut notes),
+            rws_port: field(&obj, "rws_port", d.rws_port, &mut notes),
+            rws_events: field(&obj, "rws_events", d.rws_events, &mut notes),
         };
         s.sanitize(&mut notes);
         let note = (!notes.is_empty()).then(|| format!("Parts of the settings file ({}) could not be used and were left out (the rest loaded): {}.", path.display(), notes.join("; ")));
@@ -149,6 +156,9 @@ impl Settings {
         }
         if self.phone_port < 1024 {
             self.phone_port = 8090;
+        }
+        if self.rws_port == 0 {
+            self.rws_port = spy_core::rws::DEFAULT_PORT;
         }
         if !(self.ui_scale.is_finite() && (0.6..=2.5).contains(&self.ui_scale)) {
             self.ui_scale = 1.0;
@@ -360,6 +370,8 @@ mod tests {
             units: vec!["ROB_1".into(), "STN_1".into()],
             ui_scale: 1.2,
             derived: vec![SavedDerived { def: spy_core::derived::Derived::Turn { angle: key(5138, "ROB_2", 3), target_deg: Some(90.0) }, lane: 5 }],
+            rws_port: 8080,
+            rws_events: false,
         };
         assert_ne!(s, Settings::default());
         let dir = std::env::temp_dir().join(format!("spy-settings-all-{}", std::process::id()));

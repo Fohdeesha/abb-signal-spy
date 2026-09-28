@@ -314,6 +314,7 @@ enum Cmd {
     Marker { label: String, controller_ms: Option<i64>, wall: SystemTime },
     Info(ChannelKey, ChannelInfo),
     Derived { defs: Vec<crate::derived::Derived>, change: Option<String>, wall: SystemTime },
+    Event { kind: String, text: String, wall: SystemTime },
     Stop,
 }
 
@@ -406,6 +407,12 @@ impl Recorder {
     /// The derived channels now shown, and what changed (kept as an event).
     pub fn derived(&self, defs: Vec<crate::derived::Derived>, change: Option<String>) {
         let _ = self.tx.send(Cmd::Derived { defs, change, wall: SystemTime::now() });
+    }
+
+    /// Something that happened at `wall` (an entry of the controller's event log), kept
+    /// among the recording's events.
+    pub fn event(&self, kind: &str, text: &str, wall: SystemTime) {
+        let _ = self.tx.send(Cmd::Event { kind: kind.to_string(), text: text.to_string(), wall });
     }
 
     pub fn status(&self) -> RecStatus {
@@ -519,6 +526,10 @@ impl Writer {
                             let kind = if setting { "derived-setting" } else { "derived" };
                             self.meta.events.push(EventEntry { utc: wall_iso(wall), kind: kind.into(), text, controller_ms: last_ctrl });
                         }
+                        self.save_meta();
+                    }
+                    Ok(Cmd::Event { kind, text, wall }) => {
+                        self.meta.events.push(EventEntry { utc: wall_iso(wall), kind, text, controller_ms: None });
                         self.save_meta();
                     }
                     Err(mpsc::TryRecvError::Empty) => {}

@@ -782,6 +782,161 @@ fn derived_channels_come_back_without_their_plateau() {
     assert_eq!(h.state().derived[0].target_text, "90.0000");
 }
 
+/// A fake controller and its RWS, one system, the app logged in to both.
+fn with_rws(b: Behaviour, tag: &str) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>, PathBuf) {
+    let id = b.system_id.clone();
+    let fake = FakeController::start(b).unwrap();
+    let rws = spy_core::fake_rws::FakeRws::start(spy_core::fake_rws::RwsBehaviour { system_id: id, ..Default::default() }).unwrap();
+    let dir = temp_dir(tag);
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    h.state_mut().settings.rws_port = rws.port();
+    h.state_mut().rws_poll = Duration::from_millis(150);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    (fake, rws, h, dir)
+}
+
+fn log_in(h: &mut Harness<'static, SpyApp>, password: &str) {
+    h.state_mut().show_rws = true;
+    let _ = h.run_ok();
+    h.state_mut().rws_form.password = password.into();
+    h.get_by_label("Log in").click();
+    let _ = h.run_ok();
+}
+
+#[test]
+fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+    let (_fake, rws, mut h, dir) = with_rws(b, "rws");
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    // An event from before the recording, which the first look after logging in reads.
+    rws.push_event(10000, 1, "Before the recording");
+    std::thread::sleep(Duration::from_millis(1100));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready() && a.controller_events.iter().any(|e| e.code == 10000)), "not logged in");
+    assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some(), "the session line names the controller");
+    assert!(h.query_by_label_contains("-4 h 00 min from UTC").is_some(), "its clock, from UTC");
+
+    // Recorded, and on the charts at the time it happened.
+    std::thread::sleep(Duration::from_millis(1100));
+    rws.push_event(10010, 1, "Motors OFF state");
+    rws.push_event(20205, 3, "Auto stop open");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 20205)), "the events did not arrive");
+    let newest = h.state().session.store().newest().unwrap();
+    let tl = h.state().session.status().timeline.clone();
+    let on = h.state().events_on_timeline(&tl);
+    let (t, e) = on.iter().find(|(_, e)| e.code == 10010).unwrap();
+    assert!((newest - t).abs() < 2500, "placed {} ms from now", newest - t);
+    assert_eq!(e.color(), crate::theme::IDLE);
+    assert!(on.iter().any(|(_, e)| e.code == 20205 && e.color() == crate::theme::BAD));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    let meta = spy_core::recording::read_meta(&folder).unwrap();
+    let kept: Vec<&str> = meta.events.iter().filter(|e| e.kind == "controller-event").map(|e| e.text.as_str()).collect();
+    assert_eq!(kept, ["10010 Motors OFF state (information)", "20205 Auto stop open (error)"], "only what happened while recording");
+
+    // Switched off: no more looks.
+    h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
+    let _ = h.run_ok();
+    assert!(!h.state().settings.rws_events);
+    let asked = rws.requests().len();
+    rws.push_event(10011, 1, "Motors ON state");
+    std::thread::sleep(Duration::from_millis(600));
+    let _ = h.run_ok();
+    assert!(!h.state().controller_events.iter().any(|e| e.code == 10011));
+    assert_eq!(rws.requests().len(), asked, "nothing asked while off");
+
+    // A turn's target from the motor's commutator offset.
+    add_via_dialog(&mut h, 5138, "Add");
+    let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
+    let _ = h.run_ok();
+    h.get_by_label("Commutator offset").click();
+    assert!(wait(&mut h, 3000, |a| a.derived[0].live.def().is_set()));
+    let spy_core::derived::Derived::Turn { target_deg: Some(t), .. } = h.state().derived[0].live.def().clone() else { panic!() };
+    assert!((t - 1.5707999f64.to_degrees()).abs() < 1e-3, "{t}");
+    assert!(rws.requests().iter().any(|(_, p)| p.starts_with("/rw/cfg/MOC/MOTOR_CALIB/instances/rob1_1")), "ROB_1 J1's motor");
+
+    assert!(rws.requests().iter().all(|(m, _)| m == "GET"), "read-only: {:?}", rws.requests());
+    assert_eq!(rws.logins(), 1);
+    h.state_mut().save_settings();
+    let saved = std::fs::read_to_string(&h.state().settings_path).unwrap();
+    assert!(!saved.contains("robotics") && !saved.contains("Default User"), "the login reached the settings file");
+    assert!(saved.contains(&format!("\"rws_port\": {}", rws.port())));
+    h.get_by_label("Log out").click();
+    let _ = h.run_ok();
+    assert!(h.state().rws.is_none());
+    assert!(h.state().rws_form.password.is_empty(), "the password is not kept past the session");
+}
+
+#[test]
+fn rws_is_refused_for_another_controller_or_a_wrong_login_and_ends_with_the_connection() {
+    let (fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-refused");
+    log_in(&mut h, "wrong");
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()));
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("refused the login")), "said why");
+
+    rws.with(|b| b.system_id = "{11111111-2222-3333-4444-555555555555}".into());
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()));
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("different controller")), "a second VC's RWS on another port");
+
+    rws.with(|b| b.system_id = fake.with(|f| f.system_id.clone()));
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.get_by_label("Disconnect").click();
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "RWS outlived the connection");
+}
+
+#[test]
+fn rws_stops_when_another_controller_answers_after_a_new_login() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-other");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    // A laptop's cable moved to another IRC5 (every one's service port is 192.168.125.1)
+    // before InfoStream's reconnect has seen it; the same default login works there.
+    rws.replace_controller("{22222222-2222-4222-8222-222222222222}");
+    rws.push_event(20205, 3, "the other controller's");
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "RWS carried on with another controller");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("different controller") && t.text.contains("{22222222")), "said why");
+    assert!(!h.state().controller_events.iter().any(|e| e.code == 20205), "the other controller's event was shown");
+}
+
+#[test]
+fn a_commutator_offset_from_another_controller_is_not_taken_and_rws_stops() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+    let (_fake, rws, mut h, _dir) = with_rws(b, "rws-other-calib");
+    add_via_dialog(&mut h, 5138, "Add");
+    let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    // The event log off: the commutator offset is the only thing read.
+    h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
+    let _ = h.run_ok();
+    rws.replace_controller("{22222222-2222-4222-8222-222222222222}");
+    h.get_by_label("Commutator offset").click();
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "RWS carried on with another controller");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("different controller")), "said why");
+    assert!(!h.state().derived[0].live.def().is_set(), "another controller's offset taken as the target");
+}
+
+#[test]
+fn rws_stops_and_says_so_after_an_internal_error() {
+    let (_fake, _rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-crash");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.state().crash_rws_for_test();
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "a dead RWS thread still shown logged in");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("internal error")), "said why");
+}
+
 #[test]
 fn the_browser_shows_named_signals_and_finds_any_number() {
     let mut h = harness(temp_dir("browse"), AskPolicy::Remote);

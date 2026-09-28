@@ -39,6 +39,11 @@ usage:
         streams. Loopback only unless --allow-remote.
   signal-spy-probe selftest
         run 'stream' against the built-in fake controller; touches no real controller
+  signal-spy-probe rws HOST[:PORT] [USER]
+        read-only RWS 1.0 (port 80 by default): the system, the identity, the clock
+        against this PC's, the newest events, and ROB_1's motor calibration; then
+        looks at the event log again after 5 s. GETs only. The password is read
+        from SPY_RWS_PASSWORD; USER defaults to RobotWare's default user
 
 PORT defaults to 5515 (an IRC5). A virtual controller uses its own port; see 'list'.
 --take answers yes to taking InfoStream when other RobAPI clients are connected;
@@ -236,6 +241,45 @@ fn cmd_list() -> ExitCode {
                 }
             }
             ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Read-only RWS: what the window's RWS extras would read.
+fn cmd_rws(host: &str, port: u16, user: &str, password: &str) -> ExitCode {
+    use spy_core::rws::{calib_instance, Client, EventPoll};
+    let run = || -> Result<(), spy_core::rws::RwsError> {
+        let mut c = Client::new(host, port, user, password);
+        let s = c.system()?;
+        println!("system    : {} RobotWare {} id {}", s.name, s.rw_version, s.system_id);
+        let i = c.identity()?;
+        println!("identity  : {} ({})", i.name, i.kind);
+        let pc = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let clock = c.clock()?;
+        println!("clock     : controller minus PC (UTC) = {} s", clock - pc);
+        let mut poll = EventPoll::default();
+        let first = poll.look(&mut c)?;
+        println!("events    : newest {} (first look)", first.events.len());
+        for e in first.events.iter().rev().take(5) {
+            println!("  {} {} {:>5} {}", e.id, e.severity_word(), e.code, e.title);
+        }
+        for axis in 1..=6 {
+            let inst = calib_instance("ROB_1", axis).unwrap_or_default();
+            match c.motor_calib(&inst) {
+                Ok(m) => println!("calib     : {inst} com_offset {} ({}) cal_offset {} ({})", m.com_offset, if m.com_valid { "valid" } else { "NOT valid" }, m.cal_offset, if m.cal_valid { "valid" } else { "NOT valid" }),
+                Err(e) => println!("calib     : {inst}: {e}"),
+            }
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        let again = poll.look(&mut c)?;
+        println!("events    : {} new after 5 s{}", again.events.len(), if again.skipped { " (more than one look reads)" } else { "" });
+        Ok(())
+    };
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{host}:{port}: {e}");
+            ExitCode::from(1)
         }
     }
 }
@@ -610,6 +654,16 @@ fn main() -> ExitCode {
         }
         "tenancy" => Ok(cmd_tenancy(need_target()?, &a, unit.clone())),
         "selftest" => Ok(cmd_selftest()),
+        "rws" => {
+            let spec = a.rest.first().ok_or("a controller address is needed")?;
+            let (host, port) = match spec.rsplit_once(':') {
+                Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|_| format!("bad port in {spec}"))?),
+                None => (spec.clone(), spy_core::rws::DEFAULT_PORT),
+            };
+            let user = a.rest.get(1).cloned().unwrap_or_else(|| spy_core::rws::DEFAULT_USER.to_string());
+            let password = std::env::var("SPY_RWS_PASSWORD").map_err(|_| "set SPY_RWS_PASSWORD to the RWS password")?;
+            Ok(cmd_rws(&host, port, &user, &password))
+        }
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)

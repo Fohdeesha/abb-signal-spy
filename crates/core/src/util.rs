@@ -50,7 +50,7 @@ pub fn parse_iso(s: &str) -> Option<SystemTime> {
     if secs >= 0 { UNIX_EPOCH.checked_add(d) } else { UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(secs.unsigned_abs()))?.checked_add(std::time::Duration::new(0, nanos)) }
 }
 
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
@@ -111,7 +111,7 @@ pub fn local_stamp(t: SystemTime) -> String {
     }
 }
 
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

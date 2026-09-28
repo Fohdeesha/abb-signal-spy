@@ -244,6 +244,8 @@ impl SpyApp {
                 };
 
                 let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
+                // The controller's own events (RWS), to the second.
+                let events: Vec<(f64, egui::Color32, String)> = self.events_on_timeline(&tl).into_iter().map(|(t, e)| (tl.seconds(t), e.color(), format!("controller: {}", e.text()))).collect();
                 let (ca, cb) = (self.cursor_a, self.cursor_b);
                 let pause_fresh = self.pause_fresh;
                 let cursors_on = self.cursors_on;
@@ -308,6 +310,11 @@ impl SpyApp {
                     for (x, label) in &markers {
                         if *x >= vx0 && *x <= vx1 {
                             pu.vline(VLine::new(format!("marker {label}"), *x).color(theme::WARN).width(1.0));
+                        }
+                    }
+                    for (x, color, label) in &events {
+                        if *x >= vx0 && *x <= vx1 {
+                            pu.vline(VLine::new(label.clone(), *x).color(*color).width(1.0).style(egui_plot::LineStyle::dashed_loose()));
                         }
                     }
                     if cursors_on {

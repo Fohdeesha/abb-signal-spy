@@ -51,6 +51,7 @@ impl SpyApp {
                 d.stats = Stats::default();
             }
             self.markers.clear();
+            self.controller_events.clear();
             self.cursor_a = None;
             self.cursor_b = None;
             self.paused_at = None;

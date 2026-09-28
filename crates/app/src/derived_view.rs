@@ -289,6 +289,8 @@ impl SpyApp {
         let mut remove = None;
         let mut set_target = None;
         let mut set_plateau = None;
+        let mut from_controller = None;
+        let rws = self.rws_ready();
         let mut changed = false;
         for i in 0..self.derived.len() {
             let h = self.derived_health(i, st);
@@ -370,6 +372,18 @@ impl SpyApp {
                                 ui.label(RichText::new(format!("{} deg", view::fmt(*t))).small().monospace());
                             }
                         });
+                        if let Derived::Turn { angle, .. } = &def {
+                            let named = spy_core::rws::calib_instance(angle.unit.as_str(), angle.axis.one_based()).is_some();
+                            let why = if !rws { "Log in to the controller's RWS first (Controller menu)." } else { "Only a robot's axes (ROB_1, ROB_2, ...) have their calibration named this way." };
+                            if ui
+                                .add_enabled(rws && named, egui::Button::new("Commutator offset").small())
+                                .on_hover_text("Read this motor's Commutator Offset (MOTOR_CALIB com_offset) from the controller as the target: what the resolver reads at the commutation position.")
+                                .on_disabled_hover_text(why)
+                                .clicked()
+                            {
+                                from_controller = Some(i);
+                            }
+                        }
                     }
                     Derived::DutySum { .. } => {
                         ui.label(RichText::new(format!("{:.2} expected   min {}  max {}", derived::DUTY_SUM, f(s.min), f(s.max))).small().monospace());
@@ -398,6 +412,9 @@ impl SpyApp {
         }
         if let Some(i) = set_plateau {
             self.set_plateau(i);
+        }
+        if let Some(i) = from_controller {
+            self.request_com_offset(i);
         }
         if let Some(i) = remove {
             let d = self.derived.remove(i);

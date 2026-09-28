@@ -14,6 +14,7 @@ pub mod recording;
 pub mod reply;
 pub mod request;
 pub mod review;
+pub mod rws;
 pub mod sample;
 pub mod session;
 pub mod store;
@@ -23,3 +24,5 @@ pub mod wire;
 
 #[cfg(feature = "fake")]
 pub mod fake;
+#[cfg(feature = "fake")]
+pub mod fake_rws;

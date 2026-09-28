@@ -122,6 +122,14 @@ pub struct SpyApp {
     /// Derived channels, computed from channels in `chans`.
     pub derived: Vec<crate::derived_view::DerivedView>,
 
+    /// The RWS extras: a logged-in session, the login being typed (never saved), how
+    /// often the event log is looked at, the window, and the events for the charts.
+    pub rws: Option<crate::rws_view::RwsLink>,
+    pub rws_form: crate::rws_view::RwsForm,
+    pub rws_poll: Duration,
+    pub show_rws: bool,
+    pub controller_events: Vec<crate::rws_view::ControllerEvent>,
+
     pub window_s: f64,
     pub paused_at: Option<i64>,
     /// Set when pausing: the next frame fixes the charts on the paused window, and
@@ -260,6 +268,11 @@ impl SpyApp {
             add: None,
             sets: None,
             derived: Vec::new(),
+            rws: None,
+            rws_form: crate::rws_view::RwsForm::default(),
+            rws_poll: crate::rws_view::POLL,
+            show_rws: false,
+            controller_events: Vec::new(),
             window_s,
             paused_at: None,
             pause_fresh: false,
@@ -522,6 +535,10 @@ impl SpyApp {
             });
             ui.menu_button("Controller", |ui| {
                 let connected = self.session.status().phase.is_connected();
+                if ui.button("Controller details (RWS)...").on_hover_text("Read-only: the controller's name and RobotWare version, its event log on the charts, a motor's commutator offset. Needs the controller's RWS login, which is not stored.").clicked() {
+                    self.show_rws = true;
+                    ui.close();
+                }
                 if ui.add_enabled(connected, egui::Button::new("Reset InfoStream...")).on_hover_text("Removes EVERY client's test-signal streams on the controller. Only for when a crashed program left streams behind.").clicked() {
                     self.confirm_reset = true;
                     ui.close();
@@ -780,6 +797,9 @@ impl SpyApp {
                     && let Some(id) = &a.system_id {
                         ui.label(RichText::new(short_id(id)).weak()).on_hover_text(format!("Controller system id {id}"));
                     }
+                if let Some(s) = self.rws.as_ref().and_then(|l| l.system.as_ref()) {
+                    ui.label(RichText::new(format!("{} · RobotWare {}", s.name, s.rw_version)).weak()).on_hover_text("From the controller's RWS (Controller menu)");
+                }
             }
             if !st.others.is_empty() {
                 ui.separator();
@@ -1155,6 +1175,7 @@ impl eframe::App for SpyApp {
         self.poll_background();
         self.poll_review();
         self.poll_export();
+        self.poll_rws();
         self.take_dropped(&ctx);
         self.take_screenshot(&ctx);
         self.shortcuts(&ctx);
@@ -1184,6 +1205,7 @@ impl eframe::App for SpyApp {
         self.charts_rect = Some(central.response.rect);
 
         self.recordings_window(&ctx);
+        self.rws_window(&ctx);
         self.add_dialog(&ctx);
         self.sets_dialog(&ctx);
         self.approval_dialog(&ctx);
