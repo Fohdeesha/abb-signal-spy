@@ -9,6 +9,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "egui_plot",
+ "png",
  "serde",
  "serde_json",
  "signal-spy-core",

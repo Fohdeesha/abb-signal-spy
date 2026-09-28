@@ -283,6 +283,8 @@ impl SpyApp {
             }
         });
         self.pause_fresh = false;
+        let origin = tl.origin().unwrap_or(0);
+        self.view_ms = Some((origin + (visible_x.0 * 1000.0).floor() as i64, origin + (visible_x.1 * 1000.0).ceil() as i64 + 1));
         if let Some(a) = clicked_a {
             self.cursor_a = Some(a);
         }
@@ -326,6 +328,13 @@ impl SpyApp {
             }
             if !self.markers.is_empty() && ui.small_button("clear markers").clicked() {
                 self.markers.clear();
+            }
+            ui.separator();
+            if ui.button("Save CSV").on_hover_text("Save every channel's samples in view to a CSV file in the recordings folder").clicked() {
+                self.export_live_csv();
+            }
+            if ui.button("Save PNG").on_hover_text("Save a picture of the charts to the recordings folder").clicked() {
+                self.request_png();
             }
         });
     }

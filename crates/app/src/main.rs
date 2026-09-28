@@ -9,6 +9,7 @@ mod app;
 mod browser;
 mod channels;
 mod charts;
+mod export;
 mod net;
 mod paths;
 mod phone;

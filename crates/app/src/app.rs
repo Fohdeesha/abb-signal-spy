@@ -142,6 +142,15 @@ pub struct SpyApp {
     pub phone_snapshot: Arc<Mutex<Snapshot>>,
     pub phone_built: Instant,
 
+    /// The live charts' stretch in view (timeline ms), and where the charts are on
+    /// screen, for saving what is in view; a picture of them asked for.
+    pub view_ms: Option<(i64, i64)>,
+    pub charts_rect: Option<egui::Rect>,
+    pub png_pending: bool,
+    /// A CSV being written, and what to add to its "saved" message.
+    pub export_job: Option<crate::export::ExportJob>,
+    pub export_note: &'static str,
+
     /// A recording open for review, and one being opened.
     pub review: Option<crate::review_view::ReviewState>,
     pub review_job: Option<crate::review_view::ReviewJob>,
@@ -263,6 +272,11 @@ impl SpyApp {
             phone: None,
             phone_snapshot: Arc::new(Mutex::new(Snapshot::default())),
             phone_built: Instant::now(),
+            view_ms: None,
+            charts_rect: None,
+            png_pending: false,
+            export_job: None,
+            export_note: "",
             review: None,
             review_job: None,
             show_recordings: false,
@@ -848,7 +862,7 @@ impl SpyApp {
             ui.label(RichText::new("5. Record").strong());
             ui.label("REC records every sample. 'Save last' saves what just happened, even if nothing was recording. 'Slow log' logs averages for runs of hours. M drops a marker.");
             ui.label(RichText::new("6. Look back").strong());
-            ui.label("File > Open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live.");
+            ui.label("File > Open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live. 'Save CSV' and 'Save PNG' above the charts save what is in view, live or reviewed.");
             ui.add_space(6.0);
             ui.label(RichText::new("Angles are in degrees; click an angle's unit in the channel table to switch it to radians.").weak());
         });
@@ -1086,7 +1100,9 @@ impl eframe::App for SpyApp {
         let ctx = ui.ctx().clone();
         self.poll_background();
         self.poll_review();
+        self.poll_export();
         self.take_dropped(&ctx);
+        self.take_screenshot(&ctx);
         self.shortcuts(&ctx);
         self.update_stats();
 
@@ -1103,13 +1119,14 @@ impl eframe::App for SpyApp {
         egui::Panel::left("catalogue").resizable(true).default_size(330.0).min_size(240.0).show(ui, |ui| self.browser(ui));
         // While a recording is reviewed it has the charts and the right panel; the
         // live session carries on underneath, and its line above says so.
-        if self.review.is_some() {
+        let central = if self.review.is_some() {
             egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.review_table(ui));
-            egui::CentralPanel::default().show(ui, |ui| self.review_charts(ui));
+            egui::CentralPanel::default().show(ui, |ui| self.review_charts(ui))
         } else {
             egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.channel_table(ui));
-            egui::CentralPanel::default().show(ui, |ui| self.charts(ui));
-        }
+            egui::CentralPanel::default().show(ui, |ui| self.charts(ui))
+        };
+        self.charts_rect = Some(central.response.rect);
 
         self.recordings_window(&ctx);
         self.add_dialog(&ctx);

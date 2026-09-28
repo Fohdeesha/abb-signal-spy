@@ -31,6 +31,9 @@ serde_json.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 wgpu = { version = "30", default-features = false, features = ["dx12", "wgsl", "std", "parking_lot"], optional = true }
 egui_plot = "0.37"
+# Saving the charts as a picture. Already in the tree (egui's test harness uses it);
+# MIT or Apache-2.0.
+png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

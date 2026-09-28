@@ -415,6 +415,118 @@ fn a_recording_opens_for_review_and_is_never_shown_as_live() {
     assert!(wait(&mut h, 2000, |a| a.review.is_none()) && h.query_by_label("LIVE").is_some(), "back to live");
 }
 
+fn files_ending(dir: &std::path::Path, suffix: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(suffix)).collect()).unwrap_or_default()
+}
+
+/// 6010 as measured: 0.5 rad/s with runs of padding zeros between.
+fn padded_speed() -> Behaviour {
+    let mut b = Behaviour::default();
+    b.signals.insert(6010, SignalDef { source: SignalSource::float(|(t, _, _)| if [0, 1, 4, 5, 8].contains(&(t / 4 % 10)) { 0.5 } else { 0.0 }), sample_ms: 4.032 });
+    b
+}
+
+/// A saved view's rows of one channel: its values, and every row's time checked.
+fn saved_rows(text: &str, id: &str, units: &str) -> Vec<f64> {
+    let rows: Vec<&str> = text.lines().skip(1).filter(|r| r.contains(&format!(",{id},"))).collect();
+    let now = std::time::SystemTime::now();
+    for r in &rows {
+        assert!(r.contains(&format!(",\"{units}\",")), "{r}");
+        let utc = spy_core::util::parse_iso(r.split(',').next().unwrap()).unwrap_or_else(|| panic!("no time in {r}"));
+        let off = now.duration_since(utc).map(|d| d.as_secs_f64()).unwrap_or_else(|e| -e.duration().as_secs_f64());
+        assert!((0.0..30.0).contains(&off), "{r} is {off} s from now");
+    }
+    rows.iter().map(|r| r.rsplit(',').next().unwrap().parse().unwrap()).collect()
+}
+
+/// As recorded: the padding zeros kept, the speed in degrees.
+fn assert_padded_speed(v: &[f64]) {
+    assert!(v.len() > 50, "{} rows", v.len());
+    assert!(v.iter().all(|&x| x == 0.0 || (x - 28.64788975654116).abs() < 1e-9), "{:?}", &v[..10]);
+    assert!(v.iter().filter(|&&x| x == 0.0).count() > v.len() / 4, "the padding zeros are kept: {:?}", &v[..10]);
+}
+
+#[test]
+fn what_is_in_view_saves_as_csv_and_png() {
+    let fake = FakeController::start(padded_speed()).unwrap();
+    let dir = temp_dir("export");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 6010, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 100) && a.view_ms.is_some()));
+    h.get_by_label("Save CSV").click();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
+    let rec = dir.join("recordings");
+    assert!(files_ending(&rec, ".part").is_empty());
+    let csvs = files_ending(&rec, " view.csv");
+    assert_eq!(csvs.len(), 1, "one CSV saved: {csvs:?}");
+    let text = std::fs::read_to_string(&csvs[0]).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("time_utc,t_s,channel,name,units,value"));
+    let rows: Vec<&str> = lines.collect();
+    let torque = saved_rows(&text, "4002/ROB_1/J1", "Nm");
+    assert!(torque.len() > 50 && torque.iter().all(|&v| v == 101.0), "{:?}", &torque[..2]);
+    assert_padded_speed(&saved_rows(&text, "6010/ROB_1/J1", "deg/s"));
+    assert_eq!(rows.len(), torque.len() + saved_rows(&text, "6010/ROB_1/J1", "deg/s").len());
+    let t: Vec<f64> = rows.iter().map(|r| r.split(',').nth(1).unwrap().parse().unwrap()).collect();
+    assert!(t.windows(2).all(|w| w[0] <= w[1]), "rows in time order");
+
+    // The picture: the screenshot the window asks for arrives as an event.
+    h.get_by_label("Save PNG").click();
+    let _ = h.run_ok();
+    assert!(h.state().png_pending, "a screenshot was asked for");
+    let image = std::sync::Arc::new(egui::ColorImage::filled([1400, 900], egui::Color32::DARK_GRAY));
+    h.event(egui::Event::Screenshot { viewport_id: egui::ViewportId::ROOT, user_data: egui::UserData::default(), image });
+    let _ = h.run_ok();
+    assert!(!h.state().png_pending);
+    let pngs = files_ending(&rec, " charts.png");
+    assert_eq!(pngs.len(), 1, "{pngs:?}");
+    assert!(std::fs::read(&pngs[0]).unwrap().starts_with(b"\x89PNG"));
+}
+
+#[test]
+fn a_reviewed_stretch_saves_as_csv() {
+    let mut b = padded_speed();
+    // Text is sent when it changes: this changes every 40 ms.
+    b.signals.insert(9872, SignalDef { source: SignalSource::text(|(t, _, _)| format!("wobj{}", t / 40 % 2)), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("review-export");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 6010, "Add");
+    add_via_dialog(&mut h, 9872, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 3 && a.session.status().channels.iter().all(|c| c.samples > 5)));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(600));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    h.get_by_label("Save CSV").click();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
+    let csvs = files_ending(&dir.join("recordings"), " view.csv");
+    assert_eq!(csvs.len(), 1, "{csvs:?}");
+    let text = std::fs::read_to_string(&csvs[0]).unwrap();
+    let torque = saved_rows(&text, "4002/ROB_1/J1", "Nm");
+    assert!(torque.len() > 50 && torque.iter().all(|&v| v == 101.0), "{}", text.lines().take(3).collect::<Vec<_>>().join("\n"));
+    // A held signal is saved as recorded, padding and all, not as the charts read it.
+    assert_padded_speed(&saved_rows(&text, "6010/ROB_1/J1", "deg/s"));
+    let words: Vec<&str> = text.lines().filter(|r| r.contains(",9872/ROB_1/J1,")).collect();
+    assert!(words.len() > 5 && words.iter().all(|r| r.ends_with(",\"\",\"wobj0\"") || r.ends_with(",\"\",\"wobj1\"")), "{:?}", &words[..words.len().min(2)]);
+    let t: Vec<f64> = text.lines().skip(1).map(|r| r.split(',').nth(1).unwrap().parse().unwrap()).collect();
+    assert!(t.windows(2).all(|w| w[0] <= w[1]), "rows in time order");
+    assert_eq!(t.len(), torque.len() + words.len() + saved_rows(&text, "6010/ROB_1/J1", "deg/s").len());
+}
+
 #[test]
 fn the_browser_shows_named_signals_and_finds_any_number() {
     let mut h = harness(temp_dir("browse"), AskPolicy::Remote);

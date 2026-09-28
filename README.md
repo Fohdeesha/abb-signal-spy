@@ -37,7 +37,7 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    something has just happened and nothing was recording. *Slow log* records count, mean, min and max
    per interval, for runs of hours. M drops a marker.
 6. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
-   marked REVIEWING.
+   marked REVIEWING. *Save CSV* and *Save PNG* above the charts save what is in view, live or reviewed.
 7. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
    on the same network.
 
@@ -62,6 +62,8 @@ started, for example `2026-09-26_04-47-20 dc dip`:
   controller's clock to UTC: each applies from its `row` (the first data row it maps, counted from 0)
   until the next anchor's, so rows on both sides of a controller restart map correctly. If the
   controller behind the address changes during a recording, the recording is closed there and says so.
+- `* view.csv` and `* charts.png` beside the recording folders are *Save CSV* and *Save PNG*:
+  `time_utc,t_s,channel,name,units,value`, one row per sample, in the units the window shows.
 
 String signals (the work object, the tool's name, a program position) are written quoted, and may
 contain commas, quotes and line breaks; any CSV reader, pandas included, reads them correctly.

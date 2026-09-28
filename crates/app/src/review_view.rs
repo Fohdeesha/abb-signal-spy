@@ -242,7 +242,7 @@ impl SpyApp {
     /// Charts of the recording: each signal (with its axes overlaid) in a chart of its
     /// own unit, on the recording's clock, free to drag and zoom.
     pub fn review_charts(&mut self, ui: &mut egui::Ui) {
-        let cat = &self.catalogue;
+        let (mut save_csv, mut save_png) = (false, false);
         let Some(rs) = &mut self.review else { return };
         let dur = rs.duration();
         ui.horizontal_wrapped(|ui| {
@@ -256,7 +256,25 @@ impl SpyApp {
                 rs.cursor_b = None;
             }
             ui.label(RichText::new("Drag to scroll, wheel to zoom.").weak());
+            ui.separator();
+            if ui.button("Save CSV").on_hover_text("Save the samples in view to a CSV file in the recordings folder").clicked() {
+                save_csv = true;
+            }
+            if ui.button("Save PNG").on_hover_text("Save a picture of the charts to the recordings folder").clicked() {
+                save_png = true;
+            }
         });
+        if save_csv || save_png {
+            if save_csv {
+                self.export_review_csv();
+            }
+            if save_png {
+                self.request_png();
+            }
+            return;
+        }
+        let cat = &self.catalogue;
+        let Some(rs) = &mut self.review else { return };
         let review = rs.review.clone();
         // Lanes: one per signal and unit, in the recording's order.
         let mut lanes: Vec<((u32, String), Vec<usize>)> = Vec::new();
@@ -498,6 +516,15 @@ fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from: i64, to: i
     let (_, factor) = display(ch);
     let s = view::stats_of(&v, r);
     RangeStats { n: s.n, mean: s.mean * factor, min: s.min * factor, max: s.max * factor, sd: s.sd * factor }
+}
+
+/// For the exports: a recorded channel's display unit and factor, and its name.
+pub(crate) fn display_of(ch: &ReviewChannel) -> (String, f64) {
+    display(ch)
+}
+
+pub(crate) fn name_of(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
+    name(cat, ch)
 }
 
 /// A recorded channel's display unit and factor (degrees for radians, F1).
