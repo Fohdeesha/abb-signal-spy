@@ -47,6 +47,9 @@ impl SpyApp {
             for c in &mut self.chans {
                 c.stats = Stats::default();
             }
+            for d in &mut self.derived {
+                d.stats = Stats::default();
+            }
             self.markers.clear();
             self.cursor_a = None;
             self.cursor_b = None;
@@ -86,6 +89,10 @@ impl SpyApp {
                     let upto = c.stats.upto;
                     c.stats = Stats { upto, ..Stats::default() };
                 }
+                for d in &mut self.derived {
+                    let upto = d.stats.upto;
+                    d.stats = Stats { upto, ..Stats::default() };
+                }
             }
             if !self.chans.is_empty() && ui.small_button("Remove all").clicked() {
                 self.chans.clear();
@@ -101,6 +108,7 @@ impl SpyApp {
         let connected = view::session_live(&st.phase);
         let mut remove = None;
         let mut changed = false;
+        let mut derive: Option<spy_core::derived::Derived> = None;
         let lanes: Vec<(u32, String)> = {
             let mut v: Vec<(u32, String)> = Vec::new();
             for c in &self.chans {
@@ -164,6 +172,17 @@ impl SpyApp {
                                 if sig.as_ref().is_some_and(|s| s.has(flag::ZERO_FILLED)) && ui.checkbox(&mut self.chans[i].hold_nonzero, "Chart: hold the last non-zero value").on_hover_text("This signal pads between its values with exact zeros; holding makes the chart readable. The recording keeps the zeros.").changed() {
                                     changed = true;
                                 }
+                                let offers = crate::derived_view::offers(sig.as_ref(), &key);
+                                if !offers.is_empty() {
+                                    ui.separator();
+                                    ui.label("Derived");
+                                    for d in offers {
+                                        if ui.button(crate::derived_view::offer_text(&d)).on_hover_text(self.derived_formula(&d)).clicked() {
+                                            derive = Some(d);
+                                            ui.close();
+                                        }
+                                    }
+                                }
                                 ui.separator();
                                 ui.label("Chart");
                                 let own = lanes.iter().filter(|(l, _)| *l == self.chans[i].lane).count() == 1 && self.chans.iter().filter(|c| c.lane == self.chans[i].lane).count() == 1;
@@ -210,6 +229,7 @@ impl SpyApp {
                             view::Reading::Plain => "The mean of the last 150 ms. The charts are raw.",
                             view::Reading::ZeroFilled => "The mean of the last 150 ms of the values this signal reports. It pads between them with exact zeros, which are left out; a run of zeros longer than 0.1 s is a real zero (the joint at rest). The recording keeps every sample as sent.",
                             view::Reading::Wrapping => "The mean of the last 150 ms taken on the circle (an angle within one turn), or the newest sample while it turns too fast to average.",
+                            view::Reading::Turn => "The newest sample.",
                         };
                         ui.label(text).on_hover_text(how);
                         if !is_text {
@@ -248,7 +268,11 @@ impl SpyApp {
                     });
                 });
             }
+            self.derived_cards(ui, &st);
         });
+        if let Some(d) = derive {
+            self.add_derived(d);
+        }
         if let Some(i) = remove {
             let k = self.chans.remove(i).key;
             self.log.info(format!("Removed {k}."));

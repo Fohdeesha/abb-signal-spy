@@ -6,6 +6,7 @@
 //! and no client label is built in.
 
 pub mod catalogue;
+pub mod derived;
 pub mod discovery;
 pub mod log;
 pub mod reading;

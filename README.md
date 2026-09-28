@@ -37,9 +37,13 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
 5. **Record.** REC records every sample. *Save last* saves the last seconds from memory, for when
    something has just happened and nothing was recording. *Slow log* records count, mean, min and max
    per interval, for runs of hours. M drops a marker.
-6. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
+6. **Derived channels**, from a channel's menu (⋯): a resolver angle's **turn to a target** (the short
+   way round, ON TARGET within 0.25 degrees), the **PWM duty sum** of an axis (1.50 by construction), and
+   the **DC-link sag** below a plateau you set with the robot armed and still. A derived value is never
+   shown as more live than its inputs.
+7. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
    marked REVIEWING. *Save CSV* and *Save PNG* above the charts save what is in view, live or reviewed.
-7. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
+8. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
    on the same network.
 
 The built-in catalogue was measured on an IRB 2600 with RobotWare 6.16. Another robot or RobotWare
@@ -63,6 +67,8 @@ started, for example `2026-09-26_04-47-20 dc dip`:
   controller's clock to UTC: each applies from its `row` (the first data row it maps, counted from 0)
   until the next anchor's, so rows on both sides of a controller restart map correctly. If the
   controller behind the address changes during a recording, the recording is closed there and says so.
+  `derived` lists the derived channels shown (their values are not recorded; opening the recording
+  computes them again from the recorded inputs).
 - `* view.csv` and `* charts.png` beside the recording folders are *Save CSV* and *Save PNG*:
   `time_utc,t_s,channel,name,units,value`, one row per sample, in the units the window shows.
 

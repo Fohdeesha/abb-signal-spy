@@ -27,6 +27,14 @@ pub struct SavedChannel {
     pub lane: u32,
 }
 
+/// A derived channel (its plateau, if a sag, is never kept).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SavedDerived {
+    pub def: spy_core::derived::Derived,
+    #[serde(default)]
+    pub lane: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -48,6 +56,7 @@ pub struct Settings {
     pub favourites: Vec<u32>,
     pub units: Vec<String>,
     pub ui_scale: f32,
+    pub derived: Vec<SavedDerived>,
 }
 
 impl Default for Settings {
@@ -70,6 +79,7 @@ impl Default for Settings {
             favourites: Vec::new(),
             units: vec!["ROB_1".into(), "ROB_2".into()],
             ui_scale: 1.0,
+            derived: Vec::new(),
         }
     }
 }
@@ -119,6 +129,7 @@ impl Settings {
             favourites: field(&obj, "favourites", d.favourites, &mut notes),
             units: field(&obj, "units", d.units, &mut notes),
             ui_scale: field(&obj, "ui_scale", d.ui_scale, &mut notes),
+            derived: derived(&obj, &mut notes),
         };
         s.sanitize(&mut notes);
         let note = (!notes.is_empty()).then(|| format!("Parts of the settings file ({}) could not be used and were left out (the rest loaded): {}.", path.display(), notes.join("; ")));
@@ -192,6 +203,40 @@ fn channels(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<St
             continue;
         }
         out.push(c);
+    }
+    out
+}
+
+/// The derived channels, entry by entry, as the channels are read. A plateau in the
+/// file (put there by hand) is dropped: it belongs to the controller it was measured
+/// on, at the time.
+fn derived(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<String>) -> Vec<SavedDerived> {
+    let Some(v) = obj.get("derived") else { return Vec::new() };
+    let Some(list) = v.as_array() else {
+        notes.push("\"derived\" (not a list)".into());
+        return Vec::new();
+    };
+    let mut out: Vec<SavedDerived> = Vec::new();
+    for (i, e) in list.iter().enumerate() {
+        match serde_json::from_value::<SavedDerived>(e.clone()) {
+            Ok(mut d) => {
+                if let spy_core::derived::Derived::Sag { plateau_v, .. } = &mut d.def {
+                    *plateau_v = None;
+                }
+                if let spy_core::derived::Derived::Turn { target_deg: Some(t), .. } = &d.def
+                    && !t.is_finite()
+                {
+                    notes.push(format!("derived channel {} (a target that is not a number)", i + 1));
+                    continue;
+                }
+                if out.iter().any(|o| o.def.same(&d.def)) {
+                    notes.push(format!("derived channel {} (a second time)", i + 1));
+                    continue;
+                }
+                out.push(d);
+            }
+            Err(err) => notes.push(format!("derived channel {} ({err})", i + 1)),
+        }
     }
     out
 }
@@ -314,6 +359,7 @@ mod tests {
             favourites: vec![5027],
             units: vec!["ROB_1".into(), "STN_1".into()],
             ui_scale: 1.2,
+            derived: vec![SavedDerived { def: spy_core::derived::Derived::Turn { angle: key(5138, "ROB_2", 3), target_deg: Some(90.0) }, lane: 5 }],
         };
         assert_ne!(s, Settings::default());
         let dir = std::env::temp_dir().join(format!("spy-settings-all-{}", std::process::id()));
@@ -323,6 +369,35 @@ mod tests {
         let (back, note) = Settings::load(&p);
         assert_eq!(note, None);
         assert_eq!(back, s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn key(signal: u32, unit: &str, axis: u8) -> spy_core::store::ChannelKey {
+        spy_core::store::ChannelKey { signal, unit: spy_core::request::MechUnit::new(unit).unwrap(), axis: spy_core::request::Axis::new(axis).unwrap() }
+    }
+
+    #[test]
+    fn derived_channels_load_one_by_one_and_never_with_a_plateau() {
+        let dir = std::env::temp_dir().join(format!("spy-settings-derived-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        std::fs::write(
+            &p,
+            r#"{"derived": [
+                {"def": {"kind": "sag", "link": {"signal": 5027, "unit": "ROB_1", "axis": 1}, "plateau_v": 356.5}, "lane": 2},
+                {"def": {"kind": "turn", "angle": {"signal": 5138, "unit": "ROB_1", "axis": 9}}},
+                {"def": {"kind": "sag", "link": {"signal": 5027, "unit": "ROB_1", "axis": 1}}},
+                {"def": {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5021, "unit": "ROB_1", "axis": 2}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]}}
+            ]}"#,
+        )
+        .unwrap();
+        let (s, note) = Settings::load(&p);
+        let note = note.unwrap();
+        assert!(note.contains("derived channel 2") && note.contains("derived channel 3 (a second time)"), "{note}");
+        assert_eq!(s.derived.len(), 2);
+        assert_eq!(s.derived[0].def, spy_core::derived::Derived::Sag { link: key(5027, "ROB_1", 1), plateau_v: None }, "a plateau in the file is not used");
+        assert_eq!(s.derived[0].lane, 2);
+        assert_eq!(s.derived[1].def.id(), "duty-sum:ROB_1/J2");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

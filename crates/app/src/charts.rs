@@ -5,19 +5,55 @@
 //! (C6). A gap is drawn as a gap, never interpolated across, and a stale channel's
 //! empty stretch is shaded.
 
-use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use eframe::egui::{self, RichText};
 use egui_plot::{HoverPosition, Legend, Line, Plot, PlotPoints, Span, VLine};
 
 use spy_core::catalogue::flag;
-use spy_core::session::Phase;
-use spy_core::store::ChannelKey;
+use spy_core::session::{Phase, Status};
+use spy_core::store::{Channel, Ring};
 use spy_core::timeline::Timeline;
 
 use crate::app::SpyApp;
 use crate::theme;
 use crate::view::{self, Health};
+
+/// Where a chart line's samples come from: a channel's history in the store, or a
+/// derived channel's.
+#[derive(Clone)]
+enum Src {
+    Stream(Arc<Channel>),
+    Derived(Arc<Mutex<Ring>>),
+}
+
+impl Src {
+    fn lock(&self) -> MutexGuard<'_, Ring> {
+        match self {
+            Src::Stream(c) => c.lock(),
+            Src::Derived(r) => r.lock().unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+}
+
+/// One line on the charts, and one row of the cursor table.
+#[derive(Clone)]
+struct Member {
+    id: String,
+    lane: (u32, String),
+    color: egui::Color32,
+    factor: f64,
+    hold: bool,
+    reading: view::Reading,
+    /// For the legend.
+    name: String,
+    /// For a chart's title and the cursor table.
+    title: String,
+    frozen: bool,
+    health: Health,
+    /// Nothing yet in the store.
+    src: Option<Src>,
+}
 
 pub const WINDOWS: [(f64, &str); 9] = [(1.0, "1 s"), (2.0, "2 s"), (5.0, "5 s"), (10.0, "10 s"), (30.0, "30 s"), (60.0, "1 min"), (120.0, "2 min"), (300.0, "5 min"), (600.0, "10 min")];
 
@@ -74,7 +110,59 @@ impl SpyApp {
                 v.push(lane);
             }
         }
+        for d in &self.derived {
+            let lane = (d.lane, d.live.def().units().to_string());
+            if !v.contains(&lane) {
+                v.push(lane);
+            }
+        }
         v
+    }
+
+    /// Everything charted, channels first, in the order `lanes` gives their charts.
+    fn members(&self, charted: &[bool], st: &Status) -> Vec<Member> {
+        let connected = view::session_live(&st.phase);
+        let store = self.session.store();
+        let mut out = Vec::new();
+        for (i, c) in self.chans.iter().enumerate() {
+            if !charted[i] {
+                continue;
+            }
+            let sig = self.catalogue.get(c.key.signal);
+            let d = view::display(sig, c.radians);
+            let cs = st.channels.iter().find(|s| s.key == c.key);
+            out.push(Member {
+                id: c.key.id(),
+                lane: (c.lane, d.units.clone()),
+                color: c.color,
+                factor: d.factor,
+                hold: c.hold_nonzero,
+                reading: view::reading(sig),
+                name: view::short_label(&self.catalogue, &c.key),
+                title: view::label(&self.catalogue, &c.key),
+                frozen: sig.is_some_and(|s| s.has(flag::FROZEN)),
+                health: view::health(cs, connected, sig, st.loopback),
+                src: store.get(&c.key).map(Src::Stream),
+            });
+        }
+        for (i, d) in self.derived.iter().enumerate() {
+            let def = d.live.def();
+            let title = self.derived_label(def);
+            out.push(Member {
+                id: def.id(),
+                lane: (d.lane, def.units().to_string()),
+                color: d.color,
+                factor: 1.0,
+                hold: false,
+                reading: crate::derived_view::reading(def),
+                name: title.clone(),
+                title,
+                frozen: false,
+                health: self.derived_health(i, st),
+                src: Some(Src::Derived(d.live.ring())),
+            });
+        }
+        out
     }
 
     fn units_of(&self, i: usize) -> String {
@@ -109,28 +197,23 @@ impl SpyApp {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Nothing to chart: the channels are text signals or were refused (see the table).").weak()));
             return;
         }
-        let stats_h = if self.cursors_on { 26.0 * (self.chans.len() as f32 + 2.0) } else { 0.0 };
+        let all = self.members(&charted, &st);
+        let stats_h = if self.cursors_on { 26.0 * (all.len() as f32 + 2.0) } else { 0.0 };
         let lane_h = ((ui.available_height() - stats_h) / lanes.len() as f32 - 22.0).max(80.0);
-        let connected = view::session_live(&st.phase);
         let mut clicked_a: Option<f64> = None;
         let mut clicked_b: Option<f64> = None;
         let mut visible_x = (x_min, x_max);
 
         egui::ScrollArea::vertical().id_salt("lanes").auto_shrink([false, false]).max_height(ui.available_height() - stats_h).show(ui, |ui| {
             for lane in &lanes {
-                let members: Vec<usize> = (0..self.chans.len()).filter(|&i| charted[i] && self.chans[i].lane == lane.0 && self.units_of(i) == lane.1).collect();
-                let Some(&first_i) = members.first() else { continue };
-                let first = &self.chans[first_i];
-                let title = if members.len() == 1 {
-                    view::label(&self.catalogue, &first.key)
-                } else {
-                    format!("{} (+{} overlaid)", view::label(&self.catalogue, &first.key), members.len() - 1)
-                };
+                let members: Vec<&Member> = all.iter().filter(|m| &m.lane == lane).collect();
+                let Some(first) = members.first() else { continue };
+                let title = if members.len() == 1 { first.title.clone() } else { format!("{} (+{} overlaid)", first.title, members.len() - 1) };
                 let locked = self.lane_lock.get(lane).copied();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&title).small().strong());
                     ui.label(RichText::new(format!("[{}]", lane.1)).small().weak());
-                    if members.iter().any(|&i| self.catalogue.get(self.chans[i].key.signal).is_some_and(|s| s.has(flag::FROZEN))) {
+                    if members.iter().any(|m| m.frozen) {
                         theme::badge(ui, "FROZEN", theme::WARN, "Holds the last RAPID path position; does not move while EGM drives the robot.");
                     }
                     let mut lock = locked.is_some();
@@ -160,24 +243,6 @@ impl SpyApp {
                     plot.allow_drag([true, false]).allow_zoom([true, false]).allow_scroll([true, false]).allow_boxed_zoom(false).allow_double_click_reset(false)
                 };
 
-                let chans: Vec<(ChannelKey, egui::Color32, f64, bool, bool, String)> = members
-                    .iter()
-                    .map(|&i| {
-                        let c = &self.chans[i];
-                        let d = view::display(self.catalogue.get(c.key.signal), c.radians);
-                        (c.key.clone(), c.color, d.factor, c.hold_nonzero, false, view::short_label(&self.catalogue, &c.key))
-                    })
-                    .collect();
-                let healths: HashMap<ChannelKey, (Health, Option<i64>)> = chans
-                    .iter()
-                    .map(|(k, ..)| {
-                        let cs = st.channels.iter().find(|c| &c.key == k);
-                        let h = view::health(cs, connected, self.catalogue.get(k.signal), st.loopback);
-                        let last = self.session.store().get(k).and_then(|ch| ch.lock().last().map(|(t, _)| t));
-                        (k.clone(), (h, last))
-                    })
-                    .collect();
-                let store = self.session.store().clone();
                 let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
                 let (ca, cb) = (self.cursor_a, self.cursor_b);
                 let pause_fresh = self.pause_fresh;
@@ -191,19 +256,21 @@ impl SpyApp {
                     let to = origin + (vx1 * 1000.0).ceil() as i64 + 1;
                     let px = pu.response().rect.width().max(50.0) as usize;
                     let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
-                    for (key, color, factor, hold, _, name) in &chans {
-                        let Some(ch) = store.get(key) else { continue };
-                        let ring = ch.lock();
+                    for m in &members {
+                        let Some(src) = &m.src else { continue };
+                        let (factor, hold) = (m.factor, m.hold);
+                        let ring = src.lock();
                         // A zero-filled signal's padding, undone for at most the hold
                         // time: a longer run of zeros is a stop and is drawn as zero.
                         // Primed from just before the window, so its left edge is right.
                         let mut zh = view::ZeroHold::new(ring.sample_ms);
-                        if *hold {
+                        if hold {
                             for (_, v) in ring.range(from - view::ZERO_HOLD_MS.ceil() as i64 - 1, from) {
                                 zh.apply(v);
                             }
                         }
-                        let segs = ring.decimate(from, to, px, |v| (if *hold { zh.apply(v) } else { v }) * factor);
+                        let segs = ring.decimate(from, to, px, |v| (if hold { zh.apply(v) } else { v }) * factor);
+                        let last = ring.last().map(|(t, _)| t);
                         drop(ring);
                         for (si, seg) in segs.iter().enumerate() {
                             let mut pts: Vec<[f64; 2]> = Vec::with_capacity(seg.len() * 2);
@@ -226,17 +293,17 @@ impl SpyApp {
                                 // A lone point would be invisible as a line.
                                 pts.push([pts[0][0] + 0.0005, pts[0][1]]);
                             }
-                            pu.line(Line::new(name.clone(), PlotPoints::from(pts)).color(*color).width(1.4).id(egui::Id::new((key.id(), si))));
+                            pu.line(Line::new(m.name.clone(), PlotPoints::from(pts)).color(m.color).width(1.4).id(egui::Id::new((&m.id, si))));
                         }
                         // A stale channel: shade from its last sample to the right edge.
-                        if let Some((h, last)) = healths.get(key)
-                            && matches!(h, Health::Stale | Health::NotConnected)
-                                && let Some(t) = last {
-                                    let x = (*t - origin) as f64 / 1000.0;
-                                    if x < vx1 {
-                                        pu.span(Span::new(format!("{name} stale"), x..=vx1).fill(theme::WARN.gamma_multiply(0.08)).border_width(0.0));
-                                    }
-                                }
+                        if matches!(m.health, Health::Stale | Health::NotConnected)
+                            && let Some(t) = last
+                        {
+                            let x = (t - origin) as f64 / 1000.0;
+                            if x < vx1 {
+                                pu.span(Span::new(format!("{} stale", m.name), x..=vx1).fill(theme::WARN.gamma_multiply(0.08)).border_width(0.0));
+                            }
+                        }
                     }
                     for (x, label) in &markers {
                         if *x >= vx0 && *x <= vx1 {
@@ -292,7 +359,7 @@ impl SpyApp {
             self.cursor_b = Some(b);
         }
         if self.cursors_on {
-            self.cursor_table(ui, &tl, visible_x);
+            self.cursor_table(ui, &tl, visible_x, &all);
         }
     }
 
@@ -339,7 +406,7 @@ impl SpyApp {
         });
     }
 
-    fn cursor_table(&mut self, ui: &mut egui::Ui, tl: &Timeline, visible: (f64, f64)) {
+    fn cursor_table(&mut self, ui: &mut egui::Ui, tl: &Timeline, visible: (f64, f64), members: &[Member]) {
         ui.separator();
         let origin = tl.origin().unwrap_or(0);
         let (a, b) = (self.cursor_a, self.cursor_b);
@@ -354,34 +421,30 @@ impl SpyApp {
                 _ => ui.label("Click a chart to place cursor A, right-click for B   (statistics of the visible window)"),
             };
         });
-        let at = |key: &ChannelKey, reading: view::Reading, x: f64| -> Option<f64> {
-            let ch = self.session.store().get(key)?;
-            let r = ch.lock();
-            view::value_at(&r, reading, origin + (x * 1000.0).round() as i64)
+        let at = |m: &Member, x: f64| -> Option<f64> {
+            let r = m.src.as_ref()?.lock();
+            view::value_at(&r, m.reading, origin + (x * 1000.0).round() as i64)
         };
         egui::Grid::new("cursor-stats").striped(true).num_columns(8).show(ui, |ui| {
             for h in ["channel", "at A", "at B", "B − A", "mean", "min", "max", "std dev"] {
                 ui.label(RichText::new(h).small().strong());
             }
             ui.end_row();
-            for c in &self.chans {
-                let sig = self.catalogue.get(c.key.signal);
-                let d = view::display(sig, c.radians);
-                let reading = view::reading(sig);
-                let va = a.and_then(|x| at(&c.key, reading, x)).map(|v| v * d.factor);
-                let vb = b.and_then(|x| at(&c.key, reading, x)).map(|v| v * d.factor);
-                let s = match self.session.store().get(&c.key) {
-                    Some(ch) => {
-                        let r = ch.lock();
+            for m in members {
+                let va = a.and_then(|x| at(m, x)).map(|v| v * m.factor);
+                let vb = b.and_then(|x| at(m, x)).map(|v| v * m.factor);
+                let s = match &m.src {
+                    Some(src) => {
+                        let r = src.lock();
                         let from = origin + (range.0 * 1000.0).floor() as i64;
                         let to = origin + (range.1 * 1000.0).ceil() as i64 + 1;
-                        let s = view::window_stats(&r, reading, from, to);
-                        RangeStats { n: s.n, mean: s.mean * d.factor, min: s.min * d.factor, max: s.max * d.factor, sd: s.sd * d.factor }
+                        let s = view::window_stats(&r, m.reading, from, to);
+                        RangeStats { n: s.n, mean: s.mean * m.factor, min: s.min * m.factor, max: s.max * m.factor, sd: s.sd * m.factor }
                     }
                     None => RangeStats::default(),
                 };
                 let f = |v: Option<f64>| v.map(view::fmt).unwrap_or_else(|| "--".into());
-                ui.label(RichText::new(view::label(&self.catalogue, &c.key)).small().color(c.color));
+                ui.label(RichText::new(&m.title).small().color(m.color));
                 ui.label(RichText::new(f(va)).small().monospace());
                 ui.label(RichText::new(f(vb)).small().monospace());
                 ui.label(RichText::new(f(va.zip(vb).map(|(x, y)| y - x))).small().monospace());
@@ -389,7 +452,7 @@ impl SpyApp {
                 ui.label(RichText::new(if has { view::fmt(s.mean) } else { "--".into() }).small().monospace());
                 ui.label(RichText::new(if has { view::fmt(s.min) } else { "--".into() }).small().monospace());
                 ui.label(RichText::new(if has { view::fmt(s.max) } else { "--".into() }).small().monospace());
-                ui.label(RichText::new(if has { format!("{} {}", view::fmt(s.sd), d.units) } else { "--".into() }).small().monospace());
+                ui.label(RichText::new(if has { format!("{} {}", view::fmt(s.sd), m.lane.1) } else { "--".into() }).small().monospace());
                 ui.end_row();
             }
         });

@@ -157,6 +157,10 @@ pub struct Meta {
     pub events_lost: u64,
     #[serde(default)]
     pub notes: String,
+    /// The derived channels shown while recording, as last set (a review computes
+    /// them again from the recorded inputs; their changes are in `events`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived: Vec<crate::derived::Derived>,
 }
 
 impl Meta {
@@ -182,6 +186,7 @@ impl Meta {
             samples_lost: 0,
             events_lost: 0,
             notes: String::new(),
+            derived: Vec::new(),
         }
     }
 }
@@ -308,6 +313,7 @@ pub struct RecStatus {
 enum Cmd {
     Marker { label: String, controller_ms: Option<i64>, wall: SystemTime },
     Info(ChannelKey, ChannelInfo),
+    Derived { defs: Vec<crate::derived::Derived>, change: Option<String>, wall: SystemTime },
     Stop,
 }
 
@@ -395,6 +401,11 @@ impl Recorder {
     /// Name, units and description for a channel added after the recording began.
     pub fn info(&self, key: ChannelKey, info: ChannelInfo) {
         let _ = self.tx.send(Cmd::Info(key, info));
+    }
+
+    /// The derived channels now shown, and what changed (kept as an event).
+    pub fn derived(&self, defs: Vec<crate::derived::Derived>, change: Option<String>) {
+        let _ = self.tx.send(Cmd::Derived { defs, change, wall: SystemTime::now() });
     }
 
     pub fn status(&self) -> RecStatus {
@@ -497,6 +508,18 @@ impl Writer {
                             c.description = info.description.clone();
                         }
                         self.infos.insert(key, info);
+                    }
+                    Ok(Cmd::Derived { defs, change, wall }) => {
+                        // A target or plateau changed (not a derived channel added or
+                        // removed): a review computes everything with the last one,
+                        // and says so.
+                        let setting = defs.iter().any(|d| self.meta.derived.iter().any(|o| o.same(d) && o != d));
+                        self.meta.derived = defs;
+                        if let Some(text) = change {
+                            let kind = if setting { "derived-setting" } else { "derived" };
+                            self.meta.events.push(EventEntry { utc: wall_iso(wall), kind: kind.into(), text, controller_ms: last_ctrl });
+                        }
+                        self.save_meta();
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
@@ -739,7 +762,8 @@ fn write_bucket(out: &mut BufWriter<File>, id: &str, b: &Bucket, bytes: &mut u64
 }
 
 /// "Save the last N seconds": write the live history's last `seconds` for these
-/// channels into a new folder. Rows are in time order across channels.
+/// channels into a new folder, with the derived channels shown. Rows are in time
+/// order across channels.
 #[allow(clippy::too_many_arguments)]
 pub fn write_snapshot(
     base: &Path,
@@ -751,6 +775,7 @@ pub fn write_snapshot(
     seconds: f64,
     controller: &str,
     system_id: Option<String>,
+    derived: &[crate::derived::Derived],
 ) -> Result<(PathBuf, u64), String> {
     if !(seconds.is_finite() && seconds > 0.0) {
         return Err("the length to save must be a positive number of seconds".into());
@@ -760,6 +785,7 @@ pub fn write_snapshot(
     // Copy out under each channel's lock briefly, then write without holding any.
     let mut rows: Vec<(i64, usize, f64)> = Vec::new();
     let mut meta = Meta::new(Kind::Snapshot, label, controller, system_id);
+    meta.derived = derived.to_vec();
     for (idx, k) in keys.iter().enumerate() {
         let mut e = entry(k, infos.get(k));
         if let Some(c) = store.get(k) {
@@ -1375,7 +1401,7 @@ mod tests {
             ch.lock().push(t, 2.0);
         }
         let base = temp("snapreset");
-        let (dir, rows) = write_snapshot(&base, "", &store, &tl, std::slice::from_ref(&key), &HashMap::new(), 60.0, "t", None).unwrap();
+        let (dir, rows) = write_snapshot(&base, "", &store, &tl, std::slice::from_ref(&key), &HashMap::new(), 60.0, "t", None, &[]).unwrap();
         assert_eq!(rows, 8);
         let back = read(&dir).unwrap();
         let a: Vec<(i64, Option<u64>)> = back.meta.anchors.iter().map(|a| (a.controller_ms, a.row)).collect();

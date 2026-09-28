@@ -36,6 +36,7 @@ impl SpyApp {
                             let s = r.status();
                             self.log.info(format!("Recording to {}", s.dir.display()));
                             self.last_folder = Some(s.dir);
+                            r.derived(self.derived.iter().map(|d| d.live.def().clone()).collect(), None);
                             self.recorder = Some(r);
                         }
                         Err(e) => self.toast(Level::Error, format!("Could not start recording: {e}")),
@@ -75,9 +76,10 @@ impl SpyApp {
             let label = if self.rec_label.trim().is_empty() { format!("last {secs:.0} s") } else { self.rec_label.clone() };
             let controller = st.target.as_ref().map(|t| t.to_string()).unwrap_or_default();
             let system_id = st.announce.as_ref().and_then(|a| a.system_id.clone());
+            let derived: Vec<_> = self.derived.iter().map(|d| d.live.def().clone()).collect();
             let ctx = self.ctx.clone();
             self.snapshot_job = Some(std::thread::spawn(move || {
-                let r = recording::write_snapshot(&dir, &label, &store, &st.timeline, &keys, &infos, secs, &controller, system_id);
+                let r = recording::write_snapshot(&dir, &label, &store, &st.timeline, &keys, &infos, secs, &controller, system_id, &derived);
                 ctx.request_repaint();
                 r
             }));
@@ -99,6 +101,7 @@ impl SpyApp {
                     match Recorder::start(&self.session, &self.record_dir(), &label, Some(self.settings.slow_interval_ms), &self.infos()) {
                         Ok(r) => {
                             self.last_folder = Some(r.status().dir);
+                            r.derived(self.derived.iter().map(|d| d.live.def().clone()).collect(), None);
                             self.slow = Some(r);
                         }
                         Err(e) => self.toast(Level::Error, format!("Could not start the slow log: {e}")),

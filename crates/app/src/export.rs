@@ -190,6 +190,13 @@ impl SpyApp {
             let factor = d.factor;
             series.push(Series { id: c.key.id(), name: view::label(&self.catalogue, &c.key), units: d.units.clone(), samples: Box::new(samples.into_iter().map(move |(t, v)| (t, Value::Number(v * factor)))) });
         }
+        // Derived channels, as computed here; their ids say what from.
+        for d in &self.derived {
+            let def = d.live.def();
+            let samples: Vec<(i64, f64)> = d.live.lock().range(from, to).collect();
+            total += samples.len();
+            series.push(Series { id: def.id(), name: self.derived_label(def), units: def.units().into(), samples: Box::new(samples.into_iter().map(|(t, v)| (t, Value::Number(v)))) });
+        }
         let note = if skipped_text { " (text signals are not kept in the live history: record them with REC)" } else { "" };
         self.start_export(total, note, move |p| write_csv(p, from, utc_offset, series));
     }

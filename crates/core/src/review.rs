@@ -60,6 +60,8 @@ pub struct ReviewChannel {
     pub text: Vec<(i64, String)>,
     /// A step longer than this is a gap: 1.5 sample times (a slow log: intervals).
     pub gap_ms: f64,
+    /// A derived channel, computed here from recorded ones (never itself recorded).
+    pub derived: Option<crate::derived::Derived>,
     blocks: Vec<Block>,
 }
 
@@ -234,6 +236,7 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
             band: slow.then(|| (Vec::new(), Vec::new())),
             text: Vec::new(),
             gap_ms: 0.0,
+            derived: None,
             blocks: Vec::new(),
         });
         if !slow && fields[2].1 {
@@ -284,6 +287,7 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
         }
         ch.blocks = blocks(&ch.t, &ch.v, ch.band.as_ref(), ch.gap_ms);
     }
+    derive(&meta, &mut channels, &mut notes);
     let firsts = channels.iter().filter_map(|c| c.t.first().copied()).chain(channels.iter().filter_map(|c| c.text.first().map(|x| x.0)));
     let lasts = channels.iter().filter_map(|c| c.t.last().copied()).chain(channels.iter().filter_map(|c| c.text.last().map(|x| x.0)));
     let (start, end) = (firsts.min().unwrap_or(0), lasts.max().unwrap_or(0));
@@ -310,6 +314,57 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     }
     marks.sort_by_key(|m| m.t);
     Ok(Review { dir: dir.to_path_buf(), meta, channels, wall_clock, start, end, bad_rows, bad_lines, out_of_order, notes, marks })
+}
+
+/// The derived channels shown while recording, computed again from the recorded
+/// inputs (as recorded: a held signal's padding kept) and added after the recorded
+/// channels. With the last target or plateau set: a change during the recording
+/// is said, and marked where it happened (its event).
+fn derive(meta: &Meta, channels: &mut Vec<ReviewChannel>, notes: &mut Vec<String>) {
+    if meta.derived.is_empty() {
+        return;
+    }
+    if meta.kind == Kind::Slow {
+        notes.push("Derived channels are not computed from a slow log's interval averages.".into());
+        return;
+    }
+    let mut out = Vec::new();
+    for def in &meta.derived {
+        let inputs: Option<Vec<&ReviewChannel>> = def.inputs().iter().map(|k| channels.iter().find(|c| c.id == k.id())).collect();
+        let Some(inputs) = inputs else {
+            notes.push(format!("{} could not be computed: an input of it is not in the recording.", def.name()));
+            continue;
+        };
+        if !def.is_set() {
+            notes.push(format!("{} has no values: its {} was never set while recording.", def.name(), if matches!(def, crate::derived::Derived::Turn { .. }) { "target" } else { "plateau" }));
+        }
+        let series: Vec<Vec<(i64, f64)>> = inputs.iter().map(|c| c.t.iter().copied().zip(c.raw.as_ref().unwrap_or(&c.v).iter().copied()).collect()).collect();
+        let refs: Vec<&[(i64, f64)]> = series.iter().map(|s| s.as_slice()).collect();
+        let (t, v): (Vec<i64>, Vec<f64>) = def.combine(&refs).into_iter().unzip();
+        let first = inputs[0];
+        let entry = ChannelEntry {
+            id: def.id(),
+            signal: 0,
+            unit: first.key.as_ref().map(|k| k.unit.to_string()).unwrap_or_default(),
+            axis: first.key.as_ref().map_or(1, |k| k.axis.one_based()),
+            name: def.name(),
+            units: def.units().into(),
+            description: "Computed from the recorded channels; not itself recorded.".into(),
+            stream_id: None,
+            sample_ms: first.entry.as_ref().and_then(|e| e.sample_ms),
+            value_type: None,
+            samples: t.len() as u64,
+            first_controller_ms: None,
+            last_controller_ms: None,
+        };
+        let gap_ms = first.gap_ms;
+        let b = blocks(&t, &v, None, gap_ms);
+        out.push(ReviewChannel { id: def.id(), key: None, entry: Some(entry), t, v, raw: None, band: None, text: Vec::new(), gap_ms, derived: Some(def.clone()), blocks: b });
+    }
+    if meta.events.iter().any(|e| e.kind == "derived-setting") && !out.is_empty() {
+        notes.push("A target or plateau was set or cleared during the recording: the derived values here are all computed with the last one (the changes are marked).".into());
+    }
+    channels.extend(out);
 }
 
 /// The summary: blocks of up to [`BLOCK`] samples, split at every gap and NaN.
@@ -483,6 +538,48 @@ mod tests {
     }
 
     #[test]
+    fn derived_channels_are_computed_again_from_the_recording() {
+        // Three duty legs at 10000-10008 and, after a restart, at 10002-10006; the
+        // second leg is missing at 10004. A sag and a turn with no input recorded.
+        let mut csv = String::from("controller_ms,channel,value\n");
+        for (c, legs) in [(10000, [0.5, 0.5, 0.5]), (10004, [0.5, f64::NAN, 0.6]), (10008, [0.4, 0.6, 0.5]), (10002, [0.5, 0.5, 0.4]), (10006, [0.5, 0.5, 0.5])] {
+            for (n, v) in [5020, 5021, 5022].iter().zip(legs) {
+                if !v.is_nan() {
+                    csv += &format!("{c},{n}/ROB_1/J2,{v}\n");
+                }
+            }
+            csv += &format!("{c},5027/ROB_1/J1,350\n");
+        }
+        let anchors = r#"{"controller_ms": 10000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}, {"controller_ms": 10002, "utc": "2026-09-27T10:01:00.000Z", "row": 11}"#;
+        let derived = r#", "derived": [
+            {"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5021, "unit": "ROB_1", "axis": 2}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]},
+            {"kind": "sag", "link": {"signal": 5027, "unit": "ROB_1", "axis": 1}, "plateau_v": 356.0},
+            {"kind": "turn", "angle": {"signal": 5138, "unit": "ROB_1", "axis": 3}, "target_deg": 90.0}
+        ], "events": [{"utc": "2026-09-27T10:00:30.000Z", "kind": "derived-setting", "text": "plateau set"}]"#;
+        let d = folder("derived", "full", anchors, derived, &csv);
+        let r = open(&d, &[]).unwrap();
+        let (t0, t1) = (ms("2026-09-27T10:00:00.000Z"), ms("2026-09-27T10:01:00.000Z"));
+        let sum = r.channel("duty-sum:ROB_1/J2").expect("the duty sum");
+        assert_eq!(sum.t, vec![t0, t0 + 8, t1, t1 + 4], "only where all three legs have a sample: not at 10004");
+        assert_eq!(sum.v.iter().map(|v| (v * 1e6).round() / 1e6).collect::<Vec<_>>(), vec![1.5, 1.5, 1.4, 1.5]);
+        assert!(sum.derived.is_some() && sum.key.is_none());
+        assert_eq!(sum.entry.as_ref().unwrap().name, "PWM duty sum  ROB_1 J2");
+        let sag = r.channel("sag:5027/ROB_1/J1").unwrap();
+        assert!(sag.v.len() == 5 && sag.v.iter().all(|&v| v == 6.0));
+        assert!(r.channel("turn:5138/ROB_1/J3").is_none());
+        assert!(r.notes.iter().any(|n| n.contains("Turn to target") && n.contains("not in the recording")), "{:?}", r.notes);
+        assert!(r.notes.iter().any(|n| n.contains("computed with the last one")), "a setting changed while recording: {:?}", r.notes);
+        let _ = std::fs::remove_dir_all(&d);
+
+        // A slow log's averages are not a sample-by-sample input.
+        let slow = folder("derived-slow", "slow", r#"{"controller_ms": 10000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#, derived, "controller_ms,channel,count,mean,min,max\n10000,5027/ROB_1/J1,25,350,349,351\n");
+        let r = open(&slow, &[]).unwrap();
+        assert!(r.channel("sag:5027/ROB_1/J1").is_none());
+        assert!(r.notes.iter().any(|n| n.contains("slow log")), "{:?}", r.notes);
+        let _ = std::fs::remove_dir_all(&slow);
+    }
+
+    #[test]
     fn rows_on_both_sides_of_a_restart_map_to_their_own_anchor() {
         // A restart after a short uptime: the new clock's values (10002, 10006) lie
         // inside the old one's range, so only the rows can say which anchor applies.
@@ -592,7 +689,7 @@ mod tests {
     fn channel(t: Vec<i64>, v: Vec<f64>) -> ReviewChannel {
         let gap_ms = 6.0;
         let blocks = blocks(&t, &v, None, gap_ms);
-        ReviewChannel { id: "x".into(), key: None, entry: None, t, v, raw: None, band: None, text: Vec::new(), gap_ms, blocks }
+        ReviewChannel { id: "x".into(), key: None, entry: None, t, v, raw: None, band: None, text: Vec::new(), gap_ms, derived: None, blocks }
     }
 
     #[test]

@@ -282,7 +282,16 @@ impl SpyApp {
             if ch.v.is_empty() {
                 continue;
             }
-            let lane = (ch.key.as_ref().map_or(0, |k| k.signal), display(ch).0);
+            // A derived channel shares a chart only with its own kind (two DC links'
+            // sags), never with a recorded channel that happens to have its units.
+            let group = match (&ch.derived, &ch.key) {
+                (Some(spy_core::derived::Derived::Turn { .. }), _) => u32::MAX,
+                (Some(spy_core::derived::Derived::DutySum { .. }), _) => u32::MAX - 1,
+                (Some(spy_core::derived::Derived::Sag { .. }), _) => u32::MAX - 2,
+                (None, Some(k)) => k.signal,
+                (None, None) => 0,
+            };
+            let lane = (group, display(ch).0);
             match lanes.iter_mut().find(|(l, _)| *l == lane) {
                 Some((_, m)) => m.push(i),
                 None => lanes.push((lane, vec![i])),
@@ -508,7 +517,8 @@ impl SpyApp {
 /// signal means it: a wrapping angle's mean on the circle (computed in radians, then
 /// scaled). A zero-filled signal's padding was undone when the recording was opened.
 fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from: i64, to: i64) -> RangeStats {
-    let r = match ch.key.as_ref().map_or(view::Reading::Plain, |k| view::reading(cat.get(k.signal))) {
+    let recorded = ch.key.as_ref().map_or(view::Reading::Plain, |k| view::reading(cat.get(k.signal)));
+    let r = match ch.derived.as_ref().map_or(recorded, crate::derived_view::reading) {
         view::Reading::ZeroFilled => view::Reading::Plain,
         r => r,
     };

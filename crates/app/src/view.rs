@@ -35,6 +35,10 @@ pub enum Reading {
     /// An angle reduced to one turn, in radians (0..2pi): averaged on the circle, so
     /// a value dithering across the 2pi-to-0 jump does not average to half a turn.
     Wrapping,
+    /// A turn to a target, in degrees within (-180, 180]: read as its newest sample,
+    /// never averaged (half a turn either way would average to "on target"), and its
+    /// statistics taken on the circle.
+    Turn,
 }
 
 pub fn reading(sig: Option<&Signal>) -> Reading {
@@ -75,7 +79,10 @@ fn read_window(ring: &Ring, r: Reading, from: i64, to: i64) -> Vec<f64> {
 /// Padding undone for a zero-filled signal; the mean on the circle for a wrapping
 /// angle, or its newest sample when it turns too fast to average.
 pub fn readout(ring: &Ring, r: Reading) -> Option<f64> {
-    let (last_t, _) = ring.last()?;
+    let (last_t, newest) = ring.last()?;
+    if r == Reading::Turn {
+        return newest.is_finite().then_some(newest);
+    }
     let v: Vec<f64> = read_window(ring, r, last_t - READOUT_MS, last_t + 1).into_iter().filter(|x| x.is_finite()).collect();
     if v.is_empty() {
         return None;
@@ -121,6 +128,11 @@ pub fn stats_of(v: &[f64], r: Reading) -> crate::charts::RangeStats {
         let (mean, sd) = circle(&mut v.iter().copied().filter(|x| x.is_finite()), s.n);
         s.mean = mean.rem_euclid(std::f64::consts::TAU);
         s.sd = sd;
+    }
+    if r == Reading::Turn && s.n > 0 {
+        let (mean, sd) = circle(&mut v.iter().copied().filter(|x| x.is_finite()).map(f64::to_radians), s.n);
+        s.mean = mean.to_degrees();
+        s.sd = sd.to_degrees();
     }
     s
 }

@@ -129,14 +129,40 @@ fn the_slow_log_aggregates_per_interval() {
 }
 
 #[test]
+fn a_recording_keeps_the_derived_definitions_and_when_their_settings_changed() {
+    use spy_core::derived::Derived;
+    let keys = vec![key(4002, 1)];
+    let (_fake, s) = streaming(&keys);
+    let base = temp_dir("derived");
+    let rec = Recorder::start(&s, &base, "", None, &infos(&keys)).unwrap();
+    let sag = |p: Option<f64>| Derived::Sag { link: key(4002, 1), plateau_v: p };
+    let turn = Derived::Turn { angle: key(4002, 2), target_deg: None };
+    rec.derived(vec![sag(None)], None);
+    rec.derived(vec![sag(None), turn.clone()], Some("added a turn".into()));
+    std::thread::sleep(Duration::from_millis(300));
+    rec.derived(vec![sag(Some(100.0)), turn.clone()], Some("plateau".into()));
+    rec.derived(vec![sag(Some(100.0))], Some("removed the turn".into()));
+    std::thread::sleep(Duration::from_millis(300));
+    let st = rec.stop();
+    let back = recording::read(&st.dir).unwrap();
+    assert_eq!(back.meta.derived, vec![sag(Some(100.0))], "the last ones shown");
+    let kinds: Vec<(&str, &str)> = back.meta.events.iter().filter(|e| e.kind.starts_with("derived")).map(|e| (e.kind.as_str(), e.text.as_str())).collect();
+    assert_eq!(kinds, [("derived", "added a turn"), ("derived-setting", "plateau"), ("derived", "removed the turn")], "a setting's change told from an addition or removal");
+    assert!(back.meta.events.iter().filter(|e| e.kind.starts_with("derived")).all(|e| e.controller_ms.is_some()));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn save_the_last_seconds_from_history() {
     let keys = vec![key(4002, 1), key(6000, 1)];
     let (fake, s) = streaming(&keys);
     std::thread::sleep(Duration::from_millis(1500));
     let base = temp_dir("snap");
     let timeline = s.status().timeline.clone();
-    let (dir, rows) = recording::write_snapshot(&base, "trip", s.store(), &timeline, &keys, &infos(&keys), 0.5, "127.0.0.1:x", None).unwrap();
+    let shown = vec![spy_core::derived::Derived::Sag { link: key(4002, 1), plateau_v: Some(100.0) }];
+    let (dir, rows) = recording::write_snapshot(&base, "trip", s.store(), &timeline, &keys, &infos(&keys), 0.5, "127.0.0.1:x", None, &shown).unwrap();
     let back = recording::read(&dir).unwrap();
+    assert_eq!(back.meta.derived, shown, "the derived channels shown are kept, as definitions");
     assert_eq!(back.meta.kind, Kind::Snapshot);
     assert!(back.meta.complete);
     assert_eq!(back.meta.rows_written, rows);
@@ -152,7 +178,7 @@ fn save_the_last_seconds_from_history() {
     let csv = std::fs::read_to_string(dir.join("data.csv")).unwrap();
     let ts: Vec<i64> = csv.lines().skip(1).map(|l| l.split(',').next().unwrap().parse().unwrap()).collect();
     assert!(ts.windows(2).all(|w| w[1] >= w[0]));
-    assert!(recording::write_snapshot(&base, "x", s.store(), &timeline, &keys, &infos(&keys), -1.0, "", None).is_err());
+    assert!(recording::write_snapshot(&base, "x", s.store(), &timeline, &keys, &infos(&keys), -1.0, "", None, &[]).is_err());
     let _ = std::fs::remove_dir_all(&base);
 }
 

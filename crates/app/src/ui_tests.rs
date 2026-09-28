@@ -16,6 +16,7 @@ use spy_core::fake::{Behaviour, FakeController, SignalDef, SignalSource};
 use spy_core::session::{AskPolicy, Phase};
 
 use crate::app::SpyApp;
+use crate::view;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("spy-ui-{tag}-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
@@ -590,6 +591,195 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
     // A replacement refused leaves the channels as they were.
     assert!(!h.state_mut().replace_channels(Vec::new(), false));
     assert_eq!(h.state().chans.len(), 6);
+}
+
+/// The first card's menu, then one of its entries.
+fn card_menu(h: &mut Harness<'static, SpyApp>, card: usize, entry: &str) {
+    h.get_all_by_label("⋯").nth(card).unwrap_or_else(|| panic!("no card {card}")).click();
+    let _ = h.run_ok();
+    h.get_by_label(entry).click();
+    let _ = h.run_ok();
+}
+
+fn derived_health(h: &Harness<'static, SpyApp>, i: usize) -> view::Health {
+    let st = h.state().session.status().clone();
+    h.state().derived_health(i, &st)
+}
+
+#[test]
+fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
+    // 5138 at 1 rad (57.2958 deg).
+    let mut b = Behaviour::default();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let mut h = harness(temp_dir("turn"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5138, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    card_menu(&mut h, 0, "Turn to a target...");
+    assert_eq!(h.state().derived.len(), 1);
+    assert_eq!(derived_health(&h, 0), view::Health::Waiting, "no target yet");
+    assert!(h.query_by_label("ON TARGET").is_none());
+
+    let set = |h: &mut Harness<'static, SpyApp>, t: &str| {
+        h.state_mut().derived[0].target_text = t.into();
+        let _ = h.run_ok();
+        h.get_by_label("Set").click();
+        let _ = h.run_ok();
+    };
+    set(&mut h, "57.3");
+    assert!(wait(&mut h, 3000, |a| a.derived[0].live.lock().len() > 10));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("ON TARGET").is_some(), "0.004 deg from the target");
+    set(&mut h, "60");
+    assert!(wait(&mut h, 3000, |_| true));
+    assert!(h.query_by_label("+2.704").is_some(), "60 - 57.296: turn it forward 2.7 deg");
+    set(&mut h, "-300");
+    let _ = h.run_ok();
+    assert!(h.query_by_label("+2.704").is_some(), "-300 deg is 60 deg: the short way round");
+    set(&mut h, "50°");
+    let _ = h.run_ok();
+    assert!(h.query_by_label("-7.296").is_some(), "a target behind the angle: turn it back");
+    set(&mut h, "-300");
+    set(&mut h, "fifty");
+    assert!(h.state().derived[0].live.def() == &spy_core::derived::Derived::Turn { angle: h.state().chans[0].key.clone(), target_deg: Some(-300.0) }, "a word is refused, the target kept");
+
+    // The stream stops: the turn goes stale, and ON TARGET is never shown for it,
+    // on the card or on the phone.
+    set(&mut h, "57.3");
+    let _ = h.run_ok();
+    assert!(h.query_by_label("ON TARGET").is_some());
+    h.state_mut().settings.phone_port = 0;
+    h.get_by_label("Phone view").click();
+    assert!(wait(&mut h, 2000, |a| a.phone.is_some()));
+    let phone = |h: &mut Harness<'static, SpyApp>| {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = h.run_ok();
+        let body = h.state().phone_snapshot.lock().unwrap().body.clone();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        json["channels"].as_array().unwrap().iter().find(|c| c["name"] == "Turn to target  ROB_1 J1").cloned().unwrap_or_else(|| panic!("no turn in {body}"))
+    };
+    let row = phone(&mut h);
+    assert!(row["value"] == "ON TARGET" && row["stale"] == false, "{row}");
+    fake.with(|b| b.freeze = true);
+    assert!(wait(&mut h, 8000, |a| {
+        let st = a.session.status().clone();
+        a.derived_health(0, &st) != view::Health::Live
+    }));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("ON TARGET").is_none(), "a stale turn read ON TARGET");
+    assert!(h.query_by_label("+0.004").is_some(), "the number is shown instead, dimmed");
+    let row = phone(&mut h);
+    assert!(row["value"] == "+0.004" && row["stale"] == true, "{row}");
+    h.get_by_label("Phone view").click();
+}
+
+#[test]
+fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
+    let mut b = Behaviour::default();
+    for (n, v) in [(5020u32, 0.5f32), (5021, 0.6), (5022, 0.4)] {
+        b.signals.insert(n, SignalDef { source: SignalSource::float(move |_| v), sample_ms: 4.032 });
+    }
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("derived");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5020, "Add");
+    card_menu(&mut h, 0, "PWM duty sum of this axis");
+    let ids: Vec<String> = h.state().chans.iter().map(|c| c.key.id()).collect();
+    assert_eq!(ids, ["5020/ROB_1/J1", "5021/ROB_1/J1", "5022/ROB_1/J1"], "the other two legs came with it");
+    assert!(wait(&mut h, 5000, |a| a.derived[0].live.lock().len() > 20));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("1.50000").is_some(), "0.5 + 0.6 + 0.4");
+    assert_eq!(derived_health(&h, 0), view::Health::Live);
+    let d_lane = (h.state().derived[0].lane, String::new());
+    assert!(h.state().lanes(&[true; 3]).contains(&d_lane), "the sum has a chart of its own");
+    // Saved with what is in view, under an id that says what it is computed from.
+    assert!(wait(&mut h, 2000, |a| a.view_ms.is_some()));
+    h.get_by_label("Save CSV").click();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
+    let csv = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
+    let sums: Vec<f64> = csv.lines().filter(|r| r.contains(",duty-sum:ROB_1/J1,\"PWM duty sum ROB_1 J1\",\"\",")).map(|r| r.rsplit(',').next().unwrap().parse().unwrap()).collect();
+    assert!(sums.len() > 20 && sums.iter().all(|v| (v - 1.5).abs() < 1e-6), "{} sums", sums.len());
+    for f in files_ending(&dir.join("recordings"), " view.csv") {
+        std::fs::remove_file(f).unwrap();
+    }
+
+    // The DC link's sag: no plateau from too short a history, or an unsteady one.
+    add_via_dialog(&mut h, 5027, "Add");
+    card_menu(&mut h, 3, "Sag below a plateau");
+    assert_eq!(h.state().derived.len(), 2);
+    h.get_by_label("Set the plateau").click();
+    let _ = h.run_ok();
+    assert!(!h.state().derived[1].live.def().is_set(), "set from a fraction of a second");
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 350.0 } else { 360.0 }), sample_ms: 4.032 }));
+    std::thread::sleep(Duration::from_millis(2300));
+    let _ = h.run_ok();
+    h.get_by_label("Set the plateau").click();
+    let _ = h.run_ok();
+    assert!(!h.state().derived[1].live.def().is_set(), "set from a DC link swinging 10 V");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("not steady")), "and says why");
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 356.5), sample_ms: 4.032 }));
+    std::thread::sleep(Duration::from_millis(2300));
+    let _ = h.run_ok();
+    h.get_by_label("Set the plateau").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().derived[1].live.def(), &spy_core::derived::Derived::Sag { link: h.state().chans[3].key.clone(), plateau_v: Some(356.5) });
+
+    // A dip of 10 V, recorded; the review computes the sag again from the recording.
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 346.5), sample_ms: 4.032 }));
+    assert!(wait(&mut h, 3000, |a| a.derived[1].live.lock().last().is_some_and(|(_, v)| v == 10.0)));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("10.0000").is_some() && h.query_by_label("2.81% below").is_some());
+    std::thread::sleep(Duration::from_millis(300));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    let meta = spy_core::recording::read_meta(&folder).unwrap();
+    assert_eq!(meta.derived.len(), 2, "the definitions, not the values");
+    let data = std::fs::read_to_string(folder.join("data.csv")).unwrap();
+    assert!(!data.contains("sag") && !data.contains("duty"), "no derived values written as data");
+    let review = spy_core::review::open(&folder, &[]).unwrap();
+    let sag = review.channels.iter().find(|c| c.id == "sag:5027/ROB_1/J1").expect("the sag, computed again");
+    assert!(sag.v.contains(&10.0), "{:?}", &sag.v[..sag.v.len().min(5)]);
+    let sum = review.channels.iter().find(|c| c.id == "duty-sum:ROB_1/J1").unwrap();
+    assert!(sum.v.len() > 50 && sum.v.iter().all(|v| (v - 1.5).abs() < 1e-6));
+
+    // An input removed takes its derived channel with it.
+    card_menu(&mut h, 1, "Remove");
+    assert_eq!(h.state().derived.len(), 1);
+    assert_eq!(h.state().derived[0].live.def().kind_name(), "DC-link sag");
+}
+
+#[test]
+fn derived_channels_come_back_without_their_plateau() {
+    let dir = temp_dir("derived-persist");
+    {
+        let mut h = harness(dir.clone(), AskPolicy::Remote);
+        add_via_dialog(&mut h, 5138, "Add");
+        add_via_dialog(&mut h, 5027, "Add");
+        let k = h.state().chans[0].key.clone();
+        let l = h.state().chans[1].key.clone();
+        assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k.clone(), target_deg: None }));
+        assert!(h.state_mut().add_derived(spy_core::derived::Derived::Sag { link: l.clone(), plateau_v: None }));
+        assert!(!h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k.clone(), target_deg: Some(1.0) }), "the same one twice");
+        h.state_mut().derived[0].live.set(spy_core::derived::Derived::Turn { angle: k, target_deg: Some(90.0) });
+        h.state_mut().derived[1].live.set(spy_core::derived::Derived::Sag { link: l, plateau_v: Some(356.5) });
+        h.state_mut().save_settings();
+    }
+    let file = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    assert!(file.contains("\"target_deg\": 90.0") && !file.contains("356.5"), "no plateau in the file: {file}");
+    let h = harness(dir, AskPolicy::Remote);
+    let defs: Vec<spy_core::derived::Derived> = h.state().derived.iter().map(|d| d.live.def().clone()).collect();
+    assert_eq!(defs.len(), 2);
+    assert!(matches!(defs[0], spy_core::derived::Derived::Turn { target_deg: Some(t), .. } if t == 90.0), "a target is the person's: kept");
+    assert!(matches!(defs[1], spy_core::derived::Derived::Sag { plateau_v: None, .. }), "a plateau was the controller's of the moment: not kept");
+    assert_eq!(h.state().derived[0].target_text, "90.0000");
 }
 
 #[test]

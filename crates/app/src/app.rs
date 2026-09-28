@@ -119,6 +119,8 @@ pub struct SpyApp {
     pub only_favourites: bool,
     pub add: Option<AddDialog>,
     pub sets: Option<crate::sets::SetDialog>,
+    /// Derived channels, computed from channels in `chans`.
+    pub derived: Vec<crate::derived_view::DerivedView>,
 
     pub window_s: f64,
     pub paused_at: Option<i64>,
@@ -257,6 +259,7 @@ impl SpyApp {
             only_favourites: false,
             add: None,
             sets: None,
+            derived: Vec::new(),
             window_s,
             paused_at: None,
             pause_fresh: false,
@@ -319,6 +322,29 @@ impl SpyApp {
             }
         }
         app.sync_channels();
+        // And the derived channels whose inputs came back with them.
+        for d in app.settings.derived.clone() {
+            if app.derived.iter().any(|x| x.live.def().same(&d.def)) {
+                continue;
+            }
+            if let Some(k) = d.def.inputs().into_iter().find(|k| !app.chans.iter().any(|c| &c.key == k)) {
+                app.log.warn(format!("{} was not restored: its input {k} is not among the channels.", app.derived_label(&d.def)));
+                continue;
+            }
+            let lane = if d.lane == 0 {
+                app.next_lane += 1;
+                app.next_lane - 1
+            } else {
+                app.next_lane = app.next_lane.max(d.lane + 1);
+                d.lane
+            };
+            let color = chan_color(app.chans.len() + app.derived.len());
+            let target_text = match &d.def {
+                spy_core::derived::Derived::Turn { target_deg: Some(t), .. } => view::fmt(*t),
+                _ => String::new(),
+            };
+            app.derived.push(crate::derived_view::DerivedView { live: spy_core::derived::Live::new(d.def), color, lane, stats: Stats::default(), target_text });
+        }
         // On screen, not only in the log: something the person wrote was not used.
         if let Some(n) = note {
             app.toast(Level::Warn, n);
@@ -350,6 +376,18 @@ impl SpyApp {
             .iter()
             .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane })
             .collect();
+        // A plateau is not kept: it was measured on the controller of the moment.
+        self.settings.derived = self
+            .derived
+            .iter()
+            .map(|d| {
+                let def = match d.live.def() {
+                    spy_core::derived::Derived::Sag { link, .. } => spy_core::derived::Derived::Sag { link: link.clone(), plateau_v: None },
+                    other => other.clone(),
+                };
+                crate::settings::SavedDerived { def, lane: d.lane }
+            })
+            .collect();
         if let Err(e) = self.settings.save(&self.settings_path) {
             self.log.warn(format!("Could not save the settings: {e}"));
         }
@@ -372,6 +410,7 @@ impl SpyApp {
         for (i, c) in self.chans.iter_mut().enumerate() {
             c.color = chan_color(i);
         }
+        self.prune_derived();
         self.mark_settings_dirty();
     }
 
@@ -1079,6 +1118,19 @@ impl SpyApp {
                 "status": h.word(),
             }));
         }
+        for i in 0..self.derived.len() {
+            let h = self.derived_health(i, &st);
+            let def = self.derived[i].live.def();
+            let v = view::readout(&self.derived[i].live.lock(), crate::derived_view::reading(def));
+            let (value, on_target) = crate::derived_view::value_text(def, v, h.is_live());
+            chans.push(serde_json::json!({
+                "name": self.derived_label(def),
+                "value": value,
+                "units": if on_target { "" } else { def.units() },
+                "stale": !h.is_live(),
+                "status": h.word(),
+            }));
+        }
         let state = match &st.phase {
             Phase::Streaming => "Streaming".to_string(),
             p => format!("{p:?}"),
@@ -1107,6 +1159,7 @@ impl eframe::App for SpyApp {
         self.take_screenshot(&ctx);
         self.shortcuts(&ctx);
         self.update_stats();
+        self.update_derived();
 
         egui::Panel::top("top").show(ui, |ui| {
             self.menu(ui);
