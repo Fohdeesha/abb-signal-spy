@@ -42,6 +42,16 @@ pub struct RwsBehaviour {
     /// Log an event right after serving the event log's first page: one logged
     /// between two page reads of a client.
     pub log_between_pages: bool,
+    /// Answer this many of the next `/rw/system` requests with 503 (a controller busy
+    /// or a request lost), then normally again.
+    pub fail_system: u32,
+    /// The login challenge (401) sets a cookie of its own, as a server may.
+    pub challenge_cookie: bool,
+    /// Serve `/ctrl/identity` (a RobotWare without it answers 404).
+    pub identity: bool,
+    /// Answer this many of the next requests that logged in with 503 (the login taken,
+    /// its session given, the answer itself lost).
+    pub fail_after_login: u32,
 }
 
 impl Default for RwsBehaviour {
@@ -58,6 +68,10 @@ impl Default for RwsBehaviour {
             events: Vec::new(),
             calib: (1..=6).map(|a| (format!("rob1_{a}"), 1.5707999, true, 0.1 * f64::from(a), true)).collect(),
             log_between_pages: false,
+            fail_system: 0,
+            challenge_cookie: false,
+            identity: true,
+            fail_after_login: 0,
         }
     }
 }
@@ -72,6 +86,8 @@ struct State {
     logins: u32,
     /// The nonce count (`nc`) of every Digest answer.
     nonce_counts: Vec<String>,
+    /// The Cookie header of every request ("" for none).
+    cookies_sent: Vec<String>,
 }
 
 pub struct FakeRws {
@@ -160,6 +176,11 @@ impl FakeRws {
         lock(&self.state).nonce_counts.clone()
     }
 
+    /// The Cookie header of every request so far ("" for none).
+    pub fn cookies_sent(&self) -> Vec<String> {
+        lock(&self.state).cookies_sent.clone()
+    }
+
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
@@ -198,7 +219,10 @@ fn serve(mut s: TcpStream, st: &Mutex<State>) {
     let (method, path) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
     let header = |name: &str| text.split("\r\n").skip(1).filter_map(|l| l.split_once(':')).find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string());
     let mut g = lock(st);
+    // A request that says it carries a body is marked: the client never sends one.
+    let method = if header("content-length").is_some() || header("transfer-encoding").is_some() { format!("{method}+body") } else { method };
     g.requests.push((method.clone(), path.clone()));
+    g.cookies_sent.push(header("cookie").unwrap_or_default());
     if method != "GET" {
         return respond(&mut s, "405 Method Not Allowed", "", "{}");
     }
@@ -220,16 +244,28 @@ fn serve(mut s: TcpStream, st: &Mutex<State>) {
         if !answered {
             let nonce = format!("{:x}", pc_now() as u64 ^ (g.requests.len() as u64) << 20);
             g.nonces.insert(nonce.clone());
-            return respond(&mut s, "401 Unauthorized", &format!("WWW-Authenticate: Digest realm=\"validusers@robapi.abb\", qop=\"auth\", nonce=\"{nonce}\", algorithm=MD5\r\n"), "");
+            let cookie = if g.b.challenge_cookie { "Set-Cookie: ABBCX=challenge; path=/\r\n" } else { "" };
+            return respond(&mut s, "401 Unauthorized", &format!("WWW-Authenticate: Digest realm=\"validusers@robapi.abb\", qop=\"auth\", nonce=\"{nonce}\", algorithm=MD5\r\n{cookie}"), "");
         }
         g.logins += 1;
         let id = format!("{}::http.session::{:x}", g.logins, pc_now() as u64 ^ 0x5a5a);
         g.sessions.insert(id.clone());
         set_cookie = format!("Set-Cookie: -http-session-={id}; path=/; httponly\r\nSet-Cookie: ABBCX={}; path=/; httponly\r\n", g.requests.len());
+        if g.b.fail_after_login > 0 {
+            g.b.fail_after_login -= 1;
+            return respond(&mut s, "503 Service Unavailable", &set_cookie, "");
+        }
     }
     let (p, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
     let q = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}="))).and_then(|v| v.parse::<usize>().ok());
     let doc = |items: String| format!("{{\"_links\":{{\"base\": {{ \"href\": \"http://127.0.0.1/\" }}}},\"_embedded\" :{{ \"_state\":[ {items} ] }}}}");
+    if p == "/ctrl/identity" && !g.b.identity {
+        return respond(&mut s, "404 Not Found", &set_cookie, "");
+    }
+    if p == "/rw/system" && g.b.fail_system > 0 {
+        g.b.fail_system -= 1;
+        return respond(&mut s, "503 Service Unavailable", &set_cookie, "");
+    }
     let b = g.b.clone();
     drop(g);
     let body = match p {
@@ -343,6 +379,121 @@ mod tests {
         assert!(other(c.clock().map(|_| ())));
         assert!(other(c.events(10, 1).map(|_| ())));
         assert!(other(c.motor_calib("rob1_1").map(|_| ())));
+    }
+
+    #[test]
+    fn the_request_that_logs_in_at_another_controller_returns_nothing_of_it() {
+        // The first login again after the check lands on another controller: what that
+        // very request read is not returned.
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        let id = f.with(|b| b.system_id.clone());
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics").expect_system(&id);
+        c.system().unwrap();
+        f.replace_controller("{22222222-2222-4222-8222-222222222222}");
+        f.push_event(20205, 3, "the other controller's");
+        let page = c.events(10, 1);
+        assert!(matches!(page, Err(RwsError::OtherController { .. })), "the other controller's log returned: {page:?}");
+    }
+
+    #[test]
+    fn a_session_whose_check_failed_is_checked_again_before_anything_is_used() {
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        let id = f.with(|b| b.system_id.clone());
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics").expect_system(&id);
+        c.system().unwrap();
+        let mut poll = EventPoll::default();
+        poll.look(&mut c).unwrap();
+        // Another controller at the address, whose /rw/system fails the first time it
+        // is asked: that look fails, and its new session is still unchecked.
+        f.replace_controller("{22222222-2222-4222-8222-222222222222}");
+        f.with(|b| b.fail_system = 1);
+        f.push_event(20205, 3, "the other controller's");
+        assert!(poll.look(&mut c).is_err());
+        let next = poll.look(&mut c);
+        assert!(matches!(next, Err(RwsError::OtherController { .. })), "read from an unchecked session: {next:?}");
+    }
+
+    #[test]
+    fn a_session_whose_first_answer_was_lost_is_checked_before_it_is_used() {
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        let id = f.with(|b| b.system_id.clone());
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics").expect_system(&id);
+        let mut poll = EventPoll::default();
+        poll.look(&mut c).unwrap();
+        // Another controller at the address: a look logs in there, gets its session,
+        // and the answer is lost. That session must be checked before it is used.
+        f.replace_controller("{22222222-2222-4222-8222-222222222222}");
+        f.with(|b| b.fail_after_login = 1);
+        f.push_event(20205, 3, "the other controller's");
+        assert!(poll.look(&mut c).is_err());
+        let next = poll.look(&mut c);
+        assert!(matches!(next, Err(RwsError::OtherController { .. })), "read from an unchecked session: {next:?}");
+    }
+
+    #[test]
+    fn one_unreadable_event_does_not_hide_the_others() {
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        f.push_event(10000, 1, "before");
+        f.with(|b| {
+            let id = b.events.last().unwrap().id + 1;
+            b.events.push(FakeEvent { id, code: 66666, severity: 3, time: 1_200_000_000_000_000, title: "stamped in year 38 million".into() });
+        });
+        f.push_event(10001, 1, "after");
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
+        let got = EventPoll::default().look(&mut c).unwrap();
+        assert_eq!(got.events.iter().map(|e| e.code).collect::<Vec<_>>(), [10000, 10001]);
+        assert_eq!(got.unreadable, 1, "said, not hidden");
+    }
+
+    #[test]
+    fn a_cleared_or_renumbered_log_is_read_again() {
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        for i in 0..5 {
+            f.push_event(10000 + i, 1, "old");
+        }
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
+        let mut poll = EventPoll::default();
+        poll.look(&mut c).unwrap();
+        // Cleared on the FlexPendant: ids start again below the newest seen.
+        f.with(|b| b.events.clear());
+        f.push_event(20000, 2, "after the clear");
+        let got = poll.look(&mut c).unwrap();
+        assert_eq!(got.events.iter().map(|e| e.code).collect::<Vec<_>>(), [20000], "the new event vanished");
+        assert!(got.renumbered);
+        f.push_event(20001, 2, "and the next");
+        assert_eq!(poll.look(&mut c).unwrap().events.iter().map(|e| e.code).collect::<Vec<_>>(), [20001]);
+    }
+
+    #[test]
+    fn a_poll_that_knows_an_event_reads_back_to_it() {
+        // Logged in again: what happened meanwhile is read back to the newest event
+        // already known, not just the newest page.
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        let ids: Vec<u64> = (0..30).map(|i| f.push_event(10000 + i, 1, "e")).collect();
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
+        let got = EventPoll::after(ids[4]).look(&mut c).unwrap();
+        assert_eq!(got.events.iter().map(|e| e.code).collect::<Vec<_>>(), (10005..10030).collect::<Vec<_>>());
+        assert!(!got.skipped);
+    }
+
+    #[test]
+    fn a_cookie_set_with_the_challenge_goes_with_the_login() {
+        let f = FakeRws::start(RwsBehaviour { challenge_cookie: true, ..Default::default() }).unwrap();
+        let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
+        c.system().unwrap();
+        let sent = f.cookies_sent();
+        assert_eq!(sent[0], "", "the first request carries none");
+        assert!(sent[1].contains("ABBCX=challenge"), "the login went without it: {sent:?}");
+    }
+
+    #[test]
+    fn a_request_with_a_body_is_marked() {
+        let f = FakeRws::start(RwsBehaviour::default()).unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", f.port())).unwrap();
+        s.write_all(b"GET /rw/system?json=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out);
+        assert_eq!(f.requests()[0].0, "GET+body");
     }
 
     #[test]

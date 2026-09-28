@@ -129,6 +129,10 @@ pub struct SpyApp {
     pub rws_poll: Duration,
     pub show_rws: bool,
     pub controller_events: Vec<crate::rws_view::ControllerEvent>,
+    /// Recordings just closed that controller events still on their way belong to.
+    pub late_windows: Vec<crate::rws_view::LateWindow>,
+    /// The stretch (UTC ms) a "Save last" being written covers.
+    pub snapshot_span: Option<(i64, i64)>,
 
     pub window_s: f64,
     pub paused_at: Option<i64>,
@@ -273,6 +277,8 @@ impl SpyApp {
             rws_poll: crate::rws_view::POLL,
             show_rws: false,
             controller_events: Vec::new(),
+            late_windows: Vec::new(),
+            snapshot_span: None,
             window_s,
             paused_at: None,
             pause_fresh: false,
@@ -745,6 +751,9 @@ impl SpyApp {
                 match j.join() {
                     Ok(Ok((dir, rows))) => {
                         self.toast(Level::Info, format!("Saved {rows} samples to {}", dir.display()));
+                        if let Some((from, to)) = self.snapshot_span.take() {
+                            self.rws_after_recording(dir.clone(), from, to);
+                        }
                         self.last_folder = Some(dir);
                     }
                     Ok(Err(e)) => self.toast(Level::Error, format!("Could not save: {e}")),

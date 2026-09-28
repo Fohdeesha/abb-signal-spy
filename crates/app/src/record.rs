@@ -23,6 +23,10 @@ fn clock(secs: u64) -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 impl SpyApp {
     pub fn record_controls(&mut self, ui: &mut egui::Ui) {
         let have = !self.chans.is_empty();
@@ -53,6 +57,9 @@ impl SpyApp {
                             RecState::Failed(e) => self.toast(Level::Error, format!("The recording ended with an error: {e}")),
                             _ => self.toast(Level::Info, format!("Recorded {} rows to {}", s.rows, s.dir.display())),
                         }
+                        // Controller events of its last seconds are still on their way.
+                        let to = now_ms();
+                        self.rws_after_recording(s.dir.clone(), to - s.started.elapsed().as_millis() as i64, to);
                         self.last_folder = Some(s.dir);
                     }
                 if s.lost > 0 {
@@ -77,6 +84,8 @@ impl SpyApp {
             let controller = st.target.as_ref().map(|t| t.to_string()).unwrap_or_default();
             let system_id = st.announce.as_ref().and_then(|a| a.system_id.clone());
             let derived: Vec<_> = self.derived.iter().map(|d| d.live.def().clone()).collect();
+            let to = now_ms();
+            self.snapshot_span = Some((to - (secs * 1000.0) as i64, to));
             let ctx = self.ctx.clone();
             self.snapshot_job = Some(std::thread::spawn(move || {
                 let r = recording::write_snapshot(&dir, &label, &store, &st.timeline, &keys, &infos, secs, &controller, system_id, &derived);
@@ -117,6 +126,8 @@ impl SpyApp {
                             RecState::Failed(e) => self.toast(Level::Error, format!("The slow log ended with an error: {e}")),
                             _ => self.toast(Level::Info, format!("Slow log: {} rows in {}", s.rows, s.dir.display())),
                         }
+                        let to = now_ms();
+                        self.rws_after_recording(s.dir.clone(), to - s.started.elapsed().as_millis() as i64, to);
                     }
                 if let Some(w) = &s.warning {
                     ui.label(RichText::new("⚠").color(theme::WARN)).on_hover_text(w);

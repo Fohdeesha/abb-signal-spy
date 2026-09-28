@@ -784,9 +784,14 @@ fn derived_channels_come_back_without_their_plateau() {
 
 /// A fake controller and its RWS, one system, the app logged in to both.
 fn with_rws(b: Behaviour, tag: &str) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>, PathBuf) {
+    with_rws_as(b, spy_core::fake_rws::RwsBehaviour::default(), tag)
+}
+
+/// The same, with the RWS stand-in's behaviour given (its system id is the fake's).
+fn with_rws_as(b: Behaviour, rb: spy_core::fake_rws::RwsBehaviour, tag: &str) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>, PathBuf) {
     let id = b.system_id.clone();
     let fake = FakeController::start(b).unwrap();
-    let rws = spy_core::fake_rws::FakeRws::start(spy_core::fake_rws::RwsBehaviour { system_id: id, ..Default::default() }).unwrap();
+    let rws = spy_core::fake_rws::FakeRws::start(spy_core::fake_rws::RwsBehaviour { system_id: id, ..rb }).unwrap();
     let dir = temp_dir(tag);
     let mut h = harness(dir.clone(), AskPolicy::Remote);
     h.state_mut().settings.rws_port = rws.port();
@@ -811,15 +816,17 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     let (_fake, rws, mut h, dir) = with_rws(b, "rws");
     add_via_dialog(&mut h, 4002, "Add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    // An event from before the recording, which the first look after logging in reads.
+    // An event from before the recording, which the first look after logging in reads:
+    // well before it, past the slack whole-second stamps need (2 s) and their placing
+    // error (a second).
     rws.push_event(10000, 1, "Before the recording");
-    std::thread::sleep(Duration::from_millis(1100));
+    std::thread::sleep(Duration::from_millis(3300));
     h.get_by_label("● REC").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready() && a.controller_events.iter().any(|e| e.code == 10000)), "not logged in");
     assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some(), "the session line names the controller");
-    assert!(h.query_by_label_contains("-4 h 00 min from UTC").is_some(), "its clock, from UTC");
+    assert!(h.query_by_label_contains("-4 h 00 min from UTC (its local time").is_some(), "its clock, from UTC");
 
     // Recorded, and on the charts at the time it happened.
     std::thread::sleep(Duration::from_millis(1100));
@@ -915,6 +922,9 @@ fn a_commutator_offset_from_another_controller_is_not_taken_and_rws_stops() {
     add_via_dialog(&mut h, 5138, "Add");
     let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
+    // Looks far apart: the clock is read every twelfth, well after this test ends, so
+    // only the commutator offset's own read can find the other controller.
+    h.state_mut().rws_poll = Duration::from_secs(3);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     // The event log off: the commutator offset is the only thing read.
@@ -935,6 +945,203 @@ fn rws_stops_and_says_so_after_an_internal_error() {
     h.state().crash_rws_for_test();
     assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "a dead RWS thread still shown logged in");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("internal error")), "said why");
+}
+
+fn log_texts(h: &Harness<'static, SpyApp>) -> Vec<String> {
+    h.state().log.since(0).into_iter().map(|e| e.text).collect()
+}
+
+/// The controller events a recording folder's recording.json kept.
+fn kept_events(folder: &std::path::Path) -> Vec<String> {
+    spy_core::recording::read_meta(folder).map(|m| m.events.into_iter().filter(|e| e.kind == "controller-event").map(|e| e.text).collect()).unwrap_or_default()
+}
+
+fn only_recording(dir: &std::path::Path) -> PathBuf {
+    std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path()
+}
+
+/// REC with one channel streaming.
+fn start_recording(h: &mut Harness<'static, SpyApp>) {
+    add_via_dialog(h, 4002, "Add");
+    assert!(wait(h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    h.get_by_label("● REC").click();
+    assert!(wait(h, 2000, |a| a.recorder.is_some()));
+}
+
+#[test]
+fn a_login_again_during_a_recording_files_no_event_twice_and_reads_back_what_it_missed() {
+    let (_fake, rws, mut h, dir) = with_rws(Behaviour::default(), "rws-again");
+    start_recording(&mut h);
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    rws.push_event(10010, 1, "first");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 10010)));
+    // Out and in again with two events meanwhile: the first comes back in the newest page.
+    h.get_by_label("Log out").click();
+    let _ = h.run_ok();
+    rws.push_event(20000, 1, "meanwhile");
+    rws.push_event(20001, 1, "meanwhile");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 20001)));
+    // Again, with more than a page meanwhile: all of them, not just the newest page.
+    h.get_by_label("Log out").click();
+    let _ = h.run_ok();
+    for i in 0..12 {
+        rws.push_event(30000 + i, 1, "meanwhile");
+    }
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 30011)));
+    std::thread::sleep(Duration::from_millis(400));
+    let _ = h.run_ok();
+    let codes: Vec<u32> = h.state().controller_events.iter().map(|e| e.code).collect();
+    let want: Vec<u32> = [10010, 20000, 20001].into_iter().chain(30000..30012).collect();
+    assert_eq!(codes, want, "each event once, none missed");
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let kept = kept_events(&only_recording(&dir));
+    for code in &want {
+        assert_eq!(kept.iter().filter(|t| t.starts_with(&format!("{code} "))).count(), 1, "{code} in the recording: {kept:?}");
+    }
+}
+
+#[test]
+fn an_unreadable_controller_event_is_said_and_the_rest_arrive() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-unreadable");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    rws.with(|b| {
+        let id = b.events.last().map_or(1000, |e| e.id + 1);
+        b.events.push(spy_core::fake_rws::FakeEvent { id, code: 66666, severity: 3, time: 1_200_000_000_000_000, title: "stamped in year 38 million".into() });
+    });
+    rws.push_event(10010, 1, "readable");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 10010)));
+    assert!(h.state().rws_ready());
+    assert!(log_texts(&h).iter().any(|t| t.contains("could not be read")), "the unreadable entry is not said");
+}
+
+#[test]
+fn the_clock_offset_follows_a_change_of_the_controllers_clock() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-clock");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    // Its clock set an hour on (a DST change, or someone correcting it).
+    rws.with(|b| b.clock_offset_s += 3600);
+    rws.push_event(10010, 1, "after the change");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 10010)));
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let e = h.state().controller_events.iter().find(|e| e.code == 10010).unwrap().clone();
+    assert!((now_ms - e.utc_ms).abs() < 3000, "placed {} s from when it happened", (now_ms - e.utc_ms) / 1000);
+    assert!(wait(&mut h, 2000, |_| true) && h.query_by_label_contains("-3 h 00 min from UTC (its local time").is_some(), "the window still shows the old offset");
+}
+
+#[test]
+fn with_the_event_log_off_a_refused_login_still_ends_rws() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-off-refused");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
+    let _ = h.run_ok();
+    // The password changed on the controller, and the session timed out.
+    rws.with(|b| b.password = "changed".into());
+    rws.expire_sessions();
+    assert!(wait(&mut h, 6000, |a| a.rws.is_none()), "shown logged in though the controller refuses the login");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("refused the login")));
+}
+
+#[test]
+fn rws_log_lines_carry_no_login_and_say_when_an_event_happened() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-log");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    assert!(!log_texts(&h).iter().any(|t| t.contains("Default User")), "the user name reached the log file");
+    rws.push_event(20205, 3, "Auto stop open");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 20205)));
+    let e = h.state().controller_events.iter().find(|e| e.code == 20205).unwrap().clone();
+    let at = std::time::UNIX_EPOCH + Duration::from_millis(e.utc_ms as u64);
+    let (_, _, _, hh, mm, ss, _) = spy_core::util::local_parts(at).unwrap();
+    let line = log_texts(&h).into_iter().find(|t| t.contains("20205")).expect("an error event is logged");
+    assert!(line.contains(&format!("{hh:02}:{mm:02}:{ss:02}")), "the log does not say when it happened: {line}");
+}
+
+#[test]
+fn the_rws_window_shows_the_login_while_infostream_reconnects() {
+    let (mut fake, _rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-reconnecting");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    fake.stop();
+    assert!(wait(&mut h, 5000, |a| matches!(phase(a), Phase::Reconnecting { .. })));
+    assert!(h.state().rws.is_some(), "kept while InfoStream reconnects to the same address");
+    assert!(h.query_by_label("Log out").is_some(), "the window hides a login still in use");
+    assert!(h.query_by_label_contains("Connect to the controller first").is_none());
+}
+
+#[test]
+fn rws_does_without_the_controllers_identity() {
+    let rb = spy_core::fake_rws::RwsBehaviour { identity: false, ..Default::default() };
+    let (_fake, _rws, mut h, _dir) = with_rws_as(Behaviour::default(), rb, "rws-no-identity");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()), "a display name made RWS unusable");
+    assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some());
+}
+
+#[test]
+fn the_rws_password_goes_when_the_connection_ends() {
+    let (_fake, _rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-password");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    h.get_by_label("Disconnect").click();
+    assert!(wait(&mut h, 5000, |a| a.rws.is_none()));
+    assert!(h.state().rws_form.password.is_empty(), "the password outlived the session");
+}
+
+#[test]
+fn events_already_on_their_way_when_the_session_ends_are_kept() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-drain");
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    rws.push_event(10010, 1, "on its way");
+    // The RWS thread sends it while the window draws nothing; then the session ends.
+    std::thread::sleep(Duration::from_millis(600));
+    h.state().session.crash_for_test();
+    let end = Instant::now() + Duration::from_secs(5);
+    while !matches!(h.state().session.status().phase, Phase::Stopped { .. }) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = h.run_ok();
+    assert!(h.state().rws.is_none());
+    assert!(h.state().controller_events.iter().any(|e| e.code == 10010), "an event already received was dropped with the link");
+}
+
+#[test]
+fn controller_events_that_arrive_after_stop_reach_the_recording() {
+    let (_fake, rws, mut h, dir) = with_rws(Behaviour::default(), "rws-late");
+    start_recording(&mut h);
+    // Looks far apart: an event logged just before STOP arrives after it.
+    h.state_mut().rws_poll = Duration::from_secs(4);
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    std::thread::sleep(Duration::from_millis(300));
+    rws.push_event(50204, 3, "Motion supervision");
+    std::thread::sleep(Duration::from_millis(200));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = only_recording(&dir);
+    assert!(wait(&mut h, 1500, |_| kept_events(&folder).iter().any(|t| t.starts_with("50204 "))), "the trip's controller event missed its recording: {:?}", kept_events(&folder));
+}
+
+#[test]
+fn save_last_keeps_the_controller_events_of_its_stretch() {
+    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-save-last");
+    add_via_dialog(&mut h, 4002, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()));
+    rws.push_event(20205, 3, "Auto stop open");
+    assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 20205)));
+    h.get_by_label("Save last").click();
+    assert!(wait(&mut h, 5000, |a| a.snapshot_job.is_none() && a.last_folder.is_some()));
+    let folder = h.state().last_folder.clone().unwrap();
+    assert!(wait(&mut h, 1500, |_| kept_events(&folder).iter().any(|t| t.starts_with("20205 "))), "{:?}", kept_events(&folder));
 }
 
 #[test]

@@ -236,6 +236,10 @@ pub fn new_folder(base: &Path, label: &str) -> Result<PathBuf, String> {
 
 fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
     let body = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())? + "\n";
+    write_meta_text(dir, &body)
+}
+
+fn write_meta_text(dir: &Path, body: &str) -> Result<(), String> {
     let tmp = dir.join("recording.json.tmp");
     let fin = dir.join("recording.json");
     // On disk before the rename: after a power cut the renamed file could otherwise
@@ -889,6 +893,40 @@ pub fn read_meta(dir: &Path) -> Result<Meta, String> {
     Ok(meta)
 }
 
+/// Add events to a recording already written: the controller's event log is looked
+/// at every few seconds, so an event from its last moments can arrive after it
+/// closed. One already there is not added again; the events stay in time order, and
+/// the rest of the file is kept exactly as it is. How many were added.
+pub fn append_events(dir: &Path, add: &[EventEntry]) -> Result<usize, String> {
+    let text = std::fs::read_to_string(dir.join("recording.json")).map_err(|e| format!("cannot read recording.json: {e}"))?;
+    let mut doc: serde_json::Value = serde_json::from_str(crate::util::strip_bom(&text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
+    if doc["format"] != FORMAT {
+        return Err("recording.json is not an ABB Signal Spy recording".into());
+    }
+    let mut events: Vec<EventEntry> = serde_json::from_value(doc["events"].clone()).unwrap_or_default();
+    let before = events.len();
+    for e in add {
+        if !events.contains(e) {
+            events.push(e.clone());
+        }
+    }
+    let added = events.len() - before;
+    if added == 0 {
+        return Ok(0);
+    }
+    events.sort_by(|a, b| a.utc.cmp(&b.utc));
+    doc["events"] = serde_json::to_value(&events).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n";
+    let end = Instant::now() + Duration::from_millis(500);
+    loop {
+        match write_meta_text(dir, &body) {
+            Ok(()) => return Ok(added),
+            Err(e) if Instant::now() >= end => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
 /// Read a recording folder. Rows that do not parse are skipped and reported, not
 /// fatal: a recording cut short by a crash ends in a partial line. The CSV is read
 /// as CSV (a quoted string may hold commas, quotes and line breaks), a row at a
@@ -1284,6 +1322,30 @@ mod tests {
         assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
         assert_eq!(read(&st.dir).unwrap().meta.system_id.as_deref(), Some("{A}"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn events_that_arrive_late_are_added_once_in_time_order_and_nothing_else_changes() {
+        let dir = temp("append");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut meta = Meta::new(Kind::Full, "test", "127.0.0.1:1", Some("{S}".into()));
+        meta.version = 1;
+        meta.events.push(EventEntry { utc: "2026-09-28T10:00:02.000Z".into(), kind: "connected".into(), text: "c".into(), controller_ms: Some(5) });
+        write_meta(&dir, &meta).unwrap();
+        // A format 1 channel id, as the cell's recordings of 2026-09-26 have it.
+        let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("recording.json")).unwrap()).unwrap();
+        doc["channels"] = serde_json::json!([{"id": "4002/ROB_1/2", "signal": 4002, "unit": "ROB_1", "axis": 2, "name": "Torque", "units": "Nm"}]);
+        std::fs::write(dir.join("recording.json"), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let late = |utc: &str, text: &str| EventEntry { utc: utc.into(), kind: "controller-event".into(), text: text.into(), controller_ms: None };
+        let add = [late("2026-09-28T10:00:03.500Z", "50204 Motion supervision (error)"), late("2026-09-28T10:00:01.500Z", "10010 Motors OFF state (information)")];
+        assert_eq!(append_events(&dir, &add).unwrap(), 2);
+        assert_eq!(append_events(&dir, &add).unwrap(), 0, "the same events again are not added twice");
+        let back = read_meta(&dir).unwrap();
+        let texts: Vec<&str> = back.events.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["10010 Motors OFF state (information)", "c", "50204 Motion supervision (error)"], "in time order");
+        let raw = std::fs::read_to_string(dir.join("recording.json")).unwrap();
+        assert!(raw.contains("\"4002/ROB_1/2\"") && raw.contains("\"version\": 1"), "the rest of a format 1 file is kept as written");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
