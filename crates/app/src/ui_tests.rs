@@ -1071,14 +1071,14 @@ fn ramp(from: f32, per_s: f32) -> SignalDef {
 fn a_plateau_is_refused_while_the_link_drains_or_charges() {
     // The cell (s26 item 11): 16 s after motors off the link read 327 V, draining 2.6 %
     // every 10 s and steadier over two seconds than an armed link; a plateau was taken
-    // from it. Here the comparison spans 2 s instead of 20, and the link drains 5 V a
-    // second from 380 V: 2.6 % over the span, and over two seconds a standard deviation
-    // of 0.77 %, inside the steadiness rule (1 %).
+    // from it. Here the comparison spans 3 s instead of 20, and the link drains 5 V a
+    // second from 380 V: 4 % over the span, and over two seconds a standard deviation
+    // of about 0.8 %, inside the steadiness rule (1 %). (3 s, not less: each step below
+    // stays right with the PC up to about 2.7 s late, as a loaded one can be.)
     let mut b = Behaviour::default();
     b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 379.0 } else { 381.0 }), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
     let mut h = harness(temp_dir("plateau-trend"), AskPolicy::Remote);
-    h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "Add");
@@ -1089,13 +1089,16 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
         let _ = h.run_ok();
         h.state().derived[0].live.def().is_set()
     };
-    // Two seconds of an armed link, but not the span before them: too short a history.
+    // Two seconds of an armed link, but not the span before them: too short a history
+    // (a span no history here reaches, whatever the load on the PC).
+    h.state_mut().plateau_trend_ms = 60_000;
     std::thread::sleep(Duration::from_millis(2300));
     assert!(!set(&mut h), "set with no history to compare its level with");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("No plateau yet") && t.text.contains("draining")), "not said why: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
-    // Motors off: the link drains.
+    h.state_mut().plateau_trend_ms = 3000;
+    // Motors off: the link drains (the plateau's two seconds and the span's three).
     fake.with(|b| b.signals.insert(5027, ramp(380.0, -5.0)));
-    std::thread::sleep(Duration::from_millis(4500));
+    std::thread::sleep(Duration::from_millis(5500));
     assert!(!set(&mut h), "a plateau taken from a draining link");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("fell from") && t.text.contains("motors")), "not said: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     // Motors on: the link charges in a moment and then holds; two seconds after, the
@@ -1107,7 +1110,7 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
     assert!(!set(&mut h), "a plateau taken while the link was still coming up");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("rose from")), "not said: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     // Held level over the whole span: taken.
-    std::thread::sleep(Duration::from_millis(2500));
+    std::thread::sleep(Duration::from_millis(3500));
     assert!(set(&mut h), "an armed, steady link refused: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     assert!(matches!(h.state().derived[0].live.def(), spy_core::derived::Derived::Sag { plateau_v: Some(p), .. } if (p - 380.0).abs() < 0.5));
 }
