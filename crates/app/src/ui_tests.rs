@@ -266,6 +266,53 @@ fn pause_cursors_and_markers() {
 }
 
 #[test]
+fn a_window_length_chosen_while_paused_is_shown() {
+    // On the cell a person paused, then chose a longer window to find what had just
+    // happened, and the charts did not change.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut h = harness(temp_dir("paused-window"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4000, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
+    h.key_press(egui::Key::Space);
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let (a0, b0) = h.state().view_ms.unwrap();
+    assert!((b0 - a0 - 10_000).abs() < 50, "paused on the 10 s window: {a0} to {b0}");
+    // Chosen through the Window list: 30 s, ending where the view ended.
+    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("10 s")).click();
+    let _ = h.run_ok();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "30 s").click();
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.state().window_s, 30.0);
+    let (a1, b1) = h.state().view_ms.unwrap();
+    assert!((b1 - a1 - 30_000).abs() < 50 && (b1 - b0).abs() < 50, "still {a1} to {b1}, was {a0} to {b0}");
+    assert!(h.state().paused_at.is_some(), "and still paused");
+    // Scrolled back (dragged right), then 1 min: it ends where the scrolled view ended,
+    // not where the pause began.
+    let c = h.state().lane_transforms[0].frame().center();
+    h.hover_at(c);
+    h.drag_at(c);
+    let _ = h.run_ok();
+    h.hover_at(c + egui::vec2(120.0, 0.0));
+    let _ = h.run_ok();
+    h.drop_at(c + egui::vec2(120.0, 0.0));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let (_, b2) = h.state().view_ms.unwrap();
+    assert!(b2 < b1 - 2000, "the drag did not scroll back: {b2} against {b1}");
+    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("30 s")).click();
+    let _ = h.run_ok();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "1 min").click();
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let (a3, b3) = h.state().view_ms.unwrap();
+    assert!((b3 - a3 - 60_000).abs() < 50 && (b3 - b2).abs() < 50, "{a3} to {b3}, the scrolled view ended at {b2}");
+}
+
+#[test]
 fn the_phone_view_serves_what_the_window_shows() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let mut h = harness(temp_dir("phone"), AskPolicy::Remote);

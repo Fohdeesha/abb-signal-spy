@@ -416,6 +416,15 @@ impl SpyApp {
                     if ui.selectable_label((s - self.window_s).abs() < 1e-9, l).clicked() {
                         self.window_s = s;
                         self.mark_settings_dirty();
+                        // Paused, the charts keep the person's view; a length chosen now is
+                        // shown at once, ending where the view ends (the charts did not
+                        // change on the cell, and the person looked for the change).
+                        if self.paused_at.is_some() {
+                            if let Some((_, end)) = self.view_ms {
+                                self.paused_at = Some(end - 1);
+                            }
+                            self.pause_fresh = true;
+                        }
                     }
                 }
             });
