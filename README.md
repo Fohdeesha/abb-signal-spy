@@ -58,7 +58,9 @@ version may use other numbers; the controller's refusal is shown per channel, an
 another controller can be loaded (Catalogue menu).
 
 Settings live in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe` when a `settings.json` is
-already there. `--connect HOST[:PORT]` connects at startup.
+already there. `--connect HOST[:PORT]` connects at startup. The log, `signal-spy.log`, is kept there
+too; if the window ever closes by itself, `crash.txt` in the same folder says why (for instance that
+Windows refused it memory because the PC's memory was used up).
 
 ## Recordings
 

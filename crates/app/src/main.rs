@@ -12,6 +12,7 @@ mod charts;
 mod derived_view;
 mod export;
 mod net;
+mod oom;
 mod paths;
 mod phone;
 mod record;
@@ -29,6 +30,10 @@ mod ui_tests;
 use std::path::PathBuf;
 
 use eframe::egui;
+
+/// The system's allocator, leaving a note when memory is refused (oom.rs).
+#[global_allocator]
+static ALLOCATOR: oom::NoteOnRefusal<std::alloc::System> = oom::NoteOnRefusal(std::alloc::System);
 
 fn install_crash_file(dir: PathBuf) {
     let default = std::panic::take_hook();
@@ -91,6 +96,15 @@ fn review_arg() -> Option<PathBuf> {
 fn main() {
     let data_dir = paths::data_dir();
     install_crash_file(data_dir.clone());
+    oom::prepare(&data_dir);
+    // For tests/out_of_memory.rs: a request no PC can grant, through the global
+    // allocator, then stop (with an exit code: Rust's own stop would leave a crash dump
+    // behind at every test run).
+    if std::env::var_os("ABB_SIGNAL_SPY_TEST_OUT_OF_MEMORY").is_some() {
+        // SAFETY: a valid layout of non-zero size; nothing is written to the result.
+        let p = unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 50, 8).expect("a valid layout")) };
+        std::process::exit(if p.is_null() { 3 } else { 4 });
+    }
     let another = net::another_instance();
     let connect = connect_arg();
     let review = review_arg();
