@@ -683,7 +683,11 @@ mod tests {
     /// A small recording on disk, opened: 4002 J1 at 1000-1040 ms, then after a 5 s gap
     /// at 6000-6040.
     fn gapped_review() -> Review {
-        let d = std::env::temp_dir().join(format!("spy-review-gap-{}", std::process::id()));
+        // A folder of its own per call: two tests run this at once, and one removing the
+        // folder while the other reads it failed the other now and then.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("spy-review-gap-{}-{call}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(
             d.join("recording.json"),
