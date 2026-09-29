@@ -224,6 +224,10 @@ impl SpyApp {
         let mut clicked_b: Option<f64> = None;
         let mut visible_x = (x_min, x_max);
 
+        // Six pixels either side of a mark's line, in the chart's seconds (the stretch the
+        // last frame showed).
+        let mark_tol = self.view_ms.map_or(self.window_s, |(a, b)| (b - a) as f64 / 1000.0) * 6.0 / f64::from(ui.available_width().max(100.0));
+        let mut transforms = Vec::new();
         egui::ScrollArea::vertical().id_salt("lanes").auto_shrink([false, false]).max_height(ui.available_height() - stats_h).show(ui, |ui| {
             for lane in &lanes {
                 let members: Vec<&Member> = all.iter().filter(|m| &m.lane == lane).collect();
@@ -246,8 +250,23 @@ impl SpyApp {
                     }
                 });
 
+                let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
+                // The controller's own events (RWS), to the second.
+                let events: Vec<(f64, egui::Color32, String)> = self.events_on_timeline(&tl).into_iter().map(|(t, e)| (tl.seconds(t), e.color(), format!("controller: {}", e.text()))).collect();
+                let (ca, cb) = (self.cursor_a, self.cursor_b);
+                // What each vertical line is, for the hover: the lines have no names, so
+                // that they stay out of the legend (a review's events once covered half of
+                // every chart there).
+                let mut marks: Vec<(f64, String)> = markers.iter().map(|(x, l)| (*x, format!("marker {l}"))).collect();
+                marks.extend(events.iter().map(|(x, _, l)| (*x, l.clone())));
+                if self.cursors_on {
+                    marks.extend(ca.map(|a| (a, "cursor A".to_string())));
+                    marks.extend(cb.map(|b| (b, "cursor B".to_string())));
+                }
+
                 let tl2 = tl.clone();
                 let units = lane.1.clone();
+                let shown = self.hover_text.clone();
                 let min_span = min_span(&units);
                 let mut plot = Plot::new(("lane", lane.0, &lane.1))
                     .height(lane_h)
@@ -256,17 +275,13 @@ impl SpyApp {
                     .legend(Legend::default().position(egui_plot::Corner::LeftTop))
                     .y_axis_min_width(56.0)
                     .show_axes([true, true])
-                    .label_formatter(move |pos| hover_label(pos, &tl2, &units));
+                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, &marks, mark_tol)));
                 plot = if live {
                     plot.allow_drag(false).allow_zoom(false).allow_scroll(false).allow_boxed_zoom(false).allow_double_click_reset(false)
                 } else {
                     plot.allow_drag([true, false]).allow_zoom([true, false]).allow_scroll([true, false]).allow_boxed_zoom(false).allow_double_click_reset(false)
                 };
 
-                let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
-                // The controller's own events (RWS), to the second.
-                let events: Vec<(f64, egui::Color32, String)> = self.events_on_timeline(&tl).into_iter().map(|(t, e)| (tl.seconds(t), e.color(), format!("controller: {}", e.text()))).collect();
-                let (ca, cb) = (self.cursor_a, self.cursor_b);
                 let pause_fresh = self.pause_fresh;
                 let cursors_on = self.cursors_on;
                 let origin = tl.origin().unwrap_or(0);
@@ -327,22 +342,22 @@ impl SpyApp {
                             }
                         }
                     }
-                    for (x, label) in &markers {
+                    for (x, _) in &markers {
                         if *x >= vx0 && *x <= vx1 {
-                            pu.vline(VLine::new(format!("marker {label}"), *x).color(theme::WARN).width(1.0));
+                            pu.vline(VLine::new("", *x).color(theme::WARN).width(1.0));
                         }
                     }
-                    for (x, color, label) in &events {
+                    for (x, color, _) in &events {
                         if *x >= vx0 && *x <= vx1 {
-                            pu.vline(VLine::new(label.clone(), *x).color(*color).width(1.0).style(egui_plot::LineStyle::dashed_loose()));
+                            pu.vline(VLine::new("", *x).color(*color).width(1.0).style(egui_plot::LineStyle::dashed_loose()));
                         }
                     }
                     if cursors_on {
                         if let Some(a) = ca {
-                            pu.vline(VLine::new("cursor A", a).color(egui::Color32::from_rgb(0x5A, 0x9B, 0xD5)).width(1.5));
+                            pu.vline(VLine::new("", a).color(egui::Color32::from_rgb(0x5A, 0x9B, 0xD5)).width(1.5));
                         }
                         if let Some(bx) = cb {
-                            pu.vline(VLine::new("cursor B", bx).color(egui::Color32::from_rgb(0xD3, 0x72, 0x95)).width(1.5));
+                            pu.vline(VLine::new("", bx).color(egui::Color32::from_rgb(0xD3, 0x72, 0x95)).width(1.5));
                         }
                     }
                     if live || pause_fresh {
@@ -359,6 +374,7 @@ impl SpyApp {
                     let x_at = pu.pointer_coordinate().map(|p| p.x);
                     ((vx0, vx1), (y0, y1), clicked, secondary, x_at)
                 });
+                transforms.push(resp.transform);
                 let ((vx0, vx1), (y0, y1), clicked, secondary, x_at) = resp.inner;
                 visible_x = (vx0, vx1);
                 // A lock taken this frame captures the scale in view.
@@ -376,6 +392,7 @@ impl SpyApp {
                 }
             }
         });
+        self.lane_transforms = transforms;
         self.pause_fresh = false;
         let origin = tl.origin().unwrap_or(0);
         self.view_ms = Some((origin + (visible_x.0 * 1000.0).floor() as i64, origin + (visible_x.1 * 1000.0).ceil() as i64 + 1));
@@ -532,22 +549,60 @@ pub fn min_span(units: &str) -> f64 {
     }
 }
 
-fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str) -> Option<String> {
+fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str, marks: &[(f64, String)], tol: f64) -> Option<String> {
     let (name, p) = match pos {
         HoverPosition::NearDataPoint { plot_name, position, .. } => (Some(*plot_name), *position),
         HoverPosition::Elsewhere { position } => (None, *position),
     };
     let t = tl.origin().unwrap_or(0) + (p.x * 1000.0).round() as i64;
     let wall = tl.wall(t).map(view::local_time).unwrap_or_default();
-    Some(match name {
+    let text = match name {
         Some(n) => format!("{n}\n{} {units}\nt = {:.3} s   {wall}", view::fmt(p.y), p.x),
         None => format!("t = {:.3} s   {wall}\n{} {units}", p.x, view::fmt(p.y)),
-    })
+    };
+    Some(with_mark(text, p.x, tol, marks))
+}
+
+/// Keep the hover's text where a test can read it, and pass it on.
+pub fn remember(shown: &std::sync::Mutex<String>, text: Option<String>) -> Option<String> {
+    if let (Some(t), Ok(mut s)) = (&text, shown.lock()) {
+        s.clone_from(t);
+    }
+    text
+}
+
+/// A hover's text, headed by what the vertical lines under the pointer are (markers,
+/// controller events, cursors: `marks`, x and what it is), every one within `tol` of
+/// `x` (a controller often logs several events in one second). The lines carry no
+/// names, so that they stay out of the legend, and egui_plot hovers no vertical line:
+/// this is where their text is shown.
+pub fn with_mark(text: String, x: f64, tol: f64, marks: &[(f64, String)]) -> String {
+    let near: Vec<&str> = marks.iter().filter(|m| (m.0 - x).abs() <= tol).map(|m| m.1.as_str()).collect();
+    if near.is_empty() { text } else { format!("{}\n{text}", near.join("\n")) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hover_over_a_marks_line_names_it() {
+        let marks = vec![(1.0, "marker M1".to_string()), (4.0, "controller: 10010 Motors OFF state (information)".to_string()), (4.5, "cursor A".to_string())];
+        let tl = Timeline::default();
+        let at = |x: f64| hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 1.0) }, &tl, "Nm", &marks, 0.1).unwrap();
+        assert!(at(4.05).starts_with("controller: 10010 Motors OFF state (information)\nt = 4.050 s"), "{}", at(4.05));
+        assert!(at(4.42).starts_with("cursor A\n"), "the nearest: {}", at(4.42));
+        assert!(at(0.95).starts_with("marker M1\n"), "{}", at(0.95));
+        assert!(at(2.0).starts_with("t = 2.000 s"), "no mark within reach: {}", at(2.0));
+        // Two events in the same second: both.
+        let two = vec![(4.0, "controller: 10002 Program pointer has been reset (information)".to_string()), (4.0, "controller: 10011 Motors ON state (information)".to_string())];
+        let text = hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(4.01, 1.0) }, &tl, "Nm", &two, 0.1).unwrap();
+        assert!(text.starts_with("controller: 10002") && text.contains("\ncontroller: 10011 Motors ON state (information)\nt = "), "{text}");
+        // Over a channel's sample beside a mark: both named, the mark first.
+        let near = HoverPosition::NearDataPoint { plot_name: "4002 · Torque", position: egui_plot::PlotPoint::new(3.95, 1.0), index: 0 };
+        let text = hover_label(&near, &tl, "Nm", &marks, 0.1).unwrap();
+        assert!(text.starts_with("controller: 10010") && text.contains("\n4002 · Torque\n"), "{text}");
+    }
 
     #[test]
     fn statistics_are_exact_and_skip_nan() {

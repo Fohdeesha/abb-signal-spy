@@ -206,6 +206,20 @@ fn record_save_last_and_slow_log_write_their_folders() {
     assert_eq!(kinds, vec!["Full", "Slow", "Snapshot"]);
 }
 
+/// Hover a chart (the first by default) at `x` on its time axis, halfway up.
+fn hover_chart(h: &mut Harness<'static, SpyApp>, lane: usize, x: f64) {
+    let tr = h.state().lane_transforms[lane];
+    let y = (tr.bounds().min()[1] + tr.bounds().max()[1]) / 2.0;
+    h.hover_at(tr.position_from_point(&egui_plot::PlotPoint::new(x, y)));
+    let _ = h.run_ok();
+}
+
+/// The charts' legend entries: egui_plot draws one checkbox per named item.
+fn legend(h: &Harness<'static, SpyApp>) -> Vec<String> {
+    use egui_kittest::kittest::NodeT;
+    h.query_all_by(|n| n.role() == egui::accesskit::Role::CheckBox).filter_map(|n| n.accesskit_node().label()).collect()
+}
+
 #[test]
 fn pause_cursors_and_markers() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
@@ -234,6 +248,21 @@ fn pause_cursors_and_markers() {
     let _ = h.run_ok();
     assert!(h.query_by_label("B − A").is_some(), "the cursor table shows");
     assert!(h.query_by_label_contains("Δt 0.200 s").is_some());
+    // A marker and the cursors are lines on the chart, not entries in its legend (on
+    // the cell, a review's events covered half of every chart that way).
+    let entries = legend(&h);
+    assert!(entries.iter().any(|l| l.contains("Position")), "the channel's own entry: {entries:?}");
+    assert!(!entries.iter().any(|l| l.contains("marker") || l.contains("cursor")), "{entries:?}");
+    // Their text is on the hover instead: over the marker's line (paused, so that the
+    // chart holds still under the pointer), it is named.
+    h.key_press(egui::Key::Space);
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let tl = h.state().session.status().timeline.clone();
+    let x = tl.seconds(h.state().markers[0].t_ms);
+    hover_chart(&mut h, 0, x);
+    let shown = h.state().hover_text.lock().unwrap().clone();
+    assert!(shown.starts_with("marker M1\n"), "the marker's line not named on hover: {shown:?}");
 }
 
 #[test]
@@ -1196,12 +1225,53 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     assert!((newest - t).abs() < 2500, "placed {} ms from now", newest - t);
     assert_eq!(e.color(), crate::theme::IDLE);
     assert!(on.iter().any(|(_, e)| e.code == 20205 && e.color() == crate::theme::BAD));
+    // Drawn as lines, not piled into every chart's legend: looked at once the charts
+    // show them (an event's second can place it just past the newest sample), and
+    // recorded past them.
+    let t_event = *t;
+    assert!(wait(&mut h, 5000, |a| a.view_ms.is_some_and(|(from, to)| from <= t_event && t_event <= to)), "the event never came into view");
+    let _ = h.run_ok();
+    let entries = legend(&h);
+    assert!(entries.iter().any(|l| l.contains("Torque")) && !entries.iter().any(|l| l.contains("Motors OFF") || l.contains("Auto stop")), "{entries:?}");
+    std::thread::sleep(Duration::from_millis(1000));
     h.get_by_label_contains("■ STOP").click();
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     let meta = spy_core::recording::read_meta(&folder).unwrap();
     let kept: Vec<&str> = meta.events.iter().filter(|e| e.kind == "controller-event").map(|e| e.text.as_str()).collect();
     assert_eq!(kept, ["10010 Motors OFF state (information)", "20205 Auto stop open (error)"], "only what happened while recording");
+    // Nor in a review of the recording.
+    h.state_mut().open_recording(folder.clone());
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    let rs = h.state().review.as_ref().unwrap();
+    let in_view = |m: &spy_core::review::ReviewMark| {
+        let x = (m.t - rs.review.start) as f64 / 1000.0;
+        rs.view.0 <= x && x <= rs.view.1
+    };
+    assert!(rs.review.marks.iter().any(|m| m.kind == "controller-event" && in_view(m)), "no event in the review's view: {:?}", rs.review.marks);
+    let off = rs.review.marks.iter().find(|m| m.text.contains("Motors OFF")).map(|m| (m.t - rs.review.start) as f64 / 1000.0).unwrap();
+    let entries = legend(&h);
+    assert!(entries.iter().any(|l| l.contains("Torque")) && !entries.iter().any(|l| l.contains("Motors OFF") || l.contains("Auto stop") || l.contains("controller-event")), "{entries:?}");
+    // A review's cursors are lines too.
+    if let Some(rs) = h.state_mut().review.as_mut() {
+        rs.cursors_on = true;
+        rs.cursor_a = Some(off + 0.5);
+        rs.cursor_b = Some(off + 1.0);
+    }
+    let _ = h.run_ok();
+    let entries = legend(&h);
+    assert!(!entries.iter().any(|l| l.contains("cursor")), "{entries:?}");
+    // (The RWS window, open since the login, would sit between the pointer and the chart.)
+    h.state_mut().show_rws = false;
+    let _ = h.run_ok();
+    hover_chart(&mut h, 0, off);
+    let shown = h.state().hover_text.lock().unwrap().clone();
+    assert!(shown.contains("controller-event: 10010 Motors OFF state"), "the event's line not named on hover in a review: {shown:?}");
+    h.get_by_label("Close the recording").click();
+    assert!(wait(&mut h, 3000, |a| a.review.is_none()));
+    h.state_mut().show_rws = true;
+    let _ = h.run_ok();
 
     // Switched off: no more looks.
     h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();

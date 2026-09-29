@@ -293,6 +293,7 @@ impl SpyApp {
             }
             return;
         }
+        let hover_text = self.hover_text.clone();
         let cat = &self.catalogue;
         let Some(rs) = &mut self.review else { return };
         let review = rs.review.clone();
@@ -328,12 +329,25 @@ impl SpyApp {
         let (mut clicked_a, mut clicked_b) = (None, None);
         let start = review.start;
         let wall = review.wall_clock;
+        // What each vertical line is, for the hover: the lines have no names, so that
+        // they stay out of the legend (on the cell, a review's events covered half of
+        // every chart there).
+        let mut marks: Vec<(f64, String)> = review.marks.iter().map(|m| ((m.t - start) as f64 / 1000.0, format!("{}: {}", m.kind, m.text))).collect();
+        if cursors_on {
+            marks.extend(ca.map(|a| (a, "cursor A".to_string())));
+            marks.extend(cb.map(|b| (b, "cursor B".to_string())));
+        }
+        // Six pixels either side of a mark's line, in the chart's seconds.
+        let mark_tol = (rs.view.1 - rs.view.0).abs() * 6.0 / f64::from(ui.available_width().max(100.0));
+        let mut transforms = Vec::new();
         egui::ScrollArea::vertical().id_salt("review-lanes").auto_shrink([false, false]).max_height(ui.available_height() - stats_h).show(ui, |ui| {
             for ((signal, units), members) in &lanes {
                 let first = &review.channels[members[0]];
                 let title = if members.len() == 1 { name(cat, first) } else { format!("{} (+{} overlaid)", name(cat, first), members.len() - 1) };
                 ui.label(RichText::new(format!("{title}  [{units}]")).small().strong());
                 let u2 = units.clone();
+                let marks2 = marks.clone();
+                let shown = hover_text.clone();
                 let plot = Plot::new(("review", *signal, units.as_str()))
                     .height(lane_h)
                     .link_axis("review-x", [true, false])
@@ -345,7 +359,7 @@ impl SpyApp {
                     .allow_scroll([true, false])
                     .allow_boxed_zoom(false)
                     .allow_double_click_reset(false)
-                    .label_formatter(move |pos| hover(pos, start, wall, &u2));
+                    .label_formatter(move |pos| crate::charts::remember(&shown, hover(pos, start, wall, &u2, &marks2, mark_tol)));
                 let min_span = min_span(units);
                 let resp = plot.show(ui, |pu| {
                     let b = pu.plot_bounds();
@@ -385,15 +399,15 @@ impl SpyApp {
                         let x = (m.t - start) as f64 / 1000.0;
                         if x >= vx0 && x <= vx1 {
                             let (c, w) = if m.kind == "marker" { (theme::WARN, 1.0) } else { (theme::IDLE, 1.0) };
-                            pu.vline(VLine::new(format!("{}: {}", m.kind, m.text), x).color(c).width(w));
+                            pu.vline(VLine::new("", x).color(c).width(w));
                         }
                     }
                     if cursors_on {
                         if let Some(a) = ca {
-                            pu.vline(VLine::new("cursor A", a).color(egui::Color32::from_rgb(0x5A, 0x9B, 0xD5)).width(1.5));
+                            pu.vline(VLine::new("", a).color(egui::Color32::from_rgb(0x5A, 0x9B, 0xD5)).width(1.5));
                         }
                         if let Some(bx) = cb {
-                            pu.vline(VLine::new("cursor B", bx).color(egui::Color32::from_rgb(0xD3, 0x72, 0x95)).width(1.5));
+                            pu.vline(VLine::new("", bx).color(egui::Color32::from_rgb(0xD3, 0x72, 0x95)).width(1.5));
                         }
                     }
                     if fresh {
@@ -403,6 +417,7 @@ impl SpyApp {
                     pu.set_plot_bounds_y(y0..=y1);
                     ((vx0, vx1), pu.response().clicked(), pu.response().secondary_clicked(), pu.pointer_coordinate().map(|p| p.x))
                 });
+                transforms.push(resp.transform);
                 let ((vx0, vx1), clicked, secondary, x_at) = resp.inner;
                 view_out = (vx0, vx1);
                 if cursors_on {
@@ -415,6 +430,7 @@ impl SpyApp {
                 }
             }
         });
+        self.lane_transforms = transforms;
         if let Some(rs) = &mut self.review {
             rs.view = view_out;
             rs.fresh = false;
@@ -637,7 +653,7 @@ fn about(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
     }
 }
 
-fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str) -> Option<String> {
+fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, marks: &[(f64, String)], tol: f64) -> Option<String> {
     let (nm, p) = match pos {
         HoverPosition::NearDataPoint { plot_name, position, .. } => (Some(*plot_name), *position),
         HoverPosition::Elsewhere { position } => (None, *position),
@@ -652,10 +668,11 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str) -> Option
     } else {
         format!("controller {t} ms")
     };
-    Some(match nm {
+    let text = match nm {
         Some(n) => format!("{n}\n{} {units}\nt = {:.3} s   {when}", view::fmt(p.y), p.x),
         None => format!("t = {:.3} s   {when}\n{} {units}", p.x, view::fmt(p.y)),
-    })
+    };
+    Some(crate::charts::with_mark(text, p.x, tol, marks))
 }
 
 #[cfg(test)]
@@ -699,7 +716,7 @@ mod tests {
         for x in [1e16, -1e16, f64::MAX, f64::MIN, -11_644_473_700.0] {
             let _ = rs.t_of(x);
             let pos = HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 0.0) };
-            assert!(hover(&pos, rs.review.start, true, "Nm").is_some(), "{x}");
+            assert!(hover(&pos, rs.review.start, true, "Nm", &[], 0.1).is_some(), "{x}");
         }
     }
 
