@@ -75,6 +75,8 @@ pub const ROBAPI_PORT: u16 = 5515;
 const MAX_BUFFER: usize = 2 * wire::MAX_FRAME as usize;
 /// Frames the reader may queue ahead of the worker before it waits (backpressure).
 const MAX_QUEUED_FRAMES: usize = 8192;
+/// How often a reader with nothing to read looks whether its connection was let go.
+const READER_WAKE: Duration = Duration::from_millis(100);
 /// The reconnect ladder, the bridge's.
 const LADDER: [u64; 5] = [1, 2, 5, 15, 30];
 /// A pause in the samples that began within this many controller milliseconds of
@@ -1388,7 +1390,7 @@ impl Worker {
             c.closed.store(true, Ordering::SeqCst);
             let _ = c.stream.shutdown(Shutdown::Both);
             if let Some(r) = c.reader.take() {
-                // The shutdown ends its blocking read at once.
+                // It ends within READER_WAKE, even while the controller is silent.
                 let _ = r.join();
             }
         }
@@ -2997,11 +2999,25 @@ fn reader_loop(mut stream: TcpStream, generation: u64, tx: Sender<Event>, queued
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut chunk = vec![0u8; 64 * 1024];
     let mut desynced = false;
+    // On Windows, shutting a socket down does not end a read already blocked on it,
+    // and a controller cut off by the network never closes its end; the next read
+    // after the shutdown fails at once (both measured 2026-09-29). So the reader waits
+    // in short turns, and the worker's shutdown ends it within one. Only a peek is
+    // left to time out: a receive that Winsock's timeout cuts short can lose what it
+    // was taking in, a peek leaves it queued for the read after it.
+    let _ = stream.set_read_timeout(Some(READER_WAKE));
+    let mut peeked = [0u8; 1];
     let why = loop {
+        match stream.peek(&mut peeked) {
+            Ok(0) => break "the controller closed the connection".to_string(),
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => continue,
+            Err(e) => break describe_io(&e),
+        }
         let n = match stream.read(&mut chunk) {
             Ok(0) => break "the controller closed the connection".to_string(),
             Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
             Err(e) => break describe_io(&e),
         };
         buf.extend_from_slice(&chunk[..n]);

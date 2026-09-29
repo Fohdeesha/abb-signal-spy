@@ -1953,6 +1953,20 @@ fn a_controller_that_falls_silent_altogether_ends_in_the_stall() {
     assert_eq!(s.status().counters.liveness_checks, 1);
 }
 
+#[test]
+fn disconnecting_while_the_network_is_down_is_prompt() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.cut_network(Duration::from_secs(30), Duration::from_secs(30));
+    s.disconnect();
+    // The teardown's replies never come (1 s), then the socket is let go.
+    assert!(wait_for(4000, || phase(&s) == Phase::Idle), "{:?}\n{}", phase(&s), log_text(&s));
+}
+
 fn patient() -> Options {
     Options { vc_pause_patience: Duration::from_secs(10), ..opts() }
 }

@@ -36,7 +36,13 @@
 //! * the handshake is answered whenever it is sent, mid-session too, with the
 //!   current client list (s24 item 12)
 //! * the AYA keepalive with ctrl 4000/16000; a zeroed reply drops the connection
-//!   at once, no reply drops it at the timeout
+//!   at once, no reply drops it at the timeout. Sent every 4 s here, for good; the VC
+//!   sent two, 4 s apart just after a connection opened, and then no more
+//!   (tunemaster-testsignals.md s27 item 2)
+//! * a broken connection kept, listed and as the tenant, until the controller lets go
+//!   of it (s23 item 16, s25 item 1): seen by the client as a drop
+//!   ([`FakeController::break_connections`]) or, for a fault out in the network, as
+//!   silence ([`FakeController::cut_network`])
 //!
 //! Loopback only, on a port the OS picks, so a test can never reach a controller or
 //! stand in for one.
@@ -173,6 +179,9 @@ struct Conn {
     /// Broken, but the controller has not noticed: kept (as the tenant, if it was)
     /// until then, though nothing reaches the client.
     zombie_until: Option<Instant>,
+    /// Cut off by a fault in the network: nothing reaches its client, and what its
+    /// client sends is lost on the way.
+    cut: bool,
     last_aya_answer: Instant,
     peer: SocketAddr,
 }
@@ -298,6 +307,8 @@ struct State {
     connections_total: usize,
     samples_sent: u64,
     handshakes: u64,
+    /// The network is down until then: nothing passes either way.
+    cut_until: Option<Instant>,
 }
 
 pub struct FakeController {
@@ -338,6 +349,7 @@ impl FakeController {
             connections_total: 0,
             samples_sent: 0,
             handshakes: 0,
+            cut_until: None,
         }));
         let running = Arc::new(AtomicBool::new(true));
         let mut threads = Vec::new();
@@ -446,6 +458,26 @@ impl FakeController {
         }
     }
 
+    /// A fault out in the network (a cable pulled between switches, the controller's
+    /// switch port shut): for `outage` nothing passes either way, and neither end hears
+    /// of it, so a client sees silence, not a drop. The controller keeps every
+    /// connection it had until `hold` after the cut (a real one lets go at its
+    /// keepalive timeout), listed and, if it was, the tenant. Those connections stay
+    /// cut off: a client is expected to give up on its own before the network is back
+    /// (a shorter hiccup is `hold_delivery`), and what it sends meanwhile, its goodbye
+    /// included, is lost, where a real network might deliver it late and so free the
+    /// connection sooner. A connection made during the outage is served once it is
+    /// over, as TCP would complete it then.
+    pub fn cut_network(&self, outage: Duration, hold: Duration) {
+        let mut st = lock(&self.state);
+        let now = Instant::now();
+        st.cut_until = Some(now + outage);
+        for c in st.conns.values_mut() {
+            c.cut = true;
+            c.zombie_until = Some(now + hold);
+        }
+    }
+
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         self.drop_connections();
@@ -468,9 +500,16 @@ fn broadcast(st: &mut State, bytes: &[u8]) {
     }
 }
 
+fn network_down(st: &State) -> bool {
+    st.cut_until.is_some_and(|t| Instant::now() < t)
+}
+
 fn send_to(st: &mut State, conn: usize, bytes: &[u8]) {
     let hold = st.behaviour.hold_delivery;
+    let down = network_down(st);
     let failed = match st.conns.get_mut(&conn) {
+        // Lost on the way.
+        Some(c) if down || c.cut => false,
         Some(c) if hold => {
             c.held.extend_from_slice(bytes);
             false
@@ -499,7 +538,11 @@ fn close_conn(st: &mut State, conn: usize) {
     }
     let was_tenant = tenant(st) == Some(conn);
     let Some(c) = st.conns.remove(&conn) else { return };
-    let _ = c.writer.shutdown(Shutdown::Both);
+    // One cut off by the network: its end is lost on the way like everything else;
+    // the socket closes when its reader ends, once the network is back.
+    if !c.cut {
+        let _ = c.writer.shutdown(Shutdown::Both);
+    }
     if was_tenant {
         // s24 item 10: the tenant's exit, whatever it sent, clears every stream.
         st.streams.clear();
@@ -535,7 +578,7 @@ fn accept_loop(listener: TcpListener, state: Arc<Mutex<State>>, running: Arc<Ato
                     let id = st.next_conn;
                     st.next_conn += 1;
                     st.connections_total += 1;
-                    st.conns.insert(id, Conn { id, writer, subscribed: false, orphan: false, defined: false, held: Vec::new(), zombie_until: None, last_aya_answer: Instant::now(), peer });
+                    st.conns.insert(id, Conn { id, writer, subscribed: false, orphan: false, defined: false, held: Vec::new(), zombie_until: None, cut: false, last_aya_answer: Instant::now(), peer });
                     id
                 };
                 let (state, running) = (state.clone(), running.clone());
@@ -563,8 +606,19 @@ fn conn_loop(id: usize, mut stream: TcpStream, state: Arc<Mutex<State>>, running
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+            // Nothing new; what arrived while the network was down may be due now.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => break,
+        }
+        {
+            let st = lock(&state);
+            if st.conns.get(&id).is_some_and(|c| c.cut) {
+                buf.clear();
+                continue;
+            }
+            if network_down(&st) {
+                continue;
+            }
         }
         loop {
             match wire::frame_at(&buf) {
@@ -586,8 +640,11 @@ fn conn_loop(id: usize, mut stream: TcpStream, state: Arc<Mutex<State>>, running
             }
         }
     }
-    let mut st = lock(&state);
-    close_conn(&mut st, id);
+    close_conn(&mut lock(&state), id);
+    // Nothing reaches the client while the network is down, the socket's close included.
+    while running.load(Ordering::SeqCst) && network_down(&lock(&state)) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn text_fields(d: &[u8]) -> Vec<String> {
