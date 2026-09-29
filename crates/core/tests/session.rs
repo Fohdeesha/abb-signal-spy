@@ -1859,6 +1859,7 @@ fn a_worker_held_up_past_the_stall_time_does_not_stop() {
     s.set_channels(vec![k.clone()]);
     s.connect(target(&fake));
     assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let before = s.status().counters.clone();
     {
         let ch = s.store().get(&k).unwrap();
         let _held = ch.lock();
@@ -1866,6 +1867,10 @@ fn a_worker_held_up_past_the_stall_time_does_not_stop() {
     }
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(phase(&s), Phase::Streaming, "{}", log_text(&s));
+    // Nor taken for a silence at all: no liveness check sent for it, and no reconnect
+    // (a silence past the check's time connects again by itself).
+    let after = s.status().counters.clone();
+    assert_eq!((after.liveness_checks, after.reconnects), (before.liveness_checks, before.reconnects), "{}", log_text(&s));
 }
 
 #[test]

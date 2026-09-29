@@ -1175,15 +1175,18 @@ fn a_plateau_of_no_voltage_is_refused() {
     h.get_by_label("Set the plateau").click();
     let _ = h.run_ok();
     assert!(!h.state().derived[0].live.def().is_set(), "a plateau of 0 V: every sag after it is the whole link");
-    assert!(h.state().toasts.iter().any(|t| t.text.contains("No plateau")), "not said");
-    // Motors off, the link reads 16 V on the cell (s24): steady, and still no plateau.
+    // Refused by the floor itself: the 20 s trend check would refuse this young link
+    // too, and must not be what the test sees.
+    let floor = |h: &Harness<'static, SpyApp>, reads: &str| h.state().toasts.iter().any(|t| t.text.contains("not an armed drive's") && t.text.contains(reads));
+    assert!(floor(&h, "reads 0"), "not refused by the floor: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Motors off, the link reads 16 V on the cell (2026-09-26): steady, and still no plateau.
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 }));
     std::thread::sleep(Duration::from_millis(2300));
     let _ = h.run_ok();
     h.get_by_label("Set the plateau").click();
     let _ = h.run_ok();
     assert!(!h.state().derived[0].live.def().is_set(), "a motors-off plateau (16 V) taken: every sag after arming reads -360 V");
-    assert!(h.state().toasts.iter().any(|t| t.text.contains("arm")), "not told to arm the robot");
+    assert!(floor(&h, "reads 16") && h.state().toasts.iter().any(|t| t.text.contains("reads 16") && t.text.contains("Arm the robot")), "not refused by the floor, or not told to arm the robot: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
 }
 
 /// A DC link that moves `per_s` volts a second from `from`, counted from its first
