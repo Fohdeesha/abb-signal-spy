@@ -81,6 +81,13 @@ pub fn offer_text(d: &Derived) -> &'static str {
     }
 }
 
+/// A sag as a share of its plateau: "2.81% below", or above for a link over its
+/// plateau (it read "-0.24% below" on the cell).
+pub fn sag_share(sag: f64, plateau: f64) -> String {
+    let share = 100.0 * sag / plateau;
+    if share < 0.0 { format!("{:.2}% above", -share) } else { format!("{share:.2}% below") }
+}
+
 /// How a derived channel's samples are read.
 pub fn reading(d: &Derived) -> view::Reading {
     match d {
@@ -442,7 +449,7 @@ impl SpyApp {
                     if let (Derived::Sag { plateau_v: Some(p), .. }, Some(v)) = (&def, value)
                         && *p != 0.0
                     {
-                        ui.label(RichText::new(format!("{:.2}% below", 100.0 * v / p)).small().weak());
+                        ui.label(RichText::new(sag_share(v, *p)).small().weak());
                     }
                 });
                 let s = self.derived[i].stats;
@@ -525,6 +532,13 @@ mod tests {
 
     fn key(signal: u32, axis: u8) -> ChannelKey {
         ChannelKey { signal, unit: MechUnit::new("ROB_1").unwrap(), axis: Axis::new(axis).unwrap() }
+    }
+
+    #[test]
+    fn a_sag_reads_below_or_above_its_plateau() {
+        assert_eq!(sag_share(10.0, 356.5), "2.81% below");
+        assert_eq!(sag_share(-0.939, 385.601), "0.24% above", "a link above its plateau read \"-0.24% below\"");
+        assert_eq!(sag_share(0.0, 385.6), "0.00% below");
     }
 
     #[test]

@@ -1046,6 +1046,12 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     assert!(wait(&mut h, 3000, |a| a.derived[1].live.lock().last().is_some_and(|(_, v)| v == 10.0)));
     let _ = h.run_ok();
     assert!(h.query_by_label("10.0000").is_some() && h.query_by_label("2.81% below").is_some());
+    // Over its plateau: above it, not "-0.28% below".
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 357.5), sample_ms: 4.032 }));
+    assert!(wait(&mut h, 3000, |a| a.derived[1].live.lock().last().is_some_and(|(_, v)| v == -1.0)));
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("0.28% above").is_some(), "a link over its plateau not read as above it");
     std::thread::sleep(Duration::from_millis(300));
     h.get_by_label_contains("■ STOP").click();
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
