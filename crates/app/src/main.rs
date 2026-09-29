@@ -102,7 +102,9 @@ fn main() {
     // behind at every test run).
     if std::env::var_os("ABB_SIGNAL_SPY_TEST_OUT_OF_MEMORY").is_some() {
         // SAFETY: a valid layout of non-zero size; nothing is written to the result.
-        let p = unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 50, 8).expect("a valid layout")) };
+        // Through `black_box`: an allocation whose pointer is only compared with null is
+        // one the optimiser may assume succeeds and remove (the release build did).
+        let p = std::hint::black_box(unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 50, 8).expect("a valid layout")) });
         std::process::exit(if p.is_null() { 3 } else { 4 });
     }
     let another = net::another_instance();
