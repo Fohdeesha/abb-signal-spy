@@ -1998,6 +1998,26 @@ fn a_network_fault_is_connected_through_by_itself_once_the_controller_lets_go() 
 }
 
 #[test]
+fn a_long_outage_still_waits_out_the_held_connection_once_the_network_is_back() {
+    // The wait for the controller to let go of the broken connection counts from when
+    // it can be reached again, not from the break: a controller lets go when it next
+    // hears from this PC, which it cannot while the network is down (a switch
+    // rebooting takes a minute). Here the outage (4 s) is longer than that wait (4 s
+    // in these tests), and the controller holds on 2 s after it.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(opts());
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.cut_network(Duration::from_millis(4000), Duration::from_millis(6000));
+    let n = samples(&s, &k);
+    assert!(wait_for(15000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 50), "{:?}\n{}", phase(&s), log_text(&s));
+    assert!(log_text(&s).contains("still holds the connection that broke"), "{}", log_text(&s));
+    assert_eq!(fake.seen().iter().filter(|x| x.verb == "SUBSCRIBE").count(), 2, "nothing set up while it held on");
+}
+
+#[test]
 fn leaving_a_controller_cut_off_by_the_network_does_not_wait_on_it() {
     // Neither this end's goodbye nor the controller's close gets through, and on
     // Windows shutting the socket down does not end a read blocked on it (measured

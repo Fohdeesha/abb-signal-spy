@@ -24,8 +24,8 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    stops and says so, before showing anything that could be the other program's signals, and it does
    not take the stream back. If the network drops or goes quiet (nothing at all from the controller
    for 3 s), it reconnects by itself: it first waits for the controller to let go of the broken
-   connection (about 16 s), and it never takes the stream from a program that connected meanwhile
-   (it asks, or stops and says why). If the controller at the address
+   connection (usually at once when the network is back, up to a minute), and it never takes the
+   stream from a program that connected meanwhile (it asks, or stops and says why). If the controller at the address
    turns out to be a different one (a cable moved to the next robot), it stops rather than carry on.
 3. **Add channels.** Pick a signal in the catalogue and press Add. The dialog asks only what that signal
    needs: the robot, the axis, or nothing. Up to 12 channels. *Channel sets...* adds a common group in

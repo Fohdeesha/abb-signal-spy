@@ -128,12 +128,18 @@ pub struct Options {
     pub ladder: Vec<Duration>,
     pub ask: AskPolicy,
     /// After a network fault the controller keeps the broken connection, as the one
-    /// it sends every sample to, until its keepalive times out, and a connection
-    /// subscribed meanwhile never gets a sample (s23 item 16). It lists that
-    /// connection in the handshake until it lets go: measured on the RW6 VC
-    /// (2026-09-27, `tools/abb_vc_held_listing.py`) as one extra entry for this PC,
-    /// gone after 14-16 s. An automatic reconnect that finds exactly that extra entry
-    /// waits for it, up to this long, before taking it for another program's.
+    /// it sends every sample to, and a connection subscribed meanwhile never gets a
+    /// sample (s23 item 16). It lists that connection in the handshake until it lets
+    /// go: one extra entry for this PC (the RW6 VC, `tools/abb_vc_held_listing.py`).
+    /// When is not the controller's own to keep: the VC let a silent client go 16 s
+    /// into its silence on 2026-09-27, and held one past 44 s on 2026-09-29 (its
+    /// keepalive went out twice, just after the connection opened, and not again).
+    /// With the network back it lets go as soon as it hears from this PC, the goodbye
+    /// this program left or the reset this PC's stack answers its next retransmission
+    /// with (through a network cut to the VC, at once: 2026-09-29). An automatic
+    /// reconnect that finds exactly that extra entry waits for it, up to this long from
+    /// the first look that finds it (when the controller can be reached again), before
+    /// taking it for another program's.
     pub held_wait: Duration,
     /// How often it looks meanwhile: each look is a connection that only handshakes,
     /// which changes nothing on the controller when it leaves.
@@ -180,8 +186,9 @@ impl Default for Options {
             teardown_wait: Duration::from_millis(1500),
             ladder: LADDER.iter().map(|&s| Duration::from_secs(s)).collect(),
             ask: AskPolicy::Remote,
-            // Twice the 16 s keepalive timeout the controllers were measured to let go at.
-            held_wait: Duration::from_secs(30),
+            // A controller's TCP backs off to about a minute between retransmissions
+            // at most, and the first one after the network is back ends the hold.
+            held_wait: Duration::from_secs(60),
             held_poll: Duration::from_secs(2),
             vc_pause_patience: Duration::from_secs(120),
             find_vc: VcFinder::local(),
@@ -774,9 +781,9 @@ struct Worker {
     /// When the last working connection was lost: the controller lets go of a broken
     /// one within its keepalive timeout of this.
     lost_at: Option<Instant>,
-    /// The last automatic reconnect found the controller still holding the broken
-    /// connection.
-    held_seen: bool,
+    /// Since when automatic reconnects have found the controller still holding the
+    /// broken connection (the wait for it counts from there: `held_wait`).
+    held_since: Option<Instant>,
     /// This connection is the one automatic reconnect made after another program's
     /// exit ended InfoStream; the next one will be (set while leaving for it).
     leaver_retry: bool,
@@ -888,7 +895,7 @@ impl Worker {
             baseline: None,
             candidate: None,
             lost_at: None,
-            held_seen: false,
+            held_since: None,
             leaver_retry: false,
             leaver_retry_next: false,
             system_id: None,
@@ -1023,7 +1030,7 @@ impl Worker {
                 self.baseline = None;
                 self.candidate = None;
                 self.lost_at = None;
-                self.held_seen = false;
+                self.held_since = None;
                 self.leaver_retry = false;
                 self.leaver_retry_next = false;
                 // A deliberate connect retries what the controller refused last time.
@@ -1036,7 +1043,7 @@ impl Worker {
             }
             Request::Disconnect => {
                 self.retry_at = None;
-                self.held_seen = false;
+                self.held_since = None;
                 self.leaver_retry_next = false;
                 if self.conn.is_some() {
                     self.emit_mark(Mark::Disconnected);
@@ -1642,21 +1649,24 @@ impl Worker {
         joined.retain(|a| !is_pendant_address(a));
         let own = joined.iter().filter(|a| a.as_str() == local_ip).count();
         let others: Vec<String> = joined.into_iter().filter(|a| a != local_ip).collect();
-        let held_may_linger = self.lost_at.is_some_and(|l| l.elapsed() < self.opt.held_wait);
+        // Counted from the first look that finds it: until the controller can be
+        // reached again, it cannot hear from this PC, and that is what ends the hold.
+        let held_may_linger = self.lost_at.is_some() && self.held_since.is_none_or(|since| since.elapsed() < self.opt.held_wait);
         if others.is_empty() && own == 1 && held_may_linger {
-            if !self.held_seen {
-                self.log.warn(
-                    "The controller still holds the connection that broke (it lists it until it lets go, about 16 s after the break) and would send it every sample. Waiting for that before setting anything up.",
-                );
+            if self.held_since.is_none() {
+                self.log.warn(format!(
+                    "The controller still holds the connection that broke, and would send it every sample. It lets go once it hears from this PC again, which it can now, or at a timeout of its own. Waiting for that, up to {:.0} s, before setting anything up.",
+                    self.opt.held_wait.as_secs_f64()
+                ));
+                self.held_since = Some(Instant::now());
             }
-            self.held_seen = true;
             self.drop_conn();
             self.retry_at = Some(Instant::now() + self.opt.held_poll);
             self.set_phase(Phase::Reconnecting { attempt: self.rung as u32 + 1, retry_in: self.opt.held_poll });
             return false;
         }
         if others.is_empty() && own == 0 {
-            if std::mem::take(&mut self.held_seen) {
+            if self.held_since.take().is_some() {
                 // This connection was open when the controller let go, and the VC
                 // starves a connection open at that moment (s24 item 10): once more.
                 self.log.info("The controller has let go of the connection that broke; connecting afresh.");
@@ -1667,7 +1677,8 @@ impl Worker {
             }
             return true;
         }
-        self.held_seen = false;
+        // After a loss, exactly that extra entry here means it outlasted the wait. (What
+        // follows stops, or delivers and so clears `held_since`.)
         let lingering = others.is_empty() && own == 1 && self.lost_at.is_some();
         let mut names = others;
         if own > 0 {
@@ -1677,12 +1688,19 @@ impl Worker {
         if ask {
             // Every other client is asked about afresh.
             self.approved = None;
-            self.log.warn(format!("While the connection was down, {names} connected to the controller. Asking before taking InfoStream again: it may be showing test signals now."));
+            if lingering {
+                self.log.warn(format!(
+                    "One more connection from this PC ({local_ip}) is listed than before the connection was lost, still {:.0} s after the controller could be reached again: another program here, or the controller still holding the connection that broke. Asking before taking InfoStream again: another program may be showing test signals now.",
+                    self.opt.held_wait.as_secs_f64()
+                ));
+            } else {
+                self.log.warn(format!("While the connection was down, {names} connected to the controller. Asking before taking InfoStream again: it may be showing test signals now."));
+            }
             return true;
         }
         let reason = if lingering {
             format!(
-                "Reconnected to {t}, but one more connection from this PC is listed than before, {:.0} s after the break: another program here, or the controller still holding the connection that broke. Nothing was set up, so as not to take InfoStream from another program. Connect again when it is free.",
+                "Reconnected to {t}, but one more connection from this PC is listed than before, still {:.0} s after the controller could be reached again: another program here, or the controller still holding the connection that broke. Nothing was set up, so as not to take InfoStream from another program. Connect again when it is free.",
                 self.opt.held_wait.as_secs_f64()
             )
         } else {
@@ -2271,7 +2289,7 @@ impl Worker {
                 self.told_no_samples = true;
                 let (what, advice) = no_samples_advice(on_vc);
                 self.log.warn(format!(
-                    "No samples at all in {:.0} s. {} other program(s) are connected to this controller, and {what} If this program's own earlier connection broke, the controller lets go of it after about 16 s: connect again then.",
+                    "No samples at all in {:.0} s. {} other program(s) are connected to this controller, and {what} If this program's own earlier connection broke, the controller may still hold it (it lets go once it hears from this PC again, or at a timeout of its own): connect again in a minute.",
                     self.opt.stall_after.as_secs_f64(),
                     programs
                 ));
@@ -2712,7 +2730,7 @@ impl Worker {
                 self.followed_restart = false;
                 self.vc_hold_retried = false;
                 self.lost_at = None;
-                self.held_seen = false;
+                self.held_since = None;
             }
             self.delivered_before = true;
             self.advice = None;
