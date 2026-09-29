@@ -882,6 +882,9 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("derived");
     let mut h = harness(dir.clone(), AskPolicy::Remote);
+    // A plateau compares its level with 2 s before, not 20 (G28): the history below is
+    // seconds long.
+    h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5020, "Add");
@@ -1047,20 +1050,84 @@ fn a_plateau_of_no_voltage_is_refused() {
     assert!(h.state().toasts.iter().any(|t| t.text.contains("arm")), "not told to arm the robot");
 }
 
+/// A DC link that moves `per_s` volts a second from `from`, counted from its first
+/// sample (the fake's clock does not start at 0).
+fn ramp(from: f32, per_s: f32) -> SignalDef {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let start = std::sync::Arc::new(AtomicU64::new(u64::MAX));
+    SignalDef {
+        source: SignalSource::float(move |(t, _, _)| {
+            let t0 = match start.compare_exchange(u64::MAX, t, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => t,
+                Err(t0) => t0,
+            };
+            from + per_s * t.saturating_sub(t0) as f32 / 1000.0
+        }),
+        sample_ms: 4.032,
+    }
+}
+
+#[test]
+fn a_plateau_is_refused_while_the_link_drains_or_charges() {
+    // The cell (s26 item 11): 16 s after motors off the link read 327 V, draining 2.6 %
+    // every 10 s and steadier over two seconds than an armed link; a plateau was taken
+    // from it. Here the comparison spans 2 s instead of 20, and the link drains 5 V a
+    // second from 380 V: 2.6 % over the span, and over two seconds a standard deviation
+    // of 0.77 %, inside the steadiness rule (1 %).
+    let mut b = Behaviour::default();
+    b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 379.0 } else { 381.0 }), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let mut h = harness(temp_dir("plateau-trend"), AskPolicy::Remote);
+    h.state_mut().plateau_trend_ms = 2000;
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5027, "Add");
+    card_menu(&mut h, 0, "Sag below a plateau");
+    let set = |h: &mut Harness<'static, SpyApp>| {
+        let _ = h.run_ok();
+        h.get_by_label("Set the plateau").click();
+        let _ = h.run_ok();
+        h.state().derived[0].live.def().is_set()
+    };
+    // Two seconds of an armed link, but not the span before them: too short a history.
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(!set(&mut h), "set with no history to compare its level with");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("No plateau yet") && t.text.contains("draining")), "not said why: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Motors off: the link drains.
+    fake.with(|b| b.signals.insert(5027, ramp(380.0, -5.0)));
+    std::thread::sleep(Duration::from_millis(4500));
+    assert!(!set(&mut h), "a plateau taken from a draining link");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("fell from") && t.text.contains("motors")), "not said: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Motors on: the link charges in a moment and then holds; two seconds after, the
+    // span still reaches back into the charge.
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 }));
+    std::thread::sleep(Duration::from_millis(2500));
+    fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 379.0 } else { 381.0 }), sample_ms: 4.032 }));
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(!set(&mut h), "a plateau taken while the link was still coming up");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("rose from")), "not said: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Held level over the whole span: taken.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(set(&mut h), "an armed, steady link refused: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    assert!(matches!(h.state().derived[0].live.def(), spy_core::derived::Derived::Sag { plateau_v: Some(p), .. } if (p - 380.0).abs() < 0.5));
+}
+
 #[test]
 fn the_deepest_sag_counts_from_its_plateau_on() {
     let mut b = Behaviour::default();
     b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
     let mut h = harness(temp_dir("plateau-deepest"), AskPolicy::Remote);
+    h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "Add");
     card_menu(&mut h, 0, "Sag below a plateau");
-    // Motors off (16 V) for a while, then on and steady.
+    // Motors off (16 V) for a while, then on and steady for longer than the plateau's
+    // comparison reaches back.
     std::thread::sleep(Duration::from_millis(800));
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 356.0), sample_ms: 4.032 }));
-    std::thread::sleep(Duration::from_millis(2300));
+    std::thread::sleep(Duration::from_millis(4300));
     let _ = h.run_ok();
     h.get_by_label("Set the plateau").click();
     assert!(wait(&mut h, 2000, |a| a.derived[0].live.def().is_set() && a.derived[0].stats.n > 20));

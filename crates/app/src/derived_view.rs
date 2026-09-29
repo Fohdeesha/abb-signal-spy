@@ -309,11 +309,15 @@ impl SpyApp {
             self.toast(Level::Error, format!("The DC link is not live ({}): a plateau needs its last two seconds.", h.word()));
             return;
         }
+        let span = self.plateau_trend_ms;
         let got = match self.session.store().get(&link) {
-            Some(c) => derived::plateau(&c.lock()),
+            Some(c) => {
+                let r = c.lock();
+                derived::plateau(&r).map(|p| (p, derived::level_before(&r, span)))
+            }
             None => Err("nothing has arrived from the DC link yet".into()),
         };
-        let (mean, sd) = match got {
+        let ((mean, sd), before) = match got {
             Ok(x) => x,
             Err(e) => return self.toast(Level::Error, format!("No plateau: {e}.")),
         };
@@ -325,6 +329,25 @@ impl SpyApp {
         }
         if sd > mean.abs() * PLATEAU_STEADY {
             self.toast(Level::Error, format!("No plateau: the DC link was not steady (mean {} V, standard deviation {} V over the last two seconds). Set it with the robot armed and still.", view::fmt(mean), view::fmt(sd)));
+            return;
+        }
+        // After the motors go off the link drains for about 20 minutes, steadily enough
+        // to pass the two seconds above; it is its level that moves (s26 item 11).
+        let secs = span as f64 / 1000.0;
+        let before = match before {
+            Ok(b) => b,
+            Err(e) => return self.toast(Level::Error, format!("No plateau yet: {e}. Keep the robot armed and still, and set it again in a moment.")),
+        };
+        if !derived::level_holds(before, mean) {
+            let why = if mean < before {
+                "it is draining, as it does for about 20 minutes after the motors go off. Arm the robot (motors on)"
+            } else {
+                "it is still coming up after the motors came on. Wait"
+            };
+            self.toast(
+                Level::Error,
+                format!("No plateau: the DC link {} {} V to {} V in the last {secs:.0} s: {why}, keep the robot still, and set the plateau once the link has held level for {secs:.0} s.", if mean < before { "fell from" } else { "rose from" }, view::fmt(before), view::fmt(mean)),
+            );
             return;
         }
         let def = Derived::Sag { link, plateau_v: Some(mean) };
@@ -459,7 +482,7 @@ impl SpyApp {
                                 }
                             }
                             let text = if plateau_v.is_some() { "Set again" } else { "Set the plateau" };
-                            if ui.small_button(text).on_hover_text("The mean of the DC link's last two seconds").clicked() {
+                            if ui.small_button(text).on_hover_text("The mean of the DC link's last two seconds, with the robot armed and still. Refused until the link has held that level for 20 s: after the motors go off it drains slowly, for about 20 minutes.").clicked() {
                                 set_plateau = Some(i);
                             }
                         });

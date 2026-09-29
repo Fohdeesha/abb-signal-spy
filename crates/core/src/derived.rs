@@ -8,7 +8,8 @@
 //! - **PWM duty sum**: the three leg duty ratios of one axis (5020-5022) added up:
 //!   1.50 by construction under space-vector modulation (measured 1.50003, sd 0.008).
 //! - **DC-link sag**: how far a DC link sits below its charged plateau, which the
-//!   person sets (the mean of the last two seconds, robot armed and still).
+//!   person sets (the mean of the last two seconds, robot armed and still, the link
+//!   having held that level for 20 s).
 //!
 //! A value exists only where every input has a sample of the same controller tick.
 //! Streams in one signal group share their stamps exactly; two groups (the drive
@@ -37,6 +38,15 @@ pub const PLATEAU_MIN_MS: i64 = 1500;
 /// charged link is hundreds of volts. Set below it, every sag after arming would read
 /// about the whole link (the operator's decision, 2026-09-28).
 pub const PLATEAU_MIN_V: f64 = 50.0;
+/// With the motors off a DC link drains slowly: 2.6 % of its voltage every 10 s on the
+/// cell, about 20 minutes down to its floor. Over two seconds a draining link is
+/// steadier than an armed one, whose level ripples; over 20 s they part: an armed
+/// link's two-second mean moved at most 0.71 %, a draining one's at least 5.11 %
+/// (tunemaster-testsignals.md s26 item 11). So a plateau also compares its level with
+/// the level this long before (the operator's decision G28, 2026-09-29) ...
+pub const PLATEAU_TREND_MS: i64 = 20_000;
+/// ... and is refused when the two differ by more than this fraction of the level.
+pub const PLATEAU_TREND_MAX: f64 = 0.02;
 /// What the three duty ratios add up to under space-vector modulation.
 pub const DUTY_SUM: f64 = 1.5;
 /// The three PWM leg duty ratios (knowledge TSV: confirmed; which leg is U, V or W
@@ -202,16 +212,55 @@ pub fn same_ticks(inputs: &[&[(i64, f64)]], mut f: impl FnMut(i64, &[f64])) {
 /// of that stretch has arrived: counted in samples, so a gap inside it is not coverage.
 pub fn plateau(ring: &Ring) -> Result<(f64, f64), String> {
     let Some((last, _)) = ring.last() else { return Err("nothing has arrived from the DC link yet".into()) };
-    let v: Vec<(i64, f64)> = ring.range(last - PLATEAU_MS + 1, last + 1).filter(|(_, v)| v.is_finite()).collect();
-    let gap = ring.gap_ms();
-    let covered: i64 = v.windows(2).map(|w| w[1].0 - w[0].0).filter(|&step| step as f64 <= gap).sum();
-    if v.len() < 2 || covered < PLATEAU_MIN_MS {
-        return Err(format!("only {:.1} s of the DC link has arrived; it needs {:.0} s", covered as f64 / 1000.0, PLATEAU_MS as f64 / 1000.0));
+    stretch(ring, last).ok_or_else(|| format!("only {:.1} s of the DC link has arrived; it needs {:.0} s", covered(ring, last) as f64 / 1000.0, PLATEAU_MS as f64 / 1000.0))
+}
+
+/// Whether a DC link held its level: `now` (a plateau's mean) against `before` (its
+/// level [`PLATEAU_TREND_MS`] earlier, [`level_before`]) within [`PLATEAU_TREND_MAX`].
+pub fn level_holds(before: f64, now: f64) -> bool {
+    ((now - before) / now).abs() <= PLATEAU_TREND_MAX
+}
+
+/// The DC link's level `span_ms` before its newest sample: the mean of the
+/// [`PLATEAU_MS`] ending then, which a plateau is compared with
+/// ([`PLATEAU_TREND_MS`]). Refused, with the reason, when the history does not reach
+/// back that far with enough samples.
+pub fn level_before(ring: &Ring, span_ms: i64) -> Result<f64, String> {
+    let Some((last, _)) = ring.last() else { return Err("nothing has arrived from the DC link yet".into()) };
+    match stretch(ring, last - span_ms) {
+        Some((mean, _)) => Ok(mean),
+        None => {
+            let charted = ring.first_t().map_or(0, |first| last - first);
+            let need = (span_ms + PLATEAU_MS) as f64 / 1000.0;
+            Err(if (charted as f64) < need * 1000.0 {
+                format!("the DC link has been charted for only {:.0} s, and a plateau needs its last {need:.0} s, to tell an armed drive from one still draining after the motors went off", charted as f64 / 1000.0)
+            } else {
+                format!("the DC link's history {:.0} s ago has a gap, and a plateau compares with it, to tell an armed drive from one still draining after the motors went off", span_ms as f64 / 1000.0)
+            })
+        }
+    }
+}
+
+/// The mean and standard deviation of a ring's samples in the [`PLATEAU_MS`] up to and
+/// including `end`, or `None` when fewer than [`PLATEAU_MIN_MS`] of it have samples
+/// (counted in samples, so a gap inside it is not coverage).
+fn stretch(ring: &Ring, end: i64) -> Option<(f64, f64)> {
+    let v: Vec<(i64, f64)> = ring.range(end - PLATEAU_MS + 1, end + 1).filter(|(_, v)| v.is_finite()).collect();
+    if v.len() < 2 || covered(ring, end) < PLATEAU_MIN_MS {
+        return None;
     }
     let n = v.len() as f64;
     let mean = v.iter().map(|x| x.1).sum::<f64>() / n;
     let sd = (v.iter().map(|x| (x.1 - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
-    Ok((mean, sd))
+    Some((mean, sd))
+}
+
+/// How many ms of the [`PLATEAU_MS`] up to `end` have samples no further apart than
+/// the ring's gap.
+fn covered(ring: &Ring, end: i64) -> i64 {
+    let gap = ring.gap_ms();
+    let t: Vec<i64> = ring.range(end - PLATEAU_MS + 1, end + 1).filter(|(_, v)| v.is_finite()).map(|(t, _)| t).collect();
+    t.windows(2).map(|w| w[1] - w[0]).filter(|&step| step as f64 <= gap).sum()
 }
 
 /// A derived channel's live history, kept up with its inputs' histories in the
@@ -449,6 +498,53 @@ mod tests {
         fill(&store, &c, &[(5, 0.5)]);
         live.update(&store);
         assert_eq!(live.lock().range(i64::MIN, i64::MAX).map(|(t, _)| t).collect::<Vec<_>>(), vec![0, 4]);
+    }
+
+    /// 25 s of a DC link at `v(seconds)`, 4 ms apart.
+    fn link(v: impl Fn(f64) -> f64) -> Ring {
+        let mut r = Ring::new(4.0);
+        for i in 0..6250 {
+            r.push(i * 4, v(i as f64 * 0.004));
+        }
+        r
+    }
+
+    #[test]
+    fn a_plateau_compares_its_level_with_twenty_seconds_before() {
+        let held = |r: &Ring| level_holds(level_before(r, PLATEAU_TREND_MS).unwrap(), plateau(r).unwrap().0);
+        // Armed and still on the cell: 386 V with a ripple of a few volts, and a level
+        // that moved at most 0.71 % over 20 s (s26 item 11).
+        let armed = link(|s| 386.0 * (1.0 + 0.0071 * s / 20.0) + 3.0 * (s * 2.0 * PI * 3.0).sin());
+        assert!(held(&armed), "an armed link refused");
+        assert!(plateau(&armed).unwrap().1 > 1.0, "the ripple is there");
+        // The motors off: the cell's link drained 2.6 % every 10 s (tau about 385 s),
+        // its slowest 20 s by 5.11 %; over two seconds it is steadier than the armed one.
+        let draining = link(|s| 338.0 * (-s / 385.0).exp());
+        assert!(plateau(&draining).unwrap().1 < plateau(&armed).unwrap().1, "the drain's two seconds are the steadier");
+        assert!(!held(&draining), "a draining link taken for an armed one");
+        // A link still charging after the motors came on.
+        let charging = link(|s| if s < 8.0 { 16.0 } else { 386.0 });
+        assert!(!held(&charging));
+    }
+
+    #[test]
+    fn a_plateau_needs_the_links_history_twenty_seconds_back() {
+        let mut r = Ring::new(4.0);
+        for i in 0..2500 {
+            r.push(i * 4, 386.0);
+        }
+        assert!(plateau(&r).is_ok(), "ten seconds: enough for the mean");
+        let e = level_before(&r, PLATEAU_TREND_MS).unwrap_err();
+        assert!(e.contains("charted for only 10 s") && e.contains("22 s"), "{e}");
+        // A gap where the level before would be: 4 s to 8 s with no samples.
+        let mut r = Ring::new(4.0);
+        for i in (0..6250).filter(|i| !(1000..2000).contains(i)) {
+            r.push(i * 4, 386.0);
+        }
+        let e = level_before(&r, PLATEAU_TREND_MS).unwrap_err();
+        assert!(e.contains("has a gap"), "{e}");
+        // The same history whole: the level 20 s before is there.
+        assert_eq!(level_before(&link(|_| 386.0), PLATEAU_TREND_MS), Ok(386.0));
     }
 
     #[test]

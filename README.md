@@ -39,8 +39,10 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    per interval, for runs of hours. M drops a marker.
 6. **Derived channels**, from a channel's menu (⋯): a resolver angle's **turn to a target** (the short
    way round, ON TARGET within 0.25 degrees), the **PWM duty sum** of an axis (1.50 by construction), and
-   the **DC-link sag** below a plateau you set with the robot armed and still. A derived value is never
-   shown as more live than its inputs.
+   the **DC-link sag**: how far the drive's DC-link voltage dips below its resting level (the plateau),
+   which you set with the robot armed and still once the link has held level for 20 s (after the
+   motors go off it drains slowly, for about 20 minutes). A derived value is never shown as more live
+   than its inputs.
 7. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
    marked REVIEWING. *Save CSV* and *Save PNG* above the charts save what is in view, live or reviewed.
 8. **Controller details** (Controller menu, optional): with the controller's RWS login, typed each

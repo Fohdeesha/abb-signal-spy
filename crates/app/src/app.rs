@@ -131,6 +131,9 @@ pub struct SpyApp {
     pub sets: Option<crate::sets::SetDialog>,
     /// Derived channels, computed from channels in `chans`.
     pub derived: Vec<crate::derived_view::DerivedView>,
+    /// How far back a sag's plateau compares the DC link's level: 20 s (G28). The tests
+    /// shorten it, with a link that drains as much faster.
+    pub plateau_trend_ms: i64,
 
     /// The RWS extras: a logged-in session, the login being typed (never saved), how
     /// often the event log is looked at, the window, and the events for the charts.
@@ -288,6 +291,7 @@ impl SpyApp {
             add: None,
             sets: None,
             derived: Vec::new(),
+            plateau_trend_ms: spy_core::derived::PLATEAU_TREND_MS,
             rws: None,
             rws_form: crate::rws_view::RwsForm::default(),
             rws_poll: crate::rws_view::POLL,
