@@ -4,6 +4,7 @@ description = "RobAPI InfoStream client, typed sample decoder, channel store and
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lib]

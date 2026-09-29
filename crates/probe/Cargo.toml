@@ -4,6 +4,7 @@ description = "Console probe for ABB Signal Spy: list local virtual controllers,
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]

@@ -25,8 +25,9 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    not take the stream back. If the network drops or goes quiet (nothing at all from the controller
    for 3 s), it reconnects by itself: it first waits for the controller to let go of the broken
    connection (usually at once when the network is back, up to a minute), and it never takes the
-   stream from a program that connected meanwhile (it asks, or stops and says why). If the controller at the address
-   turns out to be a different one (a cable moved to the next robot), it stops rather than carry on.
+   stream from a program that connected meanwhile (it asks, or stops and says why). If the controller
+   at the address turns out to be a different one (a cable moved to the next robot), it stops rather
+   than carry on.
 3. **Add channels.** Pick a signal in the catalogue and press Add. The dialog asks only what that signal
    needs: the robot, the axis, or nothing. Up to 12 channels. *Channel sets...* adds a common group in
    one go: the DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block.
@@ -70,9 +71,10 @@ version may use other numbers; the controller's refusal is shown per channel, an
 another controller can be loaded (Catalogue menu).
 
 Settings live in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe` when a `settings.json` is
-already there. `--connect HOST[:PORT]` connects at startup. Your notes on signals, `signal-notes.json`,
-and the log, `signal-spy.log`, are kept there too; if the window ever closes by itself, `crash.txt` in the same folder says why (for instance that
-Windows refused it memory because the PC's memory was used up).
+already there. `--connect HOST[:PORT]` connects at startup. Your notes on signals,
+`signal-notes.json`, and the log, `signal-spy.log`, are kept there too; if the window ever closes by
+itself, `crash.txt` in the same folder says why (for instance that Windows refused it memory because
+the PC's memory was used up).
 
 ## Recordings
 
@@ -81,7 +83,6 @@ started, for example `2026-09-26_04-47-20 dc dip`:
 
 - `data.csv`: `controller_ms,channel,value`, one row per sample. `controller_ms` is the controller's own
   clock; `channel` is `signal/unit/joint`, for example `4002/ROB_1/J2` (torque, ROB_1, joint 2).
-  Recordings made before 2026-09-27 wrote `4002/ROB_1/2`; this program reads both.
 - `slow.csv` (slow logs): `controller_ms,channel,count,mean,min,max`, one row per channel per interval.
 - `recording.json`: the controller and its system id, each channel's name, units and sample time,
   reconnects and controller restarts, markers, and whether any samples were lost. `anchors` map the
@@ -92,6 +93,7 @@ started, for example `2026-09-26_04-47-20 dc dip`:
   computes them again from the recorded inputs).
 - `* view.csv` and `* charts.png` beside the recording folders are *Save CSV* and *Save PNG*:
   `time_utc,t_s,channel,name,units,value`, one row per sample, in the units the window shows.
+  `* signal-notes.tsv` is an export of your notes on signals.
 
 String signals (the work object, the tool's name, a program position) are written quoted, and may
 contain commas, quotes and line breaks; any CSV reader, pandas included, reads them correctly.
@@ -122,4 +124,16 @@ cargo test --workspace
 
 The workspace has three crates: `crates/core` (the protocol, decoder, session, store, catalogue and
 recorder, with no user interface), `crates/app` (the window, egui) and `crates/probe` (the console
-tool). The catalogue in `catalogue/` is generated from the research data.
+tool). The catalogue in `catalogue/` is generated from measurements that are not part of this
+repository; what you find out about a signal is welcome as an export of your notes (item 10 above).
+
+A Windows 7 (64-bit) build comes from `powershell -File tools\build_win7.ps1`: a pinned nightly
+compiler for Rust's tier-3 Windows 7 target, OpenGL only and no screen-reader support, and an import
+check that the exe needs nothing Windows 7 lacks. It has not yet been run on Windows 7.
+
+## Licence
+
+Copyright (C) 2026 Jon Sands.
+
+GPL-3.0-or-later: see [LICENSE](LICENSE). This program comes with no warranty; it only reads from
+the controller, but what you do with what it shows is yours to judge.

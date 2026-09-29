@@ -1004,6 +1004,7 @@ impl SpyApp {
             ui.label(RichText::new("Not affiliated with or endorsed by ABB. ABB and IRC5 are trademarks of ABB.").strong());
             ui.label("The InfoStream protocol is not a documented interface: this program was checked against real controllers, and a RobotWare update could change it. When something is off, this program says so rather than showing a stale value as live.");
             ui.add_space(6.0);
+            ui.label("Copyright (C) 2026 Jon Sands. Free software under the GNU General Public License, version 3 or later: you may share and change it under its terms. It comes with ABSOLUTELY NO WARRANTY.");
             ui.label(RichText::new(format!("Catalogue: {} ({})", self.catalogue.title, self.catalogue.source)).weak());
         });
         self.show_about = open;
