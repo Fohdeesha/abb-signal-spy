@@ -1,4 +1,4 @@
-//! The phone view: a read-only page on the LAN (C10), off until switched on.
+//! The phone view: a read-only page on the LAN, off until switched on.
 //!
 //! It listens only while enabled, serves two things (the page and a JSON snapshot
 //! the window builds), and accepts no commands: GET and HEAD only, a bounded request,

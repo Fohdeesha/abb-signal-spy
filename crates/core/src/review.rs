@@ -1,4 +1,4 @@
-//! A recording opened for review (Phase 2): every channel's samples on one time axis,
+//! A recording opened for review: every channel's samples on one time axis,
 //! the wall clock, exact across controller restarts, with a min/max summary so a chart
 //! of hours draws as quickly as one of seconds.
 //!

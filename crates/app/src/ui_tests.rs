@@ -159,7 +159,7 @@ fn the_other_clients_question_is_asked_and_answered() {
 #[test]
 fn a_real_controllers_flexpendant_alone_asks_nothing() {
     // Every real IRC5 lists its FlexPendant on its internal network: named, not asked
-    // about (the operator's decision, 2026-09-26).
+    // about (decided 2026-09-26).
     let b = Behaviour { extra_clients: vec!["192.168.126.10".into()], ..Behaviour::default() };
     let fake = FakeController::start(b).unwrap();
     let mut h = harness(temp_dir("pendant"), AskPolicy::Always);
@@ -268,7 +268,7 @@ fn pause_cursors_and_markers() {
 #[test]
 fn a_still_resolvers_dither_does_not_fill_its_chart_live_or_reviewed() {
     // The cell (2026-09-29): a still 5138 dithered over 0.022 deg and filled its chart.
-    // Here 0.022 deg of dither; its chart must span the motor-side angles' 0.05 deg (G29).
+    // Here 0.022 deg of dither; its chart must span the motor-side angles' 0.05 deg.
     let mut b = Behaviour::default();
     let dither = 0.011_f32.to_radians();
     b.signals.insert(5138, SignalDef { source: SignalSource::float(move |(t, _, _)| 1.7779 + if t / 4 % 2 == 0 { dither } else { -dither }), sample_ms: 4.032 });
@@ -835,7 +835,7 @@ fn the_same_channel_twice_in_one_request_is_added_once() {
 
 #[test]
 fn streaming_with_nothing_arriving_does_not_read_as_streaming() {
-    // Another program connected InfoStream first and gets every sample (s25 item 7):
+    // Another program connected InfoStream first and gets every sample (measured 2026-09-28):
     // this one is set up, and nothing arrives. Seen on the VC as a green STREAMING
     // beside the advice.
     let fake = FakeController::start(Behaviour::default()).unwrap();
@@ -1010,7 +1010,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("derived");
     let mut h = harness(dir.clone(), AskPolicy::Remote);
-    // A plateau compares its level with 2 s before, not 20 (G28): the history below is
+    // A plateau compares its level with 2 s before, not 20: the history below is
     // seconds long.
     h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
@@ -1205,7 +1205,7 @@ fn ramp(from: f32, per_s: f32) -> SignalDef {
 
 #[test]
 fn a_plateau_is_refused_while_the_link_drains_or_charges() {
-    // The cell (s26 item 11): 16 s after motors off the link read 327 V, draining 2.6 %
+    // The cell (2026-09-29): 16 s after motors off the link read 327 V, draining 2.6 %
     // every 10 s and steadier over two seconds than an armed link; a plateau was taken
     // from it. Here the comparison spans 3 s instead of 20, and the link drains 5 V a
     // second from 380 V: 4 % over the span, and over two seconds a standard deviation
@@ -1257,7 +1257,7 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
 
 #[test]
 fn a_derived_setting_changed_while_recording_is_in_the_recording() {
-    // G14: a recording keeps the definitions, and a change of target or plateau while it
+    // A recording keeps the definitions, and a change of target or plateau while it
     // runs is an event in it, so that a review can say its values use the last one.
     let mut b = Behaviour::default();
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
@@ -1757,7 +1757,7 @@ fn the_browser_shows_named_signals_and_finds_any_number() {
     let mut h = harness(temp_dir("browse"), AskPolicy::Remote);
     let get = |h: &Harness<'static, SpyApp>, n: u32| h.state().catalogue.get(n).unwrap().clone();
     let (open, inert, named, strong) = (get(&h, 8000), get(&h, 1101), get(&h, 4002), get(&h, 1717));
-    // D2: named only by default.
+    // Named only by default.
     assert!(h.state().visible(&named));
     assert!(!h.state().visible(&open));
     assert!(!h.state().visible(&inert));
@@ -2072,7 +2072,7 @@ fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
     assert!(h.query_all_by_label_contains("r = 1.0000").next().is_some(), "the correlation is not shown");
     assert!(h.query_all_by_label_contains("line: Y = 2.00000 × X + 3.00000 Nm").next().is_some(), "the line is not shown");
 
-    // Its own zoom (G27): dragged, it keeps the person's view and says how to get the
+    // Its own zoom: dragged, it keeps the person's view and says how to get the
     // whole stretch back; a double-click does, and so do other channels.
     let zoomed = |h: &Harness<'static, SpyApp>| h.state().xy.as_ref().unwrap().zoomed;
     let drag = |h: &mut Harness<'static, SpyApp>| {
@@ -2143,7 +2143,7 @@ fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
 
 #[test]
 fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
-    // The explorer (C11): an unknown against the rulers charted beside it. Here 4002 is
+    // The open-signal explorer: an unknown against the rulers charted beside it. Here 4002 is
     // 2 x 4001 + 3 on every tick, and 2 x 318 + 3 on the 24 ms group's ticks; 1298 is a
     // sawtooth, 6010 a zero-filled constant.
     let fake = FakeController::start(xy_signals()).unwrap();
@@ -2377,7 +2377,7 @@ fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     let png = std::fs::read(&pngs[0]).unwrap();
     assert!(png.starts_with(b"\x89PNG"));
     // The XY window's part, not the charts': the plot with its axes and their labels,
-    // and above it which channels, how many pairs, r and the line (G30: a picture of
+    // and above it which channels, how many pairs, r and the line (a picture of
     // the plot alone said none of it). Its header's width and height are the window's.
     let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as f32;
     let (w, plot) = (h.state().xy_window_rect.unwrap(), h.state().xy_rect.unwrap());

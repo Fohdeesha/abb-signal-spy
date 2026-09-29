@@ -1,4 +1,4 @@
-//! The look: dark by default with a light toggle (E3), and a channel palette that
+//! The look: dark by default with a light toggle, and a channel palette that
 //! stays distinguishable for twelve channels on either background.
 
 use eframe::egui::{self, Color32};

@@ -98,9 +98,9 @@ impl Reply {
     }
 }
 
-/// "-StreamId" + whitespace + decimal digits, within u32: the reference's
+/// "-StreamId" + whitespace + decimal digits, within u32: a working client's
 /// `-StreamId\s+(\d+)`, first occurrence that parses. A garbled reply maps nothing
-/// (the bridge's old strtol mapped "-StreamId abc" to stream 0), and a refusal's
+/// (a lenient `strtol` would map "-StreamId abc" to stream 0), and a refusal's
 /// "streamId -1" is not a stream.
 pub fn parse_stream_id(text: &str) -> Option<u32> {
     let key = "-StreamId";

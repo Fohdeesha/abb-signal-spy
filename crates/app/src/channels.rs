@@ -1,7 +1,7 @@
 //! The channel table (right panel): one card per channel with its value (a 150 ms
-//! mean, F3; the charts stay raw), min / max / mean since reset, the achieved rate,
+//! mean; the charts stay raw), min / max / mean since reset, the achieved rate,
 //! the age of the last sample, and one status word. A value that is not LIVE is
-//! dimmed and labelled, never shown as current (rule 2).
+//! dimmed and labelled, never shown as current.
 
 use std::time::Instant;
 

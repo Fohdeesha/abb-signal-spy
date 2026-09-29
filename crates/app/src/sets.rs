@@ -1,5 +1,5 @@
-//! Ready-made channel sets (Phase 2): the channels a common look needs, added in one
-//! go (proposal section 13): both DC links, one robot's torques or joint positions,
+//! Ready-made channel sets: the channels a common look needs, added in one
+//! go: both DC links, one robot's torques or joint positions,
 //! its resolver angles on six axes, and the `8000-8009` block for slow logging.
 //!
 //! A set is only a list of channels: each is added as the add dialog would add it,

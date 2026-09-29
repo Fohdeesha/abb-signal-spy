@@ -1,4 +1,4 @@
-# The C runtime linked into the exe: a single portable .exe (decision E5) must not
+# The C runtime linked into the exe: a single portable .exe must not
 # need the Visual C++ redistributable installed, which a clean field laptop often lacks.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

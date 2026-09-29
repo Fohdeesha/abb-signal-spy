@@ -1,4 +1,4 @@
-//! Saving what is in view (Phase 2): the samples of the charted stretch as one CSV
+//! Saving what is in view: the samples of the charted stretch as one CSV
 //! file, and the charts as a PNG. Both go to the recordings folder, named for the
 //! local time, and the person is told where.
 //!

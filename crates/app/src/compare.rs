@@ -1,5 +1,4 @@
-//! Compare one channel with every other charted one (Phase 3, C11: the open-signal
-//! explorer). Over the stretch the charts show, live or in a recording under review,
+//! Compare one channel with every other charted one (the open-signal explorer). Over the stretch the charts show, live or in a recording under review,
 //! each other channel is paired with it tick by tick (the XY plot's rule: a partner
 //! within 1 ms or no pair) and fitted with the least-squares line; the list is ranked by
 //! how closely the two follow a straight line (|r|). That is how most of the catalogue's

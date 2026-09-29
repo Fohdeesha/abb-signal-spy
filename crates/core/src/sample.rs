@@ -29,7 +29,7 @@
 //! guess which sample a stamp belongs to.
 //!
 //! Every length is compared against the bytes remaining, never added to a position
-//! first (the bridge's audit M34 rule).
+//! first (the framing's rule, see [`crate::wire`]).
 
 use crate::wire::read_varint;
 
@@ -38,8 +38,9 @@ pub const MARKER: &[u8; 8] = b"protobuf";
 /// Where the marker sits on the VC: after status, subscription id and the time.
 pub const MARKER_OFFSET: usize = 16;
 /// How far into a RAD the marker is looked for when it is not at its usual place.
-/// Wider than the VC needs on purpose: the IRC5's header is not yet confirmed
-/// (Phase 0 check 1), and a marker found elsewhere is reported, not hidden.
+/// Wider than needed on purpose (the RW6 VC and an IRC5 both put it at 16: 148,814
+/// frames on the IRC5, 2026-09-29), and a marker found elsewhere is reported, not
+/// hidden.
 pub const MARKER_SEARCH: usize = 64;
 
 pub const TYPE_FLOAT: u8 = 1;
@@ -598,7 +599,8 @@ mod tests {
         let mut m = vec![0x08, 0x01, 0x12, 0x01, 0x01, 0x1A, 0x03, 1, 2, 3];
         let (_, d) = run(&payload(&[(1, m.clone())], None, true));
         assert_eq!(d, vec![Defect::BadMessage]);
-        // A samples length that wraps (2^64 - 12): the M34 shape.
+        // A samples length that wraps (2^64 - 12), which added to a position would
+        // overflow.
         m = vec![0x08, 0x29, 0x12, 0x00, 0x1A];
         put_varint(&mut m, u64::MAX - 11);
         m.extend_from_slice(&[0x55; 8]);

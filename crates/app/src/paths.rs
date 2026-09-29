@@ -2,7 +2,7 @@
 //!
 //! Settings and the log go in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe`
 //! when a `settings.json` is already there (a portable copy on a USB stick keeps its
-//! settings with it, E5). Recordings default to `Documents\TestSignals` (C3).
+//! settings with it). Recordings default to `Documents\TestSignals`.
 
 use std::path::{Path, PathBuf};
 

@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn frames_match_the_reference_client() {
-        // Byte for byte what tools/abb_istream_probe.py sent to the VC on 2026-09-25.
+        // Byte for byte what a working client sent to the VC on 2026-09-25.
         let stop = Command::StopStream.frame(14, "127.0.0.1");
         let fr = Frame::parse(&stop).unwrap();
         assert_eq!(fr.rads().next().unwrap().data, b"SET\0/127.0.0.1/INFOSTREAM\0StopStream\0\0\0");

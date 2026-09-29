@@ -12,20 +12,20 @@
 //!   freed id is handed out again at once (measured 2026-09-25: an undefined 214 went
 //!   to the very next define, and after another client's StreamUndefineAll its
 //!   defines got 215 and 214, the ids the first client had been streaming on); or,
-//!   with [`IdPools::Irc5`], the real IRC5's three pools (s24 item 4)
+//!   with [`IdPools::Irc5`], the real IRC5's three pools (measured 2026-09-26)
 //! * sample frames on service 8, cause 1, txn 0, one sample per stream per frame,
 //!   24 ms signals every sixth tick, integer signals as `LogsrvIntMsg`
 //! * ONE subscription id for every client, and single tenancy: every sample frame
 //!   goes to the connection that first sent StreamConnect or SUBSCRIBE, whichever
-//!   (a StreamConnect alone takes the samples: s25 item 7, 2026-09-28); either
+//!   (a StreamConnect alone takes the samples: measured 2026-09-28); either
 //!   client's StopStream, StartStream or StreamUndefineAll acts on everyone's
 //!   streams. When that connection closes, a client that connected InfoStream
 //!   meanwhile gets nothing, whatever it sends (StartStream, SUBSCRIBE again); only a
-//!   connection that does so after it becomes the new tenant (measured 2026-09-25,
-//!   `tools/abb_vc_handover.py`, and 2026-09-28, `tools/abb_vc_tenancy_order.py`)
+//!   connection that does so after it becomes the new tenant (measured 2026-09-25
+//!   and 2026-09-28)
 //! * a define or undefine while streaming stops delivery until StartStream
-//! * a closed connection's streams are reaped, and more (measured 2026-09-26,
-//!   tunemaster-testsignals.md s24 items 9-11): when the tenant's connection closes,
+//! * a closed connection's streams are reaped, and more (measured 2026-09-26): when
+//!   the tenant's connection closes,
 //!   however it leaves, **every** stream goes, another connection's included; when a
 //!   connection that defined a stream closes, every stream goes too and every
 //!   subscriber still connected gets nothing more (only a new connection does). A
@@ -34,13 +34,13 @@
 //!   connected but not yet subscribed, where the real IRC5 served it; the fake does
 //!   what the IRC5 did
 //! * the handshake is answered whenever it is sent, mid-session too, with the
-//!   current client list (s24 item 12)
+//!   current client list
 //! * the AYA keepalive with ctrl 4000/16000; a zeroed reply drops the connection
 //!   at once, no reply drops it at the timeout. Sent every 4 s here, for good; the VC
 //!   sent two, 4 s apart just after a connection opened, and then no more
-//!   (tunemaster-testsignals.md s27 item 2)
+//!   (measured 2026-09-29)
 //! * a broken connection kept, listed and as the tenant, until the controller lets go
-//!   of it (s23 item 16, s25 item 1): seen by the client as a drop
+//!   of it (measured 2026-09-25 and 2026-09-27): seen by the client as a drop
 //!   ([`FakeController::break_connections`]) or, for a fault out in the network, as
 //!   silence ([`FakeController::cut_network`])
 //!
@@ -66,8 +66,8 @@ pub const FIRST_TEXT_STREAM_ID: u32 = 233;
 /// IRC5's text pool size is unmeasured; the fake uses the same bound.)
 pub const TEXT_POOL: usize = 4;
 
-/// How a controller numbers its streams (tunemaster-testsignals.md s23 item 11, s24
-/// item 4). Freed ids are handed out again at once in every pool.
+/// How a controller numbers its streams (measured on the VC 2026-09-25 and the IRC5
+/// 2026-09-26). Freed ids are handed out again at once in every pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum IdPools {
     /// The RW6 VC: 215 down; text from 233 up.
@@ -78,7 +78,7 @@ pub enum IdPools {
     Irc5,
 }
 
-/// Signals the IRC5 numbered from its second pool, from 17 down (s24 item 4).
+/// Signals the IRC5 numbered from its second pool, from 17 down.
 pub const IRC5_DRIVE_POOL_SIGNALS: [u32; 34] = [
     1188, 1531, 1887, 2332, 2772, 3680, 3896, 5027, 5722, 6093, 6740, 7000, 7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008,
     7009, 7010, 7011, 7012, 7013, 7014, 7015, 7040, 7041, 7042, 7043, 7044, 7045, 9834,
@@ -197,7 +197,7 @@ pub struct Behaviour {
     pub stamp_step: u64,
     /// Stamp like the real IRC5 instead: its tick is 4.032 ms and its clock counts
     /// whole milliseconds, so steps are 4 with a 5 every 31.25 ticks, and 24 or 25 for
-    /// the 24 ms signals (tunemaster-testsignals.md s24 item 2).
+    /// the 24 ms signals (measured on the IRC5, 2026-09-26).
     pub irc5_clock: bool,
     pub aya_interval: Duration,
     pub aya_timeout: Duration,
@@ -216,7 +216,7 @@ pub struct Behaviour {
     /// Stop all sample delivery (the whole feed dead, keepalives still flowing).
     pub mute_all: bool,
     /// A virtual controller the PC is too busy for: no samples, and its clock stops
-    /// too, while it still answers (measured on the RW6 VC, 2026-09-27: s25 item 3).
+    /// too, while it still answers (measured on the RW6 VC, 2026-09-27).
     pub freeze: bool,
     /// Do not answer the handshake at all.
     pub mute_handshake: bool,
@@ -448,7 +448,7 @@ impl FakeController {
     /// drop, but the controller only lets go of it after `linger` (a real one does
     /// at its keepalive timeout), and until then it stays the tenant, so a client
     /// that connects again meanwhile subscribes as an orphan and gets nothing
-    /// (measured 2026-09-25, `tools/abb_vc_dead_tenant.py`).
+    /// (measured 2026-09-25).
     pub fn break_connections(&self, linger: Duration) {
         let mut st = lock(&self.state);
         let until = Instant::now() + linger;
@@ -544,13 +544,13 @@ fn close_conn(st: &mut State, conn: usize) {
         let _ = c.writer.shutdown(Shutdown::Both);
     }
     if was_tenant {
-        // s24 item 10: the tenant's exit, whatever it sent, clears every stream.
+        // Measured 2026-09-26: the tenant's exit, whatever it sent, clears every stream.
         st.streams.clear();
     } else if c.defined {
-        // s24 item 11: so does the exit of a connection that defined a stream, and
-        // the subscribers left get nothing more on their connections. Not a broken
-        // connection the controller still holds: that one keeps the tenancy until it
-        // lets go (s23 item 16), and what a leaving client does to it is unmeasured.
+        // So does the exit of a connection that defined a stream, and the subscribers
+        // left get nothing more on their connections. Not a broken connection the
+        // controller still holds: that one keeps the tenancy until it lets go, and
+        // what a leaving client does to it is unmeasured.
         st.streams.clear();
         for other in st.conns.values_mut() {
             if other.subscribed && other.zombie_until.is_none() {
@@ -812,7 +812,7 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
         }
         "StreamConnect" => {
             // The first connection to send StreamConnect gets every sample, subscribed
-            // or not (RW6 VC 2026-09-28, s25 item 7); one that sends it while another
+            // or not (RW6 VC 2026-09-28); one that sends it while another
             // is the tenant is starved, as with SUBSCRIBE.
             let tenant_now = tenant(st);
             if let Some(c) = st.conns.get_mut(&conn)

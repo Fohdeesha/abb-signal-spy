@@ -1,4 +1,4 @@
-//! Reviewing a recording (Phase 2): open one from the Recordings window, by its path,
+//! Reviewing a recording: open one from the Recordings window, by its path,
 //! or by dropping its folder on the window; chart it on its own clock (the wall
 //! clock, exact across controller restarts) with its markers and connection events,
 //! cursors and the statistics of the stretch in view. The live session carries on
@@ -610,7 +610,7 @@ pub(crate) fn name_of(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String 
     name(cat, ch)
 }
 
-/// A recorded channel's display unit and factor (degrees for radians, F1).
+/// A recorded channel's display unit and factor (degrees for radians).
 fn display(ch: &ReviewChannel) -> (String, f64) {
     let units = ch.entry.as_ref().map(|e| e.units.clone()).unwrap_or_default();
     match catalogue::angle_unit(&units) {

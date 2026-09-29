@@ -1,5 +1,5 @@
 //! Recording controls in the top bar: REC (every sample), "save the last N
-//! seconds" (what just happened, even if nothing was recording, C4), slow logging
+//! seconds" (what just happened, even if nothing was recording), slow logging
 //! (averages for runs of hours), and the phone view switch.
 
 use std::sync::Arc;
@@ -139,7 +139,7 @@ impl SpyApp {
                 crate::paths::open_folder(&d);
             }
         ui.separator();
-        // Phone view: off until switched on (C10).
+        // Phone view: off until switched on.
         let mut on = self.phone.is_some();
         if ui.toggle_value(&mut on, "Phone view").on_hover_text("A read-only page for a phone on the same network. Off until switched on; it opens a listening port on this PC while it is on.").changed() {
             if on {

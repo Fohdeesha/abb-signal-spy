@@ -43,7 +43,7 @@ pub struct Settings {
     pub recent: Vec<Target>,
     pub last_target: Option<Target>,
     pub dark: bool,
-    /// Chart window, seconds (F4: 10 s).
+    /// Chart window, seconds (10 s by default).
     pub window_s: f64,
     pub channels: Vec<SavedChannel>,
     pub record_dir: Option<PathBuf>,
@@ -57,7 +57,7 @@ pub struct Settings {
     pub units: Vec<String>,
     pub ui_scale: f32,
     pub derived: Vec<SavedDerived>,
-    /// RWS's port (no login is ever kept, G16), and whether its event log is looked at.
+    /// RWS's port (no login is ever kept), and whether its event log is looked at.
     pub rws_port: u16,
     pub rws_events: bool,
 }

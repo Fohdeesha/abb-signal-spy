@@ -1,6 +1,6 @@
 //! A note for when memory runs out. When an allocation is refused, Rust stops the
 //! program at once, without the panic hook (so no crash.txt) and without a line in the
-//! log: on the cell (2026-09-29, tunemaster-testsignals.md s26 item 13) the window
+//! log: on the cell (2026-09-29) the window
 //! simply vanished, the PC at its commit limit. The global allocator here passes every
 //! request to the system's and, when one is refused, writes a note to crash.txt and a
 //! line to signal-spy.log first.

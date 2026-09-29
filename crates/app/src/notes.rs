@@ -1,12 +1,12 @@
-//! Your own notes on signals (Phase 3, C11, the open-signal explorer): per signal
+//! Your own notes on signals (the open-signal explorer): per signal
 //! number, the fields of the research files the catalogue is built from (their
 //! "knowledge schema"), kept on this PC beside the settings and shown in the catalogue's
 //! details beneath the catalogue's own. Exported as a TSV in that schema, to be merged
 //! into those files, or sent back by someone who found something out.
 //!
 //! An export names the program's version, the date and, when logged in to the
-//! controller's RWS, its RobotWare version, and nothing else about the controller
-//! (G26). A note that holds an address, a system id or a path on a PC is not exported:
+//! controller's RWS, its RobotWare version, and nothing else about the controller.
+//! A note that holds an address, a system id or a path on a PC is not exported:
 //! the file is meant to be shared, and the catalogue refuses such text anyway.
 
 use std::collections::BTreeMap;
@@ -176,7 +176,7 @@ impl Notes {
     }
 }
 
-/// What an export says about where it comes from (G26).
+/// What an export says about where it comes from.
 pub struct Origin<'a> {
     pub app_version: &'a str,
     /// Local date and time, as a person reads it.

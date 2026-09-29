@@ -476,7 +476,8 @@ fn hostile_bytes_on_a_live_session() {
     };
 
     // A sample RAD whose record length points past the payload, and one whose
-    // samples length wraps (the bridge's M34 shape), on the mapped stream.
+    // samples length wraps (a length that would overflow a position), on the mapped
+    // stream.
     let mut rad = sample::encode_rad(spy_core::fake::SUBSCRIPTION_ID, 0, &[Record { stream, kind: ValueKind::Float, stamps: vec![1], values: RecordValues::Float(vec![777.0]) }], None);
     let rec_len_at = 16 + 8 + 4 + 1;
     rad[rec_len_at] = 0xFF;
@@ -674,7 +675,8 @@ fn a_restarted_virtual_controller_is_followed_to_its_new_port() {
 
 /// A session streaming from a VC with a RobotStudio-like client listed beside it
 /// (handshake only); the VC then restarts on a new port, where that client
-/// reconnects first and sends StreamConnect (s25 item 9), and the session follows.
+/// reconnects first and sends StreamConnect (measured 2026-09-28), and the session
+/// follows.
 /// `extra`: clients elsewhere, listed by both.
 struct RestartedVc {
     s: Session,
@@ -702,7 +704,7 @@ fn restarted_vc(o: Options, extra: &[&str]) -> RestartedVc {
 }
 
 /// The VC restarts on a new port: RobotStudio's connection reconnects there first
-/// and takes InfoStream (s25 item 9); the finder then sees the new port.
+/// and takes InfoStream (measured 2026-09-28); the finder then sees the new port.
 fn restart(old: &mut FakeController, ports: &Arc<Mutex<Vec<u16>>>, b: Behaviour) -> (FakeController, OtherTool) {
     old.stop();
     ports.lock().unwrap().clear();
@@ -746,9 +748,9 @@ fn each_outage_gets_its_own_one_reconnect() {
 
 #[test]
 fn a_restarted_vc_whose_own_robotstudio_took_infostream_is_connected_again_once() {
-    // Measured on the RW6 VC (2026-09-28, s25 item 9): this program leaving ends
-    // RobotStudio's hold, and the next connection gets the samples. So the session
-    // leaves and comes back by itself, once (G24).
+    // Measured on the RW6 VC (2026-09-28): this program leaving ends RobotStudio's
+    // hold, and the next connection gets the samples. So the session leaves and comes
+    // back by itself, once.
     let v = restarted_vc(opts(), &[]);
     let (s, k) = (&v.s, &v.k);
     let mut stopped = false;
@@ -806,7 +808,8 @@ fn a_vc_that_did_not_restart_is_not_connected_again_by_itself() {
 fn the_one_reconnect_after_a_vc_restart_is_not_repeated() {
     // A program on this PC takes InfoStream again straight after this program left,
     // on a fresh connection of its own (an orphaned one gets nothing, whatever it
-    // sends: s23 item 15): one showing signals, not RobotStudio's hold at the start.
+    // sends, measured 2026-09-25): one showing signals, not RobotStudio's hold at the
+    // start.
     let v = restarted_vc(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(1000)], ..opts() }, &[]);
     let RestartedVc { s, new, rs, .. } = v;
     let again = std::thread::scope(|sc| {
@@ -941,8 +944,8 @@ fn another_tool_taking_infostream_is_caught_before_its_signals_show() {
     let a_tail: Vec<String> = fake.seen()[before..].iter().filter(|x| x.conn == 1).map(|x| x.property.clone()).collect();
     assert_eq!(a_tail, vec!["StreamDisconnect".to_string()], "{a_tail:?}");
     // Yet they are gone: the first subscriber's exit, whatever it sends, clears every
-    // stream on the controller (measured 2026-09-26, tunemaster-testsignals.md s24
-    // items 9-10). Only leaving before they are defined spares them.
+    // stream on the controller (measured 2026-09-26). Only leaving before they are
+    // defined spares them.
     assert!(wait_for(1000, || fake.streams().is_empty()), "{:?}", fake.streams());
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(fake.connections_total(), 2, "it went back for InfoStream");
@@ -950,10 +953,10 @@ fn another_tool_taking_infostream_is_caught_before_its_signals_show() {
 
 #[test]
 fn a_takeover_is_left_before_the_newcomer_sets_up_its_signals() {
-    // Measured 2026-09-26 (tunemaster-testsignals.md s24 items 9-10): this program's
-    // exit, whatever it sends, clears every stream on the controller, the newcomer's
-    // included. The bridge's test-signal client clears every stream, then waits
-    // 500 ms before its first define: leaving inside that wait spares all of it.
+    // Measured 2026-09-26: this program's exit, whatever it sends, clears every stream
+    // on the controller, the newcomer's included. A test-signal client seen clearing
+    // every stream waited 500 ms before its first define: leaving inside that wait
+    // spares all of it.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let a = spawn(opts());
     let k = key(6000, "ROB_1", 1);
@@ -1035,7 +1038,7 @@ fn a_change_of_this_programs_own_while_the_check_is_out_is_not_a_takeover() {
 fn the_flexpendant_alone_is_not_asked_about() {
     // Every real IRC5 lists its FlexPendant, on its internal network (192.168.126.10 on
     // the measured cell). Asking about it on every connection teaches people to click
-    // through the question (the operator's decision, 2026-09-26).
+    // through the question (decided 2026-09-26).
     let mut beh = Behaviour::default();
     beh.extra_clients = vec!["192.168.126.10".into()];
     let fake = FakeController::start(beh).unwrap();
@@ -1103,7 +1106,7 @@ fn the_pendant_reconnecting_is_not_blamed_for_a_takeover() {
 
 #[test]
 fn the_irc5s_stream_id_pools_change_nothing() {
-    // The real IRC5 numbers streams from three pools (s24 item 4): 259 down, its
+    // The real IRC5 numbers streams from three pools (measured 2026-09-26): 259 down, its
     // drive-side signals from 17 down, text from 260 up. Nothing may lean on the VC's
     // 215 and 233.
     let mut beh = Behaviour::default();
@@ -1536,7 +1539,7 @@ fn a_reconnect_waits_out_the_connection_the_controller_still_holds() {
     // A network fault: this end sees the connection drop at once; the controller
     // keeps it (listed, and as the one it sends every sample to) until its keepalive
     // times out, and a connection subscribed meanwhile never gets a sample
-    // (measured: s23 item 16; the listing, 2026-09-27).
+    // (measured 2026-09-25; the listing, 2026-09-27).
     fake.break_connections(Duration::from_millis(2500));
     let n = samples(&s, &k);
     assert!(wait_for(12000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 50), "{:?}\n{}", phase(&s), log_text(&s));
@@ -1651,7 +1654,7 @@ fn a_different_controller_at_the_address_is_not_streamed_from_unasked() {
 
 #[test]
 fn the_first_program_to_connect_infostream_gets_the_samples_subscribed_or_not() {
-    // Measured on the RW6 VC (tunemaster-testsignals.md s25 item 7): a connection that
+    // Measured on the RW6 VC (2026-09-28) and the IRC5 (2026-09-29): a connection that
     // only sent StreamConnect, before this one, gets every sample; this one none.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let mut other = OtherTool::connect(&fake, Duration::from_millis(20));
@@ -1670,10 +1673,11 @@ fn the_first_program_to_connect_infostream_gets_the_samples_subscribed_or_not() 
 fn a_program_leaving_that_ends_infostream_is_named_and_connected_again_once() {
     // The leaver is connected before this program (so listed in its handshake) but
     // sets nothing up until later: one that set up first would be the tenant
-    // (s25 item 7). It then connects InfoStream, defines a stream and leaves, as a tool
-    // that exits or crashes after its setup: its define pauses this program's feed,
-    // its exit ends it (s24 item 11), and only a new connection is served. The same
-    // sequence was verified on the VC with tools/abb_leaver.py (s25 item 7).
+    // (measured 2026-09-28). It then connects InfoStream, defines a stream and leaves,
+    // as a tool that exits or crashes after its setup: its define pauses this program's
+    // feed, its exit ends it (measured 2026-09-26), and only a new connection is
+    // served. The same sequence was verified on the VC (2026-09-28) and the IRC5
+    // (2026-09-29).
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let mut other = OtherTool::connect(&fake, Duration::from_millis(20));
     let a = spawn(opts());
@@ -1920,7 +1924,8 @@ fn an_unanswered_liveness_check_does_not_block_the_next() {
 #[test]
 fn the_irc5s_tick_is_neither_a_gap_nor_a_takeover() {
     // Stamp steps of 4 ms with a 5 every 31.25 samples, and 24 or 25 for the 24 ms
-    // signals (s24 item 2): all normal, and all inside the gap and takeover bounds.
+    // signals (measured on the IRC5, 2026-09-26): all normal, and all inside the gap
+    // and takeover bounds.
     let mut b = Behaviour::default();
     b.irc5_clock = true;
     b.id_pools = IdPools::Irc5;
@@ -1949,7 +1954,7 @@ fn the_irc5s_tick_is_neither_a_gap_nor_a_takeover() {
 fn a_controller_that_falls_silent_altogether_is_connected_to_again() {
     // Nothing at all arrives, the liveness check's answer included: the network or
     // the controller stalled (a program taking InfoStream would still answer). The
-    // session connects again by itself (G32) rather than stop; here the network only
+    // session connects again by itself rather than stop; here the network only
     // held everything up, and delivers it late.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let s = spawn(opts());
@@ -2071,7 +2076,7 @@ fn patient() -> Options {
 
 #[test]
 fn a_virtual_controller_that_pauses_is_waited_for() {
-    // Measured (s25 item 3): a VC the PC is too busy for stops InfoStream and its
+    // Measured (2026-09-27): a VC the PC is too busy for stops InfoStream and its
     // clock for as long as the load lasts, answers meanwhile, then carries on.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let s = spawn(patient());

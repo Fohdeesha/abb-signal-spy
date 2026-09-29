@@ -1,5 +1,5 @@
 //! An in-process stand-in for an IRC5's RWS 1.0, the resources the RWS extras read,
-//! answered as the RW6 VC answered them (tunemaster-testsignals.md s25 item 5): a
+//! answered as the RW6 VC answered them (measured 2026-09-27): a
 //! Digest login then a session cookie, JSON documents, the event log newest first by
 //! `limit` and `start`. It records every request, so a test can check that nothing but
 //! GETs was ever sent. Loopback only.
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn every_login_counts_its_nonce_from_one() {
         // RFC 2617 counts requests per nonce, and each login answers a fresh one. (The RW6
-        // VC accepted any count, tunemaster-testsignals.md s25 item 6; a stricter server
+        // VC accepted any count, measured 2026-09-28; a stricter server
         // would refuse a second login's 2 and blame the password.)
         let f = FakeRws::start(RwsBehaviour::default()).unwrap();
         let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");

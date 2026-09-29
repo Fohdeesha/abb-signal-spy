@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use crate::request::{Axis, MechUnit};
 use crate::sample::ValueKind;
 
-/// History kept per channel (F4: ten minutes).
+/// History kept per channel (ten minutes).
 pub const HISTORY_S: f64 = 600.0;
 /// The most points one ring holds, whatever its sample time says: ten minutes at the
 /// fastest rate anything has been seen streaming, with headroom.
@@ -154,7 +154,7 @@ impl Ring {
         (self.sample_ms * 1.5).max(1.0)
     }
 
-    /// Mean of the samples in the last `window_ms` before the newest sample (F3: the
+    /// Mean of the samples in the last `window_ms` before the newest sample (the
     /// numeric readouts show a 150 ms mean; the charts stay raw). NaN samples are
     /// skipped; `None` when nothing finite is in the window.
     pub fn recent_mean(&self, window_ms: i64) -> Option<f64> {

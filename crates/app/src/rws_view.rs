@@ -1,8 +1,8 @@
-//! The read-only RWS extras (Phase 2; C7, G16-G18): the controller's name and
+//! The read-only RWS extras: the controller's name and
 //! RobotWare version, its event log on the charts and in recordings (every 5 s, a
 //! setting turns it off), and a motor's commutator offset as a turn's target. GETs
-//! only, on a thread of their own. The login is typed each session and never stored
-//! (G16); RWS is used only while connected over InfoStream to the same controller,
+//! only, on a thread of their own. The login is typed each session and never stored;
+//! RWS is used only while connected over InfoStream to the same controller,
 //! checked by its system id.
 
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use crate::app::SpyApp;
 use crate::theme;
 use crate::view;
 
-/// How often the event log is looked at (G17).
+/// How often the event log is looked at.
 pub const POLL: Duration = Duration::from_secs(5);
 /// With the event log off, the controller's clock is read every this many looks
 /// (with it on, at every look): often enough to notice a refused login too.
@@ -293,12 +293,12 @@ impl SpyApp {
         if let Err(e) = started {
             return self.toast(Level::Error, format!("RWS: its thread could not be started ({e})."));
         }
-        // No login in the log file (G16): not even the user name.
+        // No login in the log file: not even the user name.
         self.log.info(format!("Logging in to RWS at {}:{port}.", target.host));
         self.rws = Some(RwsLink { target, port, system: None, identity: None, offset_ms: 0, trouble: None, events_on, told_unreadable: false, tx: cmd_tx, rx: msg_rx });
     }
 
-    /// End the RWS session, whatever the reason; its password goes with it (G16).
+    /// End the RWS session, whatever the reason; its password goes with it.
     fn close_rws(&mut self) {
         self.rws = None;
         self.rws_form.password.clear();

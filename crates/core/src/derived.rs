@@ -1,4 +1,4 @@
-//! Derived channels (Phase 2; C5 as decided 2026-09-27): values the window computes
+//! Derived channels (decided 2026-09-27): values the window computes
 //! from streamed channels. They are never streamed, and never written as data: a
 //! recording keeps what the controller sent plus these definitions, and a review
 //! computes them again.
@@ -14,8 +14,8 @@
 //! A value exists only where every input has a sample of the same controller tick.
 //! Streams in one signal group share their stamps exactly; two groups (the drive
 //! module's and the motion signals) stamp the same tick up to 1 ms apart at about 3 %
-//! of samples, and a neighbouring tick is always at least 2 ms away (the cell's
-//! recording, tunemaster-testsignals.md s25 item 4). So a partner within
+//! of samples, and a neighbouring tick is always at least 2 ms away (measured on a
+//! recording of a real IRC5, 2026-09-26). So a partner within
 //! [`SAME_TICK_MS`] is the same tick, and a missing one is a gap, never filled from a
 //! neighbour.
 
@@ -26,36 +26,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{ChannelKey, Ring, Store};
 
-/// Within this of the target (either way) a turn reads ON TARGET: the tolerance
-/// `abb_resolver_web.py` used.
+/// Within this of the target (either way) a turn reads ON TARGET.
 pub const ON_TARGET_DEG: f64 = 0.25;
 /// A plateau is the mean of this much of the newest history.
 pub const PLATEAU_MS: i64 = 2000;
 /// A plateau needs at least this much of that stretch to have arrived.
 pub const PLATEAU_MIN_MS: i64 = 1500;
 /// A plateau below this is not an armed drive's DC link: motors off it read 16 V on
-/// the cell, armed 378-397 V (tunemaster-testsignals.md s24), and every IRC5 drive's
-/// charged link is hundreds of volts. Set below it, every sag after arming would read
-/// about the whole link (the operator's decision, 2026-09-28).
+/// the measured cell, armed 378-397 V (2026-09-26), and every IRC5 drive's charged
+/// link is hundreds of volts. Set below it, every sag after arming would read about
+/// the whole link (decided 2026-09-28).
 pub const PLATEAU_MIN_V: f64 = 50.0;
 /// With the motors off a DC link drains slowly: 2.6 % of its voltage every 10 s on the
 /// cell, about 20 minutes down to its floor. Over two seconds a draining link is
 /// steadier than an armed one, whose level ripples; over 20 s they part: an armed
 /// link's two-second mean moved at most 0.71 %, a draining one's at least 5.11 %
-/// (tunemaster-testsignals.md s26 item 11). So a plateau also compares its level with
-/// the level this long before (the operator's decision G28, 2026-09-29) ...
+/// (measured on the cell's recording, 2026-09-29). So a plateau also compares its
+/// level with the level this long before (decided 2026-09-29) ...
 pub const PLATEAU_TREND_MS: i64 = 20_000;
 /// ... and is refused when the two differ by more than this fraction of the level.
 pub const PLATEAU_TREND_MAX: f64 = 0.02;
 /// What the three duty ratios add up to under space-vector modulation.
 pub const DUTY_SUM: f64 = 1.5;
-/// The three PWM leg duty ratios (knowledge TSV: confirmed; which leg is U, V or W
-/// was not determined).
+/// The three PWM leg duty ratios (confirmed; which leg is U, V or W was not
+/// determined).
 pub const PWM_LEGS: [u32; 3] = [5020, 5021, 5022];
 /// Two inputs' samples this close (ms) are the same controller tick.
 pub const SAME_TICK_MS: i64 = 1;
 /// The resolver angle in the calibration's own frame, `(cal_offset + motor) mod 2pi`
-/// (tunemaster-testsignals.md s13.6, s16): the frame a motor's commutator offset is
+/// (checked against the controller's own calibration): the frame a motor's commutator offset is
 /// in. 5000 and 7325 read the resolver too, but a fixed per-axis offset away.
 pub const RESOLVER_ANGLE: u32 = 5138;
 
@@ -381,8 +380,8 @@ mod tests {
         let w = [(0, 0.5), (4, 0.4), (8, 0.3), (12, 0.5), (16, 0.5)];
         // 4 has no V sample: a gap, not a sum of two.
         assert_eq!(d.combine(&[&u, &v, &w]), vec![(0, 1.5), (8, 1.5), (12, 1.5)]);
-        // Another signal group stamps the same tick up to 1 ms off (s25 item 4): the
-        // same tick. 2 ms off is not.
+        // Another signal group stamps the same tick up to 1 ms off (measured on the
+        // IRC5): the same tick. 2 ms off is not.
         let x = [(0, 0.5), (4, 0.5), (8, 0.5)];
         let y = [(1, 0.5), (3, 0.6), (10, 0.5)];
         let z = [(0, 0.5), (5, 0.5), (8, 0.5)];
@@ -513,7 +512,7 @@ mod tests {
     fn a_plateau_compares_its_level_with_twenty_seconds_before() {
         let held = |r: &Ring| level_holds(level_before(r, PLATEAU_TREND_MS).unwrap(), plateau(r).unwrap().0);
         // Armed and still on the cell: 386 V with a ripple of a few volts, and a level
-        // that moved at most 0.71 % over 20 s (s26 item 11).
+        // that moved at most 0.71 % over 20 s (measured, 2026-09-29).
         let armed = link(|s| 386.0 * (1.0 + 0.0071 * s / 20.0) + 3.0 * (s * 2.0 * PI * 3.0).sin());
         assert!(held(&armed), "an armed link refused");
         assert!(plateau(&armed).unwrap().1 > 1.0, "the ripple is there");

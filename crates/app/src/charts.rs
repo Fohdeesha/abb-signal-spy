@@ -1,8 +1,8 @@
-//! The charts: stacked lanes on one controller-time axis (F2), a rolling window of
-//! 1 s to 10 min (10 s by default, F4), pause and scroll back through the 10-minute
+//! The charts: stacked lanes on one controller-time axis, a rolling window of
+//! 1 s to 10 min (10 s by default), pause and scroll back through the 10-minute
 //! history, per-lane autoscale with a lock, hover with the wall-clock time, two
-//! cursors with the time and value difference, and statistics of the visible window
-//! (C6). A gap is drawn as a gap, never interpolated across, and a stale channel's
+//! cursors with the time and value difference, and statistics of the visible window.
+//! A gap is drawn as a gap, never interpolated across, and a stale channel's
 //! empty stretch is shaded.
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -525,7 +525,7 @@ impl SpyApp {
 /// all but constant) signal a band around it wide enough to read, rather than a range
 /// of 1e-9 whose axis labels are all zeros; and never tighter than `min_span`, so a
 /// still joint's dither of a ten-thousandth of a degree does not fill the chart and
-/// look like violent motion (seen on the cell; the operator's decision, 2026-09-26).
+/// look like violent motion (seen on the cell; decided 2026-09-26).
 pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
     let mag = lo.abs().max(hi.abs());
     let span = hi - lo;
@@ -546,7 +546,7 @@ pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
 /// for any real motion or change to fill most of the chart, large enough that the
 /// noise of a signal at rest shows as the thin line it is. Unknown units: none. A
 /// still joint's speed dithers by about 0.25 deg/s (the cell, 2026-09-29): 0.5 deg/s
-/// (G29; it was 0.1).
+/// (it was 0.1).
 pub fn min_span(units: &str) -> f64 {
     match units.trim() {
         "deg" => 0.01,
@@ -568,7 +568,7 @@ pub fn min_span(units: &str) -> f64 {
 /// The smallest span for one channel's chart: its unit's, and wider for a motor-side
 /// angle (a resolver's, or the drive's electrical angle), which a still motor dithers
 /// by about 0.02 deg where a still arm joint dithers by 0.0001 deg (the cell,
-/// 2026-09-29). Arm angles keep 0.01 deg (the operator's decision G29). A signal the
+/// 2026-09-29). Arm angles keep 0.01 deg (decided 2026-09-29). A signal the
 /// catalogue does not know goes by its unit.
 pub fn min_span_for(units: &str, sig: Option<&spy_core::catalogue::Signal>) -> f64 {
     let motor_angle = sig.is_some_and(|s| s.category == "motor position" || (s.category == "drive / inverter" && matches!(s.units.as_str(), "rad" | "deg")));
@@ -659,7 +659,7 @@ mod tests {
     fn a_still_resolver_and_a_still_speed_do_not_fill_their_charts() {
         // The cell (2026-09-29): a still resolver (5138) dithered over 0.022 deg and a
         // still J1 speed (4001) over about 0.25 deg/s, and both filled their charts like
-        // violent motion. Wider spans for them (the operator's decision G29).
+        // violent motion. Wider spans for them (decided 2026-09-29).
         let cat = spy_core::catalogue::Catalogue::builtin();
         let fill = |lo: f64, hi: f64, span: f64| {
             let (a, b) = autoscale(lo, hi, span);

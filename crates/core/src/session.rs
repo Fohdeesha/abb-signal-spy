@@ -6,7 +6,7 @@
 //!                                   +--> Store (history)  +--> taps (recorder, slow log)
 //! ```
 //!
-//! The rules it keeps, each learned the hard way (proposal section 3):
+//! The rules it keeps, each learned the hard way:
 //!
 //! * **Read-only.** It sends only what [`crate::request`] can build.
 //! * **Answer the keepalive**, echoing its ctrl values, before anything else.
@@ -28,7 +28,7 @@
 //!   the session stops before filing anything more, as quietly as for a stall.
 //! * **Never show stale as live.** A channel with no sample inside its stale bound
 //!   is reported stale; the window freezes and dims it.
-//! * **Single tenancy (option A).** Before defining anything on a real controller
+//! * **Single tenancy.** Before defining anything on a real controller
 //!   with other RobAPI clients connected, it lists them and waits for an answer. If
 //!   its streams stop delivering on a live session it says so and stops, and does
 //!   not grab InfoStream back; and it closes that session quietly, because
@@ -36,7 +36,7 @@
 //!   whoever took over.
 //! * **Leave a takeover early.** However this program leaves, the controller clears
 //!   every stream defined at that moment, the newcomer's included (measured on the
-//!   IRC5 and the VC, 2026-09-26: tunemaster-testsignals.md s24). So when every
+//!   IRC5 and the VC, 2026-09-26). So when every
 //!   stream falls silent it sends the handshake again at once: the controller
 //!   answers it mid-session with its current client list, and an answer with still
 //!   no sample (TCP delivers any sample in flight first) means the streams stopped
@@ -66,7 +66,7 @@ use crate::store::{Channel, ChannelKey, Store};
 use crate::timeline::{ClockEvent, Timeline};
 use crate::wire::{self, service, Frame, FrameStatus};
 
-/// The app's fixed channel limit (decision C2).
+/// The app's fixed channel limit.
 pub const MAX_CHANNELS: usize = 12;
 /// The IRC5's RobAPI port. A virtual controller picks its own at every start.
 pub const ROBAPI_PORT: u16 = 5515;
@@ -77,7 +77,7 @@ const MAX_BUFFER: usize = 2 * wire::MAX_FRAME as usize;
 const MAX_QUEUED_FRAMES: usize = 8192;
 /// How often a reader with nothing to read looks whether its connection was let go.
 const READER_WAKE: Duration = Duration::from_millis(100);
-/// The reconnect ladder, the bridge's.
+/// The reconnect ladder, seconds per attempt; the last rung repeats.
 const LADDER: [u64; 5] = [1, 2, 5, 15, 30];
 /// A pause in the samples that began within this many controller milliseconds of
 /// the newest sample this program had when it last defined, undefined or started
@@ -121,7 +121,7 @@ pub struct Options {
     /// longer), with no change of this program's own in play: it asks the controller
     /// for its client list again. An answer with still no sample means InfoStream was
     /// taken, and the session leaves at once, before the newcomer sets up its signals
-    /// (leaving later clears them: tunemaster-testsignals.md s24 items 9-12).
+    /// (leaving later clears them: measured on the IRC5 and the VC, 2026-09-26).
     pub probe_after: Duration,
     pub teardown_wait: Duration,
     /// Seconds per rung of the reconnect ladder; the product uses [`LADDER`].
@@ -129,8 +129,8 @@ pub struct Options {
     pub ask: AskPolicy,
     /// After a network fault the controller keeps the broken connection, as the one
     /// it sends every sample to, and a connection subscribed meanwhile never gets a
-    /// sample (s23 item 16). It lists that connection in the handshake until it lets
-    /// go: one extra entry for this PC (the RW6 VC, `tools/abb_vc_held_listing.py`).
+    /// sample (measured on the RW6 VC, 2026-09-25). It lists that connection in the
+    /// handshake until it lets go: one extra entry for this PC (the RW6 VC, 2026-09-27).
     /// When is not the controller's own to keep: the VC let a silent client go 16 s
     /// into its silence on 2026-09-27, and held one past 44 s on 2026-09-29 (its
     /// keepalive went out twice, just after the connection opened, and not again).
@@ -148,8 +148,8 @@ pub struct Options {
     /// while the controller still answers and nobody connects or leaves, before the
     /// session gives up. A VC the PC is too busy for pauses InfoStream and its clock,
     /// for as long as the load lasts, and answers the handshake in seconds meanwhile
-    /// (measured, tunemaster-testsignals.md s25 item 3): not another program taking
-    /// over. A real controller never did (s24 item 3), and there the fast exit stands.
+    /// (measured on the RW6 VC, 2026-09-27): not another program taking over. A real
+    /// controller never did (the IRC5, 2026-09-26), and there the fast exit stands.
     /// Zero: no patience (the tests of the fast exit, which run over loopback).
     pub vc_pause_patience: Duration,
     /// Where the local virtual controllers answer. A VC takes a new port at every
@@ -162,7 +162,7 @@ pub struct Options {
 /// When to ask before taking InfoStream while other RobAPI clients are connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskPolicy {
-    /// On any controller not reached over loopback (B1, B2). The product's setting:
+    /// On any controller not reached over loopback. The product's setting:
     /// a local virtual controller always has RobotStudio connected, and asking about
     /// it every time would teach people to click through the question.
     Remote,
@@ -180,8 +180,9 @@ impl Default for Options {
             stale_after: Duration::from_millis(1000),
             stall_after: Duration::from_secs(3),
             // Four times the longest gap a healthy VC stream showed in two minutes
-            // (73 ms), and well inside the half second the bridge's test-signal client
-            // leaves between clearing every stream and its first define.
+            // (73 ms; a real IRC5's was 24 ms over ten minutes), and well inside the
+            // half second a test-signal client was seen to leave between clearing every
+            // stream and its first define.
             probe_after: Duration::from_millis(300),
             teardown_wait: Duration::from_millis(1500),
             ladder: LADDER.iter().map(|&s| Duration::from_secs(s)).collect(),
@@ -263,10 +264,9 @@ pub struct OtherClient {
 }
 
 /// An address on the IRC5's internal network, which its FlexPendant connects from
-/// (192.168.126.10 on the measured cell: tunemaster-testsignals.md s24 item 1). Every
-/// connection to a real IRC5 lists it, and it is not a program that could be streaming
-/// test signals, so it is named but never asked about: the operator's decision
-/// (2026-09-26), on one cell's evidence.
+/// (192.168.126.10 on the measured cell). Every connection to a real IRC5 lists it,
+/// and it is not a program that could be streaming test signals, so it is named but
+/// never asked about (decided 2026-09-26, on one cell's evidence).
 pub fn is_pendant_address(address: &str) -> bool {
     address.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| matches!(ip.octets(), [192, 168, 126, _]))
 }
@@ -289,8 +289,7 @@ pub struct Counters {
     /// cannot tell whose a sample is; the stream id and the takeover check do.
     pub foreign_subscription: u64,
     /// Which RobAPI service the sample frames came on (8 on the RW6 VC), and at what
-    /// offset in the RAD the `protobuf` marker sat (16): Phase 0 check 1 on a real
-    /// controller.
+    /// offset in the RAD the `protobuf` marker sat (16, and the same on an IRC5).
     pub sample_services: BTreeMap<u8, u64>,
     pub marker_offsets: BTreeMap<usize, u64>,
     pub unexpected_frames: u64,
@@ -794,9 +793,10 @@ struct Worker {
     /// The last restarted virtual controller followed to its new port (from, to).
     moved: Option<(Target, Target)>,
     /// This outage followed the controller to a new port: it restarted, and
-    /// RobotStudio's own connection took InfoStream as it started (s25 item 9).
+    /// RobotStudio's own connection took InfoStream as it started (measured on the RW6
+    /// VC, 2026-09-28).
     followed_restart: bool,
-    /// This outage already left and connected again once for that (G24). Both are
+    /// This outage already left and connected again once for that. Both are
     /// cleared by the first sample; a deliberate connect needs no clearing, since
     /// only a session that delivered before the outage connects again by itself.
     vc_hold_retried: bool,
@@ -1608,9 +1608,9 @@ impl Worker {
         self.others = others;
         // An automatic reconnect defines nothing until the controller's client list
         // says nobody new came meanwhile: this program's exit, however it leaves,
-        // ends InfoStream for whoever took it since (measured, s24 items 10-11, and
-        // 2026-09-27 even after undefining its own streams first:
-        // `tools/abb_vc_clean_exit.py`).
+        // ends InfoStream for whoever took it since (measured on the IRC5 and the VC,
+        // 2026-09-26, and on the VC 2026-09-27 even after undefining its own streams
+        // first).
         if self.auto_reconnect
             && let Some(base) = self.baseline.clone()
             && !self.reconnect_guard(&base, &clients, &local_ip, ask, &t)
@@ -1668,7 +1668,7 @@ impl Worker {
         if others.is_empty() && own == 0 {
             if self.held_since.take().is_some() {
                 // This connection was open when the controller let go, and the VC
-                // starves a connection open at that moment (s24 item 10): once more.
+                // starves a connection open at that moment (measured, 2026-09-26): once more.
                 self.log.info("The controller has let go of the connection that broke; connecting afresh.");
                 self.drop_conn();
                 self.retry_at = Some(Instant::now());
@@ -1864,7 +1864,7 @@ impl Worker {
                 self.send_cmd(Command::Undefine(s), Pending::Undefine { stream: s });
             }
             // Those undefines paused every stream, the tenant's too, until a
-            // StartStream (s23 item 4).
+            // StartStream (measured on the RW6 VC, 2026-09-25).
             if !tenant && !own.is_empty() {
                 self.send_cmd(Command::StartStream, Pending::Start);
             }
@@ -1955,9 +1955,9 @@ impl Worker {
                 Some(_) => {}
             }
             // A controller answers the handshake mid-session while another program
-            // takes InfoStream (s24 item 12), so this is the network or the controller
-            // itself: a fault out in the network reaches this end as silence, never
-            // as an error. Connect again by itself (the operator's decision, G32),
+            // takes InfoStream (measured, 2026-09-26), so this is the network or the
+            // controller itself: a fault out in the network reaches this end as silence,
+            // never as an error. Connect again by itself (decided 2026-09-29),
             // through the checks of every automatic reconnect, which wait out the
             // broken connection the controller holds meanwhile (`held_wait`).
             let why = format!(
@@ -2001,7 +2001,7 @@ impl Worker {
 
     /// Every stream is silent: send the handshake again. The controller answers it
     /// mid-session with its current client list and carries on streaming (measured
-    /// on the VC: tunemaster-testsignals.md s24 item 12).
+    /// on the VC, 2026-09-26).
     fn send_probe(&mut self, now: Instant) {
         let txn = self.next_txn();
         self.pending.insert(txn, Pending::Probe { sent: now, samples: self.counters.samples });
@@ -2057,10 +2057,10 @@ impl Worker {
             )
         } else if !left.is_empty() {
             // Nobody is taking InfoStream: a program that had set up signals left, and
-            // its exit ended InfoStream for every connection (s24 item 11). Only a new
-            // connection gets samples again; connect once more by itself (the
-            // operator's decision, 2026-09-26), through the same checks as any
-            // automatic reconnect.
+            // its exit ended InfoStream for every connection (measured on the VC
+            // 2026-09-26, and on the IRC5 2026-09-29). Only a new connection gets
+            // samples again; connect once more by itself (decided 2026-09-26), through
+            // the same checks as any automatic reconnect.
             if !self.leaver_retry {
                 let why = format!(
                     "every stream stopped at once when {} disconnected from the controller (a program that had set up test signals ends InfoStream for every program connected when it leaves); nobody is taking it, so connecting again, once",
@@ -2085,8 +2085,8 @@ impl Worker {
             )
         } else if self.vc_patient() {
             // A virtual controller: the PC too busy for it pauses InfoStream and its
-            // clock alike, and it answers meanwhile, with nobody new (measured, s25
-            // item 3). Waited out, the values shown as stale; each spaced check says
+            // clock alike, and it answers meanwhile, with nobody new (measured,
+            // 2026-09-27). Waited out, the values shown as stale; each spaced check says
             // again whether anyone connected, and samples that resume after another
             // program's setup show it (the stamps skip, or a record type changes).
             if self.vc_paused_since.is_none() {
@@ -2246,17 +2246,18 @@ impl Worker {
             // reconnect waited out the broken connection the controller held, and
             // found nobody new in its client list; so another program has most likely
             // taken InfoStream meanwhile from an address that was listed already.
-            // Stop, once: going again would end its InfoStream each time (s24 item 11).
+            // Stop, once: going again would end its InfoStream each time (a program
+            // that set up streams ends InfoStream for every program when it leaves).
             // On this PC the connection with InfoStream is most likely RobotStudio's
             // own: it reconnects at every start of a virtual controller and takes
             // InfoStream first, with twelve streams of its own, and a program that set
-            // up streams ends that hold when it leaves (measured, s25 item 9).
+            // up streams ends that hold when it leaves (measured, 2026-09-28).
             let on_vc = self.conn.as_ref().is_some_and(|c| is_loopback(c.peer.ip()));
             if nothing_yet && self.auto_reconnect && self.delivered_before {
                 // A virtual controller this outage followed to a new port restarted, and
                 // that hold is RobotStudio's automatic one: leave, which ends it, and
                 // connect again by itself, once, when every other client is on this PC
-                // (the operator's decision, G24).
+                // (decided 2026-09-28).
                 if on_vc && self.followed_restart && !self.vc_hold_retried && self.others.iter().all(|o| o.same_pc) {
                     self.vc_hold_retried = true;
                     // Its own connection may stay listed a moment: waited out like a held one.
@@ -2756,8 +2757,8 @@ impl Worker {
     /// Whether this frame shows that another client has taken InfoStream, and how.
     ///
     /// Stream ids are controller-wide and reused at once, so once another client has
-    /// removed this program's streams (StreamUndefineAll, as the bridge does on
-    /// connect) and defined its own, its samples arrive here under this program's
+    /// removed this program's streams (StreamUndefineAll, as some clients do on
+    /// connecting) and defined its own, its samples arrive here under this program's
     /// ids, looking live. Two things give it away (measured on the RW6 VC,
     /// 2026-09-25, where a 1.9 s takeover showed both):
     ///
@@ -2997,7 +2998,7 @@ fn is_loopback(ip: IpAddr) -> bool {
 /// Why nothing arrives with other programs connected, for the log (the middle of a
 /// sentence) and for the session line. The first connection to open InfoStream
 /// (StreamConnect) gets every sample, whether or not it shows any: measured on the VC
-/// (s25 item 7) and on the IRC5 (s26 item 3).
+/// (2026-09-28) and on the IRC5 (2026-09-29).
 fn no_samples_advice(on_vc: bool) -> (&'static str, &'static str) {
     if on_vc {
         (
@@ -3111,7 +3112,7 @@ mod tests {
 
     #[test]
     fn with_no_samples_a_remote_controllers_advice_names_an_idle_holder_too() {
-        // On the IRC5 (s26 item 3) a client that had only opened InfoStream, showing
+        // On the IRC5 (2026-09-29) a client that had only opened InfoStream, showing
         // nothing, got every sample: the advice cannot name only programs showing test
         // signals.
         let (what, advice) = no_samples_advice(false);

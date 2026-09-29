@@ -1,4 +1,4 @@
-//! The XY plot (Phase 3, C6): one channel against another over the stretch the charts
+//! The XY plot: one channel against another over the stretch the charts
 //! show, live or in a recording under review, so pausing, scrolling or zooming the
 //! charts picks the stretch. A point is a pair of samples of the same controller tick
 //! (the derived channels' rule, [`same_ticks`]: a partner within 1 ms or no point,
@@ -31,7 +31,7 @@ pub struct XyState {
     pub x: Option<String>,
     pub y: Option<String>,
     pub(crate) cache: Option<(Key, Pairs)>,
-    /// The person dragged or zoomed the plot (G27): it keeps their view until a
+    /// The person dragged or zoomed the plot: it keeps their view until a
     /// double-click, or other channels, bring back the whole stretch.
     pub(crate) zoomed: bool,
     /// The ranges of x and y the plot showed last, which its points were thinned for.
@@ -317,7 +317,7 @@ impl SpyApp {
         self.xy_rect = rect;
         // Its picture is the whole window while a plot is in it: the title (which says
         // when it is a review), the channels, the pairs, r and the line, and the plot with
-        // its axes (G30; the plot alone said none of that).
+        // its axes (the plot alone said none of that).
         self.xy_window_rect = rect.and(shown.map(|w| w.response.rect));
         self.xy = open.then_some(xy);
         if png {

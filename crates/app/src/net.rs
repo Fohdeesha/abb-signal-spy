@@ -1,4 +1,4 @@
-//! Small OS helpers: reverse DNS for the other-clients question (B2 asks for a
+//! Small OS helpers: reverse DNS for the other-clients question (it names a
 //! hostname when one is found), and a check for a second copy of this program.
 
 use std::collections::HashMap;

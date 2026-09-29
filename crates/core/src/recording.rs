@@ -1,6 +1,6 @@
 //! Recording to disk.
 //!
-//! A recording is a folder (decision C3):
+//! A recording is a folder:
 //!
 //! ```text
 //! 2026-09-25_14-03-07 dc link dip/

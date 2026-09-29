@@ -456,7 +456,7 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
         "  frames {}  sample frames {}  samples {}  AYA answered {}  foreign records {}  foreign subscription {}  liveness checks {}  defects {:?}  no-trailer {}",
         k.frames, k.sample_frames, k.samples, k.ayas, k.foreign_records, k.foreign_subscription, k.liveness_checks, k.defects, k.no_trailer
     );
-    // Phase 0 check 1: where the samples came (service 8 at offset 16 on the RW6 VC).
+    // Where the samples came (service 8, the marker at offset 16, on the RW6 VC and an IRC5).
     println!("  sample frames by service {:?}  protobuf marker at offset {:?}  unexpected frames {}", k.sample_services, k.marker_offsets, k.unexpected_frames);
     if let Phase::Stopped { reason } = &st.phase {
         println!("  STOPPED: {reason}");

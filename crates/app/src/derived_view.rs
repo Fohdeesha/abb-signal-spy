@@ -1,4 +1,4 @@
-//! Derived channels in the window (Phase 2): the turn to a target, the PWM duty sum
+//! Derived channels in the window: the turn to a target, the PWM duty sum
 //! and the DC-link sag (`spy_core::derived`). Each is computed from channels in the
 //! list, its inputs, and is never shown as more live than the least live of them.
 //! Offered from an input's card menu; adding one adds any input it lacks.
@@ -345,7 +345,7 @@ impl SpyApp {
             return;
         }
         // After the motors go off the link drains for about 20 minutes, steadily enough
-        // to pass the two seconds above; it is its level that moves (s26 item 11).
+        // to pass the two seconds above; it is its level that moves (measured 2026-09-29).
         let secs = span as f64 / 1000.0;
         let before = match before {
             Ok(b) => b,
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn the_commutator_offset_is_a_target_only_for_the_resolver_angle() {
         // com_offset is what 5138 reads at the commutation position (its frame is the
-        // calibration's, tunemaster-testsignals.md s13.6); 5000 and 7325 carry a fixed
+        // calibration's); 5000 and 7325 carry a fixed
         // offset from it, and 5028, 5029 and 7022 turn five times per motor turn.
         assert_eq!(commutator_instance(&key(5138, 2)).as_deref(), Ok("rob1_2"));
         for n in [5000, 7325, 5028, 5029, 7022] {

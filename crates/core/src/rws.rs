@@ -1,16 +1,15 @@
-//! Read-only RWS 1.0 (IRC5, RobotWare 6) for the extras (proposal C7; G16-G18): the
-//! controller's name and RobotWare version, its event log on the chart timeline, and
-//! a motor's calibration values. **GETs only** (rule 2): nothing here writes, and no
-//! request body is ever sent.
+//! Read-only RWS 1.0 (IRC5, RobotWare 6) for the extras: the controller's name and
+//! RobotWare version, its event log on the chart timeline, and a motor's calibration
+//! values. **GETs only**: nothing here writes, and no request body is ever sent.
 //!
-//! What it rests on, measured on the RW6 VC 2026-09-27 (tunemaster-testsignals.md s25
-//! item 5): a Digest login (RFC 2617, qop auth) answered with a session cookie that
+//! What it rests on, measured on the RW6 VC 2026-09-27 and on an IRC5 2026-09-29: a
+//! Digest login (RFC 2617, qop auth) answered with a session cookie that
 //! carries later requests; JSON documents (`?json=1`) whose items are in
 //! `_embedded._state`; times as the controller's local clock in whole seconds with no
 //! zone (`2026-09-27 T 22:26:09`); the event log newest first, `limit` a page and
 //! `start` the page number; and a `/logout` the VC refuses, so one session is kept.
 //!
-//! Credentials are never stored (G16): the caller holds them for the session.
+//! Credentials are never stored: the caller holds them for the session.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -310,7 +309,7 @@ pub fn event_utc_ms(stamp_s: i64, offset_ms: i64) -> i64 {
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 
 /// One GET on a connection of its own (`Connection: close`), read until whole: the
-/// VC closes as asked (s25 item 6), but one that kept the connection open would
+/// VC closes as asked (measured 2026-09-28), but one that kept the connection open would
 /// otherwise cost every request its timeout, and then the answer.
 fn get_raw(host: &str, port: u16, path: &str, cookies: &str, auth: Option<&str>) -> Result<Response, RwsError> {
     get_raw_within(host, port, path, cookies, auth, REQUEST_DEADLINE)

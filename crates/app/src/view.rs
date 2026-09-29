@@ -1,4 +1,4 @@
-//! How values are shown: units (degrees by default, F1), number formatting, labels,
+//! How values are shown: units (degrees by default), number formatting, labels,
 //! and the one status word per channel. Pure functions, tested below.
 
 use spy_core::catalogue::{self, Catalogue, Select, Signal};
@@ -75,7 +75,7 @@ fn read_window(ring: &Ring, r: Reading, from: i64, to: i64) -> Vec<f64> {
     }
 }
 
-/// The value a card shows, in the native unit: the mean of the last 150 ms (F3).
+/// The value a card shows, in the native unit: the mean of the last 150 ms.
 /// Padding undone for a zero-filled signal; the mean on the circle for a wrapping
 /// angle, or its newest sample when it turns too fast to average.
 pub fn readout(ring: &Ring, r: Reading) -> Option<f64> {

@@ -131,7 +131,7 @@ pub struct SpyApp {
     pub sets: Option<crate::sets::SetDialog>,
     /// Derived channels, computed from channels in `chans`.
     pub derived: Vec<crate::derived_view::DerivedView>,
-    /// How far back a sag's plateau compares the DC link's level: 20 s (G28). The tests
+    /// How far back a sag's plateau compares the DC link's level: 20 s. The tests
     /// shorten it, with a link that drains as much faster.
     pub plateau_trend_ms: i64,
     /// Each chart's mapping from its data to the screen, as drawn in the last frame
@@ -184,7 +184,7 @@ pub struct SpyApp {
     /// The XY plot, while its window is open, and where its plot is on screen.
     pub xy: Option<crate::xy::XyState>,
     pub xy_rect: Option<egui::Rect>,
-    /// The XY window around it, while a plot is drawn: what its Save PNG keeps (G30).
+    /// The XY window around it, while a plot is drawn: what its Save PNG keeps.
     pub xy_window_rect: Option<egui::Rect>,
     /// The compare window (one channel against every other charted one), while open.
     pub compare: Option<crate::compare::CompareState>,

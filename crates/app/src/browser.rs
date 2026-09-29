@@ -1,9 +1,9 @@
 //! The catalogue browser (left panel) and the add-channel dialog.
 //!
-//! By default only named signals show (D2); the open and the inert ones sit behind
+//! By default only named signals show; the open and the inert ones sit behind
 //! toggles. Numbers that report the same quantity collapse into one row ("Motor
 //! speed, 18 numbers, any works"). Adding a channel asks only what the signal's
-//! selector needs, so the wrong choice cannot be made (proposal section 6).
+//! selector needs, so the wrong choice cannot be made.
 
 use eframe::egui::{self, RichText};
 
@@ -238,7 +238,7 @@ impl SpyApp {
                 if ui.add(egui::Button::new(RichText::new("Add as a channel...").strong())).clicked() {
                     self.open_add(n);
                 }
-                // Charted, with something to compare it with: the explorer (C11).
+                // Charted, with something to compare it with: the open-signal explorer.
                 let (ids, others) = self.charted_ids_of(n);
                 if let Some(id) = ids.first()
                     && others > 0
