@@ -1911,12 +1911,12 @@ impl Worker {
     }
 
     /// Streams stopped arriving on a live session: InfoStream was very likely taken
-    /// by another client.
+    /// by another client, or nothing gets through at all.
     fn stalled(&mut self) {
         let secs = self.stall_bound().as_secs_f64();
-        // Nothing at all since the last sample, keepalives included, fits a stalled
-        // network as well as a takeover (the VC sends keepalives rarely while
-        // streaming, so their absence proves nothing): say both.
+        // Nothing at all since the last sample, not even the liveness check's answer
+        // (the VC sends keepalives rarely while streaming, so their absence alone
+        // proves nothing).
         let silent = self.last_frame_at.is_none_or(|f| self.last_any_sample.is_some_and(|s| f <= s));
         let reason = if self.vc_patient() {
             format!(
@@ -1924,9 +1924,30 @@ impl Worker {
                 if silent { ", and has not answered either" } else { "" }
             )
         } else if silent {
-            format!(
-                "Nothing at all from the controller for {secs:.0} s on a live connection: another tool, such as RobotStudio or TuneMaster, may have taken InfoStream, or the network or the controller stalled. Connect again when it is free."
-            )
+            // Only once a liveness check has gone out during this silence and had the
+            // time it gets on the way here: while this program's own change was in
+            // play, none went out.
+            let asked = self.last_probe_at.filter(|&p| self.last_any_sample.is_none_or(|s| p > s));
+            match asked {
+                None => {
+                    self.send_probe(Instant::now());
+                    return;
+                }
+                Some(p) if p.elapsed() < self.opt.stall_after.saturating_sub(self.probe_bound()) => return,
+                Some(_) => {}
+            }
+            // A controller answers the handshake mid-session while another program
+            // takes InfoStream (s24 item 12), so this is the network or the controller
+            // itself: a fault out in the network reaches this end as silence, never
+            // as an error. Connect again by itself (the operator's decision, G32),
+            // through the checks of every automatic reconnect, which wait out the
+            // broken connection the controller holds meanwhile (`held_wait`).
+            let why = format!(
+                "nothing at all from the controller for {secs:.0} s, not even an answer to the liveness check: the network or the controller has stalled (a program taking InfoStream would still answer), so connecting again by itself, and setting nothing up until the controller's client list shows nobody new came meanwhile"
+            );
+            self.lost_at = Some(Instant::now());
+            self.leave_quietly(After::Retry(why), "nothing from the controller");
+            return;
         } else {
             format!(
                 "The controller stopped sending samples ({secs:.0} s with none on a live connection). Another tool, such as RobotStudio or TuneMaster, has most likely taken InfoStream. Connect again when it is free."

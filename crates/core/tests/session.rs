@@ -1879,9 +1879,18 @@ fn a_start_stream_that_is_never_answered_does_not_switch_off_the_stall() {
     });
     s.set_channels(vec![x.clone(), y.clone()]);
     assert!(wait_for(3000, || samples(&s, &y) > 10), "{}", log_text(&s));
-    // Then the feed dies: that must still be noticed.
-    fake.with(|b| b.mute_all = true);
-    assert!(wait_for(5000, || matches!(phase(&s), Phase::Stopped { .. })), "a dead feed went unnoticed\n{}", log_text(&s));
+    // Then the feed dies: that must still be noticed. The controller's answers now
+    // take a moment, as a real one's can.
+    fake.with(|b| {
+        b.mute_all = true;
+        b.reply_delay = Duration::from_millis(250);
+    });
+    assert!(wait_for(6000, || matches!(phase(&s), Phase::Stopped { .. })), "a dead feed went unnoticed\n{}", log_text(&s));
+    // For what it is: the controller still answers (its liveness check, held back
+    // while that StartStream was in play, went out before any verdict and had its
+    // time), so it is neither the network nor a reason to connect again.
+    assert!(stopped_reason(&s).contains("still answers"), "{}", log_text(&s));
+    assert!(!log_text(&s).contains("not even an answer"), "{}", log_text(&s));
 }
 
 #[test]
@@ -1937,9 +1946,11 @@ fn the_irc5s_tick_is_neither_a_gap_nor_a_takeover() {
 }
 
 #[test]
-fn a_controller_that_falls_silent_altogether_ends_in_the_stall() {
-    // Nothing at all arrives, the liveness check's answer included (a network or
-    // controller stall): the stall rule ends it, and says both possibilities.
+fn a_controller_that_falls_silent_altogether_is_connected_to_again() {
+    // Nothing at all arrives, the liveness check's answer included: the network or
+    // the controller stalled (a program taking InfoStream would still answer). The
+    // session connects again by itself (G32) rather than stop; here the network only
+    // held everything up, and delivers it late.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let s = spawn(opts());
     let k = key(6000, "ROB_1", 1);
@@ -1947,10 +1958,59 @@ fn a_controller_that_falls_silent_altogether_ends_in_the_stall() {
     s.connect(target(&fake));
     assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
     fake.with(|b| b.hold_delivery = true);
-    assert!(wait_for(4000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
-    let reason = stopped_reason(&s);
-    assert!(reason.contains("Nothing at all from the controller") && reason.contains("stalled"), "{reason}");
+    assert!(wait_for(4000, || matches!(phase(&s), Phase::Reconnecting { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    assert!(log_text(&s).contains("not even an answer to the liveness check"), "{}", log_text(&s));
     assert_eq!(s.status().counters.liveness_checks, 1);
+    // Still trying, not stopped, while nothing gets through.
+    std::thread::sleep(Duration::from_millis(2000));
+    assert!(!matches!(phase(&s), Phase::Stopped { .. }), "{}", log_text(&s));
+    fake.with(|b| b.hold_delivery = false);
+    let n = samples(&s, &k);
+    assert!(wait_for(8000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 50), "{:?}\n{}", phase(&s), log_text(&s));
+}
+
+#[test]
+fn a_network_fault_is_connected_through_by_itself_once_the_controller_lets_go() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(opts());
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    // A fault out in the network (a cable pulled between switches, the controller's
+    // switch port shut): silence both ways and no error on either end, so this end
+    // hears of it only by its liveness check going unanswered. The network is back
+    // after 2.5 s; the controller holds the broken connection until 4 s.
+    fake.cut_network(Duration::from_millis(2500), Duration::from_millis(4000));
+    let n = samples(&s, &k);
+    assert!(wait_for(15000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 50), "{:?}\n{}", phase(&s), log_text(&s));
+    let log = log_text(&s);
+    assert!(log.contains("not even an answer to the liveness check"), "{log}");
+    assert!(log.contains("still holds the connection that broke"), "{log}");
+    // Nothing was set up while the controller held the broken connection: one
+    // connection after it let go subscribed and defined, once. (Defining on a
+    // connection the controller would not serve, then leaving it, ends InfoStream for
+    // whoever else has it.)
+    let seen = fake.seen();
+    assert_eq!(seen.iter().filter(|x| x.verb == "SUBSCRIBE").count(), 2, "{seen:?}");
+    assert_eq!(seen.iter().filter(|x| x.property == "StreamDefine").count(), 2);
+    assert_eq!(last(&s, &k), Some(101.0));
+}
+
+#[test]
+fn leaving_a_controller_cut_off_by_the_network_does_not_wait_on_it() {
+    // Neither this end's goodbye nor the controller's close gets through, and on
+    // Windows shutting the socket down does not end a read blocked on it (measured
+    // 2026-09-29): the worker must not hang on its reader until TCP gives up.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.cut_network(Duration::from_secs(30), Duration::from_secs(30));
+    // The stall (1 s), then the goodbye's 0.5 s, then the ladder.
+    assert!(wait_for(4000, || matches!(phase(&s), Phase::Reconnecting { .. })), "{:?}\n{}", phase(&s), log_text(&s));
 }
 
 #[test]
@@ -1965,6 +2025,24 @@ fn disconnecting_while_the_network_is_down_is_prompt() {
     s.disconnect();
     // The teardown's replies never come (1 s), then the socket is let go.
     assert!(wait_for(4000, || phase(&s) == Phase::Idle), "{:?}\n{}", phase(&s), log_text(&s));
+}
+
+#[test]
+fn a_program_that_came_during_a_network_fault_is_never_taken_from_unasked() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(opts());
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    // The controller lets go of the broken connection during the outage, and another
+    // PC's program is connected when the network is back: it may be the tenant now.
+    fake.cut_network(Duration::from_millis(2000), Duration::from_millis(1000));
+    fake.with(|b| b.extra_clients = vec!["192.0.2.50".into()]);
+    assert!(wait_for(10000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    let reason = stopped_reason(&s);
+    assert!(reason.contains("192.0.2.50") && reason.contains("While the connection was down"), "{reason}");
+    assert_eq!(fake.seen().iter().filter(|x| x.verb == "SUBSCRIBE").count(), 1, "nothing set up on the reconnect");
 }
 
 fn patient() -> Options {
