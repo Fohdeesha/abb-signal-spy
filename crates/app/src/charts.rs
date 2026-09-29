@@ -54,6 +54,8 @@ pub(crate) struct Member {
     pub(crate) health: Health,
     /// Nothing yet in the store.
     src: Option<Src>,
+    /// The smallest span its chart autoscales to.
+    min_span: f64,
 }
 
 impl Member {
@@ -163,6 +165,7 @@ impl SpyApp {
                 frozen: sig.is_some_and(|s| s.has(flag::FROZEN)),
                 health: view::health(cs, connected, sig, st.loopback),
                 src: store.get(&c.key).map(Src::Stream),
+                min_span: min_span_for(&d.units, sig),
             });
         }
         for (i, d) in self.derived.iter().enumerate() {
@@ -180,6 +183,7 @@ impl SpyApp {
                 frozen: false,
                 health: self.derived_health(i, st),
                 src: Some(Src::Derived(d.live.ring())),
+                min_span: min_span(def.units()),
             });
         }
         out
@@ -267,7 +271,8 @@ impl SpyApp {
                 let tl2 = tl.clone();
                 let units = lane.1.clone();
                 let shown = self.hover_text.clone();
-                let min_span = min_span(&units);
+                // The widest its channels need (a motor's angle beside a joint's).
+                let min_span = members.iter().map(|m| m.min_span).fold(0.0, f64::max);
                 let mut plot = Plot::new(("lane", lane.0, &lane.1))
                     .height(lane_h)
                     .link_axis("x-link", [true, false])
@@ -539,13 +544,15 @@ pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
 
 /// The smallest vertical span a chart autoscales to, per display unit: small enough
 /// for any real motion or change to fill most of the chart, large enough that the
-/// noise of a signal at rest shows as the thin line it is. Unknown units: none.
+/// noise of a signal at rest shows as the thin line it is. Unknown units: none. A
+/// still joint's speed dithers by about 0.25 deg/s (the cell, 2026-09-29): 0.5 deg/s
+/// (G29; it was 0.1).
 pub fn min_span(units: &str) -> f64 {
     match units.trim() {
         "deg" => 0.01,
         "rad" => 0.01_f64.to_radians(),
-        "deg/s" => 0.1,
-        "rad/s" => 0.1_f64.to_radians(),
+        "deg/s" => 0.5,
+        "rad/s" => 0.5_f64.to_radians(),
         "deg/s2" => 1.0,
         "rad/s2" | "rad/s^2" => 1.0_f64.to_radians(),
         "V" | "Nm" => 1.0,
@@ -555,6 +562,20 @@ pub fn min_span(units: &str) -> f64 {
         "fraction" | "0..1" | "quaternion" => 0.01,
         "0 or 1" | "count" | "index" => 1.0,
         _ => 0.0,
+    }
+}
+
+/// The smallest span for one channel's chart: its unit's, and wider for a motor-side
+/// angle (a resolver's, or the drive's electrical angle), which a still motor dithers
+/// by about 0.02 deg where a still arm joint dithers by 0.0001 deg (the cell,
+/// 2026-09-29). Arm angles keep 0.01 deg (the operator's decision G29). A signal the
+/// catalogue does not know goes by its unit.
+pub fn min_span_for(units: &str, sig: Option<&spy_core::catalogue::Signal>) -> f64 {
+    let motor_angle = sig.is_some_and(|s| s.category == "motor position" || (s.category == "drive / inverter" && matches!(s.units.as_str(), "rad" | "deg")));
+    match (units.trim(), motor_angle) {
+        ("deg", true) => 0.05,
+        ("rad", true) => 0.05_f64.to_radians(),
+        (u, _) => min_span(u),
     }
 }
 
@@ -632,6 +653,28 @@ mod tests {
         assert!(a < -0.99 && b > 0.99);
         let (a, b) = autoscale(10.0, 20.0, 1.0);
         assert_eq!((a, b), (9.2, 20.8));
+    }
+
+    #[test]
+    fn a_still_resolver_and_a_still_speed_do_not_fill_their_charts() {
+        // The cell (2026-09-29): a still resolver (5138) dithered over 0.022 deg and a
+        // still J1 speed (4001) over about 0.25 deg/s, and both filled their charts like
+        // violent motion. Wider spans for them (the operator's decision G29).
+        let cat = spy_core::catalogue::Catalogue::builtin();
+        let fill = |lo: f64, hi: f64, span: f64| {
+            let (a, b) = autoscale(lo, hi, span);
+            (hi - lo) / (b - a)
+        };
+        assert!(fill(101.860, 101.882, min_span_for("deg", cat.get(5138))) < 0.5, "a still resolver fills its chart");
+        assert!(fill(-0.147, 0.103, min_span_for("deg/s", cat.get(4001))) < 0.5, "a still joint's speed fills its chart");
+        // Motor-side angles by their category, electrical ones included, in either unit;
+        // arm angles keep the finer span (a joint's real 0.02 deg move fills its chart).
+        assert_eq!(min_span_for("deg", cat.get(5000)), 0.05);
+        assert_eq!(min_span_for("deg", cat.get(5028)), 0.05, "an electrical angle is a motor-side angle");
+        assert_eq!(min_span_for("rad", cat.get(5138)), 0.05_f64.to_radians());
+        assert_eq!(min_span_for("deg", cat.get(4000)), 0.01);
+        assert_eq!(min_span_for("deg", cat.get(6000)), 0.01);
+        assert_eq!(min_span_for("deg", None), 0.01, "a signal the catalogue does not know goes by its unit");
     }
 
     #[test]

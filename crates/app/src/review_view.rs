@@ -19,7 +19,7 @@ use spy_core::recording::{Kind, Meta};
 use spy_core::review::{Review, ReviewChannel};
 
 use crate::app::SpyApp;
-use crate::charts::{autoscale, min_span, RangeStats};
+use crate::charts::{autoscale, min_span_for, RangeStats};
 use crate::theme;
 use crate::view;
 
@@ -360,7 +360,8 @@ impl SpyApp {
                     .allow_boxed_zoom(false)
                     .allow_double_click_reset(false)
                     .label_formatter(move |pos| crate::charts::remember(&shown, hover(pos, start, wall, &u2, &marks2, mark_tol)));
-                let min_span = min_span(units);
+                // The widest its channels need (a motor's angle beside a joint's).
+                let min_span = members.iter().map(|&i| min_span_for(units, review.channels[i].key.as_ref().and_then(|k| cat.get(k.signal)))).fold(0.0, f64::max);
                 let resp = plot.show(ui, |pu| {
                     let b = pu.plot_bounds();
                     let (vx0, vx1) = if fresh || !b.is_valid_x() { view_out } else { (b.min()[0], b.max()[0]) };

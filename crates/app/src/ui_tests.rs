@@ -266,6 +266,39 @@ fn pause_cursors_and_markers() {
 }
 
 #[test]
+fn a_still_resolvers_dither_does_not_fill_its_chart_live_or_reviewed() {
+    // The cell (2026-09-29): a still 5138 dithered over 0.022 deg and filled its chart.
+    // Here 0.022 deg of dither; its chart must span the motor-side angles' 0.05 deg (G29).
+    let mut b = Behaviour::default();
+    let dither = 0.011_f32.to_radians();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(move |(t, _, _)| 1.7779 + if t / 4 % 2 == 0 { dither } else { -dither }), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("resolver-span");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5138, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 100)));
+    let _ = h.run_ok();
+    let span = |h: &Harness<'static, SpyApp>| {
+        let b = h.state().lane_transforms[0].bounds();
+        b.max()[1] - b.min()[1]
+    };
+    assert!(span(&h) >= 0.05, "live: a chart {} deg high for 0.022 deg of dither", span(&h));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(600));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(span(&h) >= 0.05, "reviewed: a chart {} deg high for 0.022 deg of dither", span(&h));
+}
+
+#[test]
 fn a_window_length_chosen_while_paused_is_shown() {
     // On the cell a person paused, then chose a longer window to find what had just
     // happened, and the charts did not change.
