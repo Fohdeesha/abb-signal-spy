@@ -166,7 +166,8 @@ impl Picture {
     fn not_shown(self) -> &'static str {
         match self {
             Picture::Charts => "The charts are not on screen.",
-            Picture::Xy => "The XY plot is not open.",
+            // Its Save PNG is in its own window, which is open: what is missing is a plot.
+            Picture::Xy => "Nothing is plotted to save: the XY window says why (it needs two charted channels, with pairs in the stretch in view).",
         }
     }
 }

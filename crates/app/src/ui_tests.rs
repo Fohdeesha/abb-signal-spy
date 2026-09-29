@@ -299,6 +299,25 @@ fn a_still_resolvers_dither_does_not_fill_its_chart_live_or_reviewed() {
 }
 
 #[test]
+fn the_xy_windows_save_png_with_nothing_plotted_says_so() {
+    // One channel charted: the XY window is open with nothing to plot, and its Save PNG
+    // said "The XY plot is not open."
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut h = harness(temp_dir("xy-nothing"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4001, "Add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+    h.get_by_label("XY").click();
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains("Chart at least two channels").next().is_some());
+    h.get_all_by_label("Save PNG").last().unwrap().click();
+    let _ = h.run_ok();
+    let said: Vec<&String> = h.state().toasts.iter().map(|t| &t.text).collect();
+    assert!(said.iter().any(|t| t.contains("Nothing is plotted")) && !said.iter().any(|t| t.contains("not open")), "{said:?}");
+}
+
+#[test]
 fn a_window_length_chosen_while_paused_is_shown() {
     // On the cell a person paused, then chose a longer window to find what had just
     // happened, and the charts did not change.
