@@ -2246,17 +2246,7 @@ impl Worker {
             let programs = self.others.iter().filter(|o| !o.pendant).count();
             if nothing_yet && !self.told_no_samples && programs > 0 {
                 self.told_no_samples = true;
-                let (what, advice) = if on_vc {
-                    (
-                        "one of them gets every sample (InfoStream sends them all to one program). On a virtual controller that is usually RobotStudio's own connection, which takes InfoStream whenever the controller starts: Disconnect and Connect again, and this program leaving ends that hold. If a program on this PC is showing test signals (TuneMaster, RobotStudio's Signal Analyzer), close it first.",
-                        "No samples yet: another connection gets them all. On a virtual controller that is usually RobotStudio's own, which takes InfoStream whenever the controller starts: Disconnect and Connect again. If a program is showing test signals (TuneMaster, RobotStudio's Signal Analyzer), close it first.",
-                    )
-                } else {
-                    (
-                        "if one of them is showing test signals, it is getting every sample (InfoStream sends them all to one program): close its signal view (RobotStudio, TuneMaster), then connect again.",
-                        "No samples yet. If another program connected to this controller is showing test signals, it is getting all of them: close its signal view (RobotStudio, TuneMaster), then connect again.",
-                    )
-                };
+                let (what, advice) = no_samples_advice(on_vc);
                 self.log.warn(format!(
                     "No samples at all in {:.0} s. {} other program(s) are connected to this controller, and {what} If this program's own earlier connection broke, the controller lets go of it after about 16 s: connect again then.",
                     self.opt.stall_after.as_secs_f64(),
@@ -2963,6 +2953,24 @@ fn is_loopback(ip: IpAddr) -> bool {
     }
 }
 
+/// Why nothing arrives with other programs connected, for the log (the middle of a
+/// sentence) and for the session line. The first connection to open InfoStream
+/// (StreamConnect) gets every sample, whether or not it shows any: measured on the VC
+/// (s25 item 7) and on the IRC5 (s26 item 3).
+fn no_samples_advice(on_vc: bool) -> (&'static str, &'static str) {
+    if on_vc {
+        (
+            "one of them gets every sample (InfoStream sends them all to one program). On a virtual controller that is usually RobotStudio's own connection, which takes InfoStream whenever the controller starts: Disconnect and Connect again, and this program leaving ends that hold. If a program on this PC is showing test signals (TuneMaster, RobotStudio's Signal Analyzer), close it first.",
+            "No samples yet: another connection gets them all. On a virtual controller that is usually RobotStudio's own, which takes InfoStream whenever the controller starts: Disconnect and Connect again. If a program is showing test signals (TuneMaster, RobotStudio's Signal Analyzer), close it first.",
+        )
+    } else {
+        (
+            "the one that opened InfoStream first is getting every sample (InfoStream sends them all to that program), whether or not it shows them: a signal view (RobotStudio, TuneMaster), or a tool that opened InfoStream and sits idle. Close it, then connect again.",
+            "No samples yet: another program connected to this controller opened InfoStream first and gets all of them, even if it shows nothing. Close it (or its signal view: RobotStudio, TuneMaster), then connect again.",
+        )
+    }
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -3040,4 +3048,21 @@ fn reader_loop(mut stream: TcpStream, generation: u64, tx: Sender<Event>, queued
 /// Hint for the window: which one-based axis a key would read on the wire.
 pub fn wire_axis(axis: Axis) -> u8 {
     axis.wire()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_no_samples_a_remote_controllers_advice_names_an_idle_holder_too() {
+        // On the IRC5 (s26 item 3) a client that had only opened InfoStream, showing
+        // nothing, got every sample: the advice cannot name only programs showing test
+        // signals.
+        let (what, advice) = no_samples_advice(false);
+        assert!(what.contains("opened InfoStream first") && what.contains("whether or not it shows them"), "{what}");
+        assert!(advice.contains("opened InfoStream first") && advice.contains("even if it shows nothing"), "{advice}");
+        let (what, advice) = no_samples_advice(true);
+        assert!(what.contains("RobotStudio's own connection") && advice.contains("Disconnect and Connect again"));
+    }
 }
