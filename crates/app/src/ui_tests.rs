@@ -1116,6 +1116,8 @@ fn a_commutator_offset_target_is_the_controllers_it_came_from() {
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     assert!(wait(&mut h, 3000, |a| !a.derived[0].live.def().is_set()), "another controller's commutator offset kept as the target");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("commutator offset")), "not said");
+    let said: Vec<String> = h.state().log.since(0).iter().filter(|e| e.text.contains("was cleared")).map(|e| format!("{:?} {}", e.level, e.text)).collect();
+    assert!(said.len() == 1 && said[0].starts_with("Warn"), "said once, as a warning: {said:?}");
     // A target typed over one read from the controller is the person's, and stays.
     rws.with(|r| r.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
     log_in(&mut h, "robotics");
@@ -1222,6 +1224,64 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
     std::thread::sleep(Duration::from_millis(3500));
     assert!(set(&mut h), "an armed, steady link refused: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     assert!(matches!(h.state().derived[0].live.def(), spy_core::derived::Derived::Sag { plateau_v: Some(p), .. } if (p - 380.0).abs() < 0.5));
+    // Said once in the log (on the cell every plateau was logged twice), and shown.
+    let logged = h.state().log.since(0).iter().filter(|e| e.text.contains("plateau set to")).count();
+    assert_eq!(logged, 1, "the plateau logged {logged} times");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("plateau set to")), "and not shown");
+}
+
+#[test]
+fn a_derived_setting_changed_while_recording_is_in_the_recording() {
+    // G14: a recording keeps the definitions, and a change of target or plateau while it
+    // runs is an event in it, so that a review can say its values use the last one.
+    let mut b = Behaviour::default();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("derived-setting");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5138, "Add");
+    let k = h.state().chans[0].key.clone();
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
+    h.get_by_label("● REC").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    h.state_mut().derived[0].target_text = "12".into();
+    h.get_by_label("Set").click();
+    let _ = h.run_ok();
+    std::thread::sleep(Duration::from_millis(300));
+    h.get_by_label_contains("■ STOP").click();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
+    let meta = spy_core::recording::read_meta(&folder).unwrap();
+    let settings: Vec<&str> = meta.events.iter().filter(|e| e.kind == "derived-setting").map(|e| e.text.as_str()).collect();
+    assert!(settings.iter().any(|t| t.contains("target set to 12")), "the change is not in the recording: {:?}", meta.events);
+}
+
+#[test]
+fn a_plateau_goes_when_another_controller_streams_and_is_said_once() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 379.0 } else { 381.0 }), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let mut h = harness(temp_dir("plateau-other"), AskPolicy::Remote);
+    h.state_mut().plateau_trend_ms = 2000;
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5027, "Add");
+    card_menu(&mut h, 0, "Sag below a plateau");
+    std::thread::sleep(Duration::from_millis(4500));
+    let _ = h.run_ok();
+    h.get_by_label("Set the plateau").click();
+    assert!(wait(&mut h, 2000, |a| a.derived[0].live.def().is_set()), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Another controller behind the address: its link is not measured against this one's.
+    h.get_by_label("Disconnect").click();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+    fake.with(|b| b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
+    h.get_by_label("Connect").click();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(wait(&mut h, 3000, |a| !a.derived[0].live.def().is_set()), "the other controller's plateau kept");
+    let said: Vec<String> = h.state().log.since(0).iter().filter(|e| e.text.contains("was cleared")).map(|e| format!("{:?} {}", e.level, e.text)).collect();
+    assert!(said.len() == 1 && said[0].starts_with("Warn"), "said once, as a warning: {said:?}");
 }
 
 #[test]

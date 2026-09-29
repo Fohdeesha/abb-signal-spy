@@ -415,6 +415,11 @@ impl SpyApp {
     pub fn toast(&mut self, level: Level, text: impl Into<String>) {
         let text = text.into();
         self.log.push(level, text.clone());
+        self.show_toast(level, text);
+    }
+
+    /// A toast for something logged by other means (said once in the log, not twice).
+    pub fn show_toast(&mut self, level: Level, text: String) {
         self.toasts.push(Toast { shown: None, text, level });
         let excess = self.toasts.len().saturating_sub(MAX_TOASTS);
         self.toasts.drain(..excess);

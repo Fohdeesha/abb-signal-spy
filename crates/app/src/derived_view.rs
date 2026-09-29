@@ -175,12 +175,18 @@ impl SpyApp {
     /// Settings or recordings follow a change of the derived channels; `what`, when
     /// given, goes into running recordings' events.
     pub fn derived_changed(&mut self, what: Option<String>) {
+        if let Some(w) = &what {
+            self.log.info(w.clone());
+        }
+        self.derived_recorded(what);
+    }
+
+    /// The change into the recordings and the settings, for one already logged (a
+    /// warning, said once as such).
+    pub fn derived_recorded(&mut self, what: Option<String>) {
         let defs: Vec<Derived> = self.derived.iter().map(|d| d.live.def().clone()).collect();
         for r in [&self.recorder, &self.slow].into_iter().flatten() {
             r.derived(defs.clone(), what.clone());
-        }
-        if let Some(w) = what {
-            self.log.info(w);
         }
         self.mark_settings_dirty();
     }
@@ -241,12 +247,12 @@ impl SpyApp {
         for def in dropped {
             let text = format!("The plateau of {} was cleared: the history started afresh (another controller), and its DC link is not measured against the old one's. Set it again.", self.derived_label(&def));
             self.toast(Level::Warn, text.clone());
-            self.derived_changed(Some(text));
+            self.derived_recorded(Some(text));
         }
         for def in targets_gone {
             let text = format!("The target of {} was cleared: it was the commutator offset of another controller than the one streaming now. Read it again from this one, or type one.", self.derived_label(&def));
             self.toast(Level::Warn, text.clone());
-            self.derived_changed(Some(text));
+            self.derived_recorded(Some(text));
         }
     }
 
@@ -355,7 +361,8 @@ impl SpyApp {
         self.derived[i].stats = self.stats_from_now(&def);
         self.derived[i].live.set(def);
         let text = format!("{label}: plateau set to {} V (the mean of the last two seconds; standard deviation {} V).", view::fmt(mean), view::fmt(sd));
-        self.toast(Level::Info, text.clone());
+        // Logged (and recorded) by `derived_changed`.
+        self.show_toast(Level::Info, text.clone());
         self.derived_changed(Some(text));
     }
 
