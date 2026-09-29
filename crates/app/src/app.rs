@@ -186,6 +186,8 @@ pub struct SpyApp {
     pub xy_rect: Option<egui::Rect>,
     /// The XY window around it, while a plot is drawn: what its Save PNG keeps (G30).
     pub xy_window_rect: Option<egui::Rect>,
+    /// The compare window (one channel against every other charted one), while open.
+    pub compare: Option<crate::compare::CompareState>,
     /// A CSV being written, and what to add to its "saved" message.
     pub export_job: Option<crate::export::ExportJob>,
     pub export_note: &'static str,
@@ -332,6 +334,7 @@ impl SpyApp {
             xy: None,
             xy_rect: None,
             xy_window_rect: None,
+            compare: None,
             export_job: None,
             export_note: "",
             export_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1322,6 +1325,8 @@ impl eframe::App for SpyApp {
 
         self.recordings_window(&ctx);
         self.rws_window(&ctx);
+        // Before the XY window: its "XY" buttons open that plot in the same frame.
+        self.compare_window(&ctx);
         self.xy_window(&ctx);
         self.add_dialog(&ctx);
         self.sets_dialog(&ctx);

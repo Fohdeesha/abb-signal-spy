@@ -55,6 +55,10 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    checked to be the same controller as the one streaming.
 9. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
    on the same network.
+10. **Unidentified signals.** Turn on *open* in the catalogue to see the signals nobody has identified
+    yet. Chart one beside known ones (joint angles, speeds, torques) and *Compare* (in its details, or
+    a channel's ⋯ menu) ranks every other charted channel by how closely it follows a straight line of
+    it (r, with the line), over the stretch in view; one click shows a pair in the XY plot.
 
 The built-in catalogue was measured on an IRB 2600 with RobotWare 6.16. Another robot or RobotWare
 version may use other numbers; the controller's refusal is shown per channel, and a catalogue file for

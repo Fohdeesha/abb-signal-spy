@@ -228,6 +228,23 @@ impl SpyApp {
                 }
                 signal_badges(ui, &s);
             });
+            // The actions first, where they stay in view above a long description.
+            ui.horizontal_wrapped(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Add as a channel...").strong())).clicked() {
+                    self.open_add(n);
+                }
+                // Charted, with something to compare it with: the explorer (C11).
+                let (ids, others) = self.charted_ids_of(n);
+                if let Some(id) = ids.first()
+                    && others > 0
+                    && ui
+                        .button("Compare with the charted channels")
+                        .on_hover_text("How closely it follows each other charted channel in a straight line (r), over the stretch in view: chart known signals beside it (joint angles, speeds, torques) and see which it is a line of")
+                        .clicked()
+                {
+                    self.open_compare(id.clone());
+                }
+            });
             if let Some(g) = &s.group {
                 let members = self.catalogue.groups().get(g).cloned().unwrap_or_default();
                 if members.len() > 1 {
@@ -268,10 +285,6 @@ impl SpyApp {
                         ui.label(RichText::new(text.as_str()).small());
                     });
                 }
-            }
-            ui.add_space(6.0);
-            if ui.add(egui::Button::new(RichText::new("Add as a channel...").strong())).clicked() {
-                self.open_add(n);
             }
         });
     }

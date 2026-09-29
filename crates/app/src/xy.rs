@@ -51,7 +51,7 @@ pub(crate) struct Key {
 /// The state of the data: live, the newest sample and the history's epoch; a review,
 /// which recording (it never changes once open).
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Data {
+pub(crate) enum Data {
     Live(Option<i64>, u64),
     Review(usize, i64),
 }
@@ -137,10 +137,10 @@ pub fn thin(pairs: &[(i64, f64, f64)], x: (f64, f64), y: (f64, f64), w: usize, h
 }
 
 /// A channel the plot can take.
-struct Candidate {
-    id: String,
-    title: String,
-    units: String,
+pub(crate) struct Candidate {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) units: String,
     source: Source,
 }
 
@@ -152,14 +152,14 @@ enum Source {
 
 impl Candidate {
     /// Its samples over `[from, to)` in its display unit.
-    fn values(&self, from: i64, to: i64) -> Vec<(i64, f64)> {
+    pub(crate) fn values(&self, from: i64, to: i64) -> Vec<(i64, f64)> {
         match &self.source {
             Source::Live(m) => m.values(from, to),
             Source::Recorded(r, i, factor) => r.channels[*i].range(from, to).map(|(t, v)| (t, v * factor)).collect(),
         }
     }
 
-    fn health(&self) -> Option<Health> {
+    pub(crate) fn health(&self) -> Option<Health> {
         match &self.source {
             Source::Live(m) => Some(m.health),
             Source::Recorded(..) => None,
@@ -170,7 +170,7 @@ impl Candidate {
 impl SpyApp {
     /// What the plot can show: the channels charted, the stretch in view, and the
     /// state of the data. A recording under review has the charts, so it has the plot.
-    fn xy_sources(&self) -> (Vec<Candidate>, Option<(i64, i64)>, Data) {
+    pub(crate) fn xy_sources(&self) -> (Vec<Candidate>, Option<(i64, i64)>, Data) {
         if let Some(rs) = &self.review {
             let r = rs.review.clone();
             let cands = r

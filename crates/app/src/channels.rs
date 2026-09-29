@@ -110,6 +110,8 @@ impl SpyApp {
         let mut remove = None;
         let mut changed = false;
         let mut derive: Option<spy_core::derived::Derived> = None;
+        let mut compare: Option<String> = None;
+        let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, &st)).collect();
         let lanes: Vec<(u32, String)> = {
             let mut v: Vec<(u32, String)> = Vec::new();
             for c in &self.chans {
@@ -165,6 +167,10 @@ impl SpyApp {
                                 if ui.button("Reset min/max/mean").clicked() {
                                     let upto = self.chans[i].stats.upto;
                                     self.chans[i].stats = Stats { upto, ..Stats::default() };
+                                    ui.close();
+                                }
+                                if charted[i] && charted.iter().filter(|&&c| c).count() >= 2 && ui.button("Compare with the other channels").on_hover_text("How closely it follows each other charted channel in a straight line (r), over the stretch in view: how an unknown signal is matched against known ones").clicked() {
+                                    compare = Some(key.id());
                                     ui.close();
                                 }
                                 if sig.as_ref().is_some_and(|s| s.is_angle()) && ui.checkbox(&mut self.chans[i].radians, "Show in radians").changed() {
@@ -273,6 +279,9 @@ impl SpyApp {
         });
         if let Some(d) = derive {
             self.add_derived(d);
+        }
+        if let Some(id) = compare {
+            self.open_compare(id);
         }
         if let Some(i) = remove {
             let k = self.chans.remove(i).key;

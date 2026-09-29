@@ -9,6 +9,7 @@ mod app;
 mod browser;
 mod channels;
 mod charts;
+mod compare;
 mod derived_view;
 mod export;
 mod net;

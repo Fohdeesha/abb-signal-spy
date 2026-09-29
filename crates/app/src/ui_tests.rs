@@ -2142,6 +2142,81 @@ fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
 }
 
 #[test]
+fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
+    // The explorer (C11): an unknown against the rulers charted beside it. Here 4002 is
+    // 2 x 4001 + 3 on every tick, and 2 x 318 + 3 on the 24 ms group's ticks; 1298 is a
+    // sawtooth, 6010 a zero-filled constant.
+    let fake = FakeController::start(xy_signals()).unwrap();
+    let mut h = harness(temp_dir("compare"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    for n in [4001, 4002, 318, 1298, 6010] {
+        add_via_dialog(&mut h, n, "Add");
+    }
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 5 && a.session.status().channels.iter().all(|c| c.samples > 100)));
+    // From the channel's own menu, as a person does.
+    h.get_all_by_label("⋯").nth(1).unwrap().click();
+    let _ = h.run_ok();
+    h.get_by_label("Compare with the other channels").click();
+    let _ = h.run_ok();
+    fn result(a: &SpyApp) -> Option<&crate::compare::Compared> {
+        a.compare.as_ref().and_then(|c| c.result.as_ref())
+    }
+    assert!(wait(&mut h, 3000, |a| result(a).is_some()), "nothing compared");
+    let res = result(h.state()).unwrap();
+    assert_eq!(res.subject, "4002/ROB_1/J1");
+    let ids: Vec<String> = res.rows.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(ids.len(), 4, "{ids:?}");
+    let top: std::collections::BTreeSet<&str> = ids[..2].iter().map(String::as_str).collect();
+    assert_eq!(top, ["318/ROB_1/J1", "4001/ROB_1/J1"].into(), "the two it is a line of come first: {ids:?}");
+    let row = |id: &str| res.rows.iter().find(|r| r.id == id).unwrap();
+    let f = row("4001/ROB_1/J1").fit.unwrap();
+    assert!((f.slope - 2.0).abs() < 1e-5 && (f.offset - 3.0).abs() < 1e-4 && row("4001/ROB_1/J1").r().unwrap() > 0.99999, "the compared channel as a line of the other: {f:?}");
+    assert!(row("318/ROB_1/J1").r().unwrap() > 0.99999 && row("318/ROB_1/J1").pairs * 5 < row("4001/ROB_1/J1").pairs, "318 pairs only on its own ticks");
+    assert!(h.query_all_by_label_contains("r = 1.0000").next().is_some(), "the correlation is not shown");
+    let header = format!("{} =", res.subject_title);
+    assert!(h.query_by_label(&header).is_some(), "the line's header does not name the channel compared ({header})");
+    assert!(h.query_all_by_label("2.00000 × this + 3.00000 Nm").count() == 2, "the line is not shown");
+    // One click: the pair in the XY plot, the channel compared on Y.
+    h.get_all_by_label("Show in XY").next().unwrap().click();
+    let _ = h.run_ok();
+    let first = ids[0].clone();
+    let xy = h.state().xy.as_ref().expect("the XY plot did not open");
+    assert_eq!((xy.x.as_deref(), xy.y.as_deref()), (Some(first.as_str()), Some("4002/ROB_1/J1")));
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.x == first && k.y == "4002/ROB_1/J1" && !p.points.is_empty())));
+
+    // From the catalogue: a charted signal's details offer it.
+    h.state_mut().compare = None;
+    h.state_mut().xy = None;
+    h.state_mut().selected = Some(1298);
+    let _ = h.run_ok();
+    h.get_by_label("Compare with the charted channels").click();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 3000, |a| result(a).is_some_and(|r| r.subject == "1298/ROB_1/J1" && r.rows.len() == 4)));
+    // Once, not every frame: the stretch moves on live, the comparison stays until asked.
+    let to = result(h.state()).unwrap().to;
+    std::thread::sleep(Duration::from_millis(400));
+    let _ = h.run_ok();
+    assert_eq!(result(h.state()).unwrap().to, to, "compared again unasked");
+    h.get_by_label("Compare again").click();
+    assert!(wait(&mut h, 3000, |a| result(a).is_some_and(|r| r.to > to)), "Compare again did not compare the stretch now in view");
+    // Not for a signal that is not charted.
+    h.state_mut().selected = Some(4003);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Compare with the charted channels").is_none());
+    // Nor with nothing else charted.
+    h.state_mut().compare = None;
+    h.state_mut().chans.retain(|c| c.key.signal == 1298);
+    h.state_mut().sync_channels();
+    h.state_mut().selected = Some(1298);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Compare with the charted channels").is_none(), "offered with nothing to compare with");
+    h.get_all_by_label("⋯").next().unwrap().click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Compare with the other channels").is_none(), "offered with nothing to compare with");
+}
+
+#[test]
 fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     let fake = FakeController::start(xy_signals()).unwrap();
     let dir = temp_dir("xy-review");
