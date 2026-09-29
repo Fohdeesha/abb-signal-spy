@@ -340,7 +340,7 @@ mod tests {
         assert!(c.groups()[&g].len() >= 17);
         // Nothing about the measured cell's network or tooling leaks into the text.
         let text = serde_json::to_string(&c.signals).unwrap();
-        for bad in ["192.168.", "bridge", ".md", "--mech"] {
+        for bad in ["192.168.", "bridge", ".md", "--mech", "decompil"] {
             assert!(!text.to_lowercase().contains(bad), "{bad}");
         }
     }
