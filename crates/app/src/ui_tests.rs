@@ -2216,6 +2216,120 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     assert!(h.query_by_label("Compare with the other channels").is_none(), "offered with nothing to compare with");
 }
 
+/// Click into a text field (by its label) and type, as a person does.
+fn type_into(h: &mut Harness<'static, SpyApp>, role: egui::accesskit::Role, label: &str, text: &str) {
+    h.get_by_role_and_label(role, label).click();
+    let _ = h.run_ok();
+    h.get_by_role_and_label(role, label).type_text(text);
+    let _ = h.run_ok();
+}
+
+#[test]
+fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("notes");
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    h.state_mut().settings.show_open = true;
+    h.state_mut().selected = Some(1403);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("None yet.").is_some());
+    h.get_by_label("Add your notes...").click();
+    let _ = h.run_ok();
+    // Typed, as a person does.
+    type_into(&mut h, Role::TextInput, "Name", "wrist configuration vector");
+    type_into(&mut h, Role::MultilineTextInput, "Evidence", "follows joint 5 at rest");
+    h.get_by_label("probable").click();
+    let _ = h.run_ok();
+    h.get_by_label("Save").click();
+    let _ = h.run_ok();
+    assert!(h.state().note_edit.is_none(), "the editor stays open after saving");
+    let file = dir.join(crate::notes::FILE);
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.contains("\"wrist configuration vector\"") && saved.contains("\"follows joint 5 at rest\"") && saved.contains("\"probable\""), "{saved}");
+    // In the details beneath the catalogue's own, and marked in the list.
+    let _ = h.run_ok();
+    assert!(h.query_by_label("wrist configuration vector").is_some(), "the name is not shown");
+    assert!(h.query_by_label("Evidence: follows joint 5 at rest").is_some(), "the evidence is not shown");
+    // The list draws the rows in view: looked for, as a person would.
+    assert!(h.query_by_label("✎ notes").is_none());
+    h.state_mut().search = "1403".into();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("✎ notes").is_some(), "the list does not mark it");
+
+    // Next time: the same notes.
+    drop(h);
+    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    h.state_mut().settings.show_open = true;
+    h.state_mut().selected = Some(1403);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("wrist configuration vector").is_some(), "the notes did not come back");
+    // The editor holds them; Cancel keeps nothing typed; Delete removes them.
+    h.get_by_label("Edit your notes...").click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Your notes on signal 1403").is_some(), "an unnamed signal's title");
+    assert_eq!(h.get_by_role_and_label(Role::TextInput, "Name").value().as_deref(), Some("wrist configuration vector"));
+    type_into(&mut h, Role::TextInput, "Name", " (maybe)");
+    assert!(h.state().note_edit.as_ref().is_some_and(|e| e.draft.name.contains("(maybe)")), "the typing did not reach the editor");
+    h.get_by_label("Cancel").click();
+    let _ = h.run_ok();
+    assert!(h.state().note_edit.is_none());
+    assert_eq!(h.state().notes.get(1403).unwrap().name, "wrist configuration vector", "Cancel kept what was typed");
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("(maybe)"));
+    h.get_by_label("Edit your notes...").click();
+    let _ = h.run_ok();
+    h.get_by_label("Delete these notes").click();
+    let _ = h.run_ok();
+    assert!(h.state().notes.get(1403).is_none());
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("wrist"), "deleted from the file too");
+    // A number the catalogue does not have takes notes too.
+    h.state_mut().selected = Some(99_999);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Add your notes...").is_some());
+}
+
+#[test]
+fn your_notes_export_in_the_catalogues_columns_and_never_with_an_address() {
+    let (_fake, _rws, mut h, dir) = with_rws(Behaviour::default(), "notes-export");
+    let export = |h: &mut Harness<'static, SpyApp>| {
+        h.get_by_label("Catalogue").click();
+        let _ = h.run_ok();
+        h.get_by_label("Export your notes...").click();
+        let _ = h.run_ok();
+    };
+    let exported = |dir: &std::path::Path| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir.join("recordings")).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with("signal-notes.tsv")).collect()).unwrap_or_default();
+        v.sort();
+        v
+    };
+    let note = |name: &str, evidence: &str| crate::notes::Note { name: name.into(), evidence: evidence.into(), ..Default::default() };
+    h.state_mut().notes.put(1403, note("a guess", "follows joint 5")).unwrap();
+    h.state_mut().notes.put(6914, note("", "seen at the cell, 192.0.2.77, at rest")).unwrap();
+    // An address in a note: not exported, and the person told where it is.
+    export(&mut h);
+    assert!(exported(&dir).is_empty(), "exported with an address in it");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("6914 (evidence): \"192.0.2.77\"")), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Taken out: exported, saying RobotWare is not known (not logged in yet).
+    h.state_mut().notes.put(6914, note("", "seen at the cell, at rest")).unwrap();
+    export(&mut h);
+    let files = exported(&dir);
+    assert_eq!(files.len(), 1);
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(text.contains("# RobotWare: not known") && text.contains(&format!("by ABB Signal Spy {}.", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(text.contains("\n1403\ta guess\t") && text.contains("\n6914\t\t\t\t\t\t\topen\tseen at the cell, at rest\t"), "{text}");
+    // Logged in to RWS: its RobotWare version, and still nothing else of the controller.
+    log_in(&mut h, "robotics");
+    assert!(wait(&mut h, 5000, |a| a.rws_ready()), "not logged in");
+    export(&mut h);
+    let files = exported(&dir);
+    assert_eq!(files.len(), 2, "{files:?}");
+    let text = std::fs::read_to_string(&files[1]).unwrap();
+    assert!(text.contains("# RobotWare 6.16.2027 (read from the controller's RWS)."), "{text}");
+    let system_id = spy_core::fake::SYSTEM_ID.trim_matches(|c| c == '{' || c == '}');
+    for private in ["127.0.0.1", system_id, "IRB2600"] {
+        assert!(!text.contains(private), "the export names {private}: {text}");
+    }
+}
+
 #[test]
 fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     let fake = FakeController::start(xy_signals()).unwrap();

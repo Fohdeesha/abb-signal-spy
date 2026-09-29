@@ -150,6 +150,7 @@ impl SpyApp {
         egui::ScrollArea::vertical().id_salt("catalogue-list").max_height(list_height).auto_shrink([false, false]).show_rows(ui, 22.0, rows.len(), |ui, range| {
             for &(n, count) in &rows[range] {
                 let Some((name, units, frozen)) = self.catalogue.get(n).map(|s| (s.display_name(), s.units.clone(), s.has(flag::FROZEN))) else { continue };
+                let noted = self.notes.get(n).is_some();
                 let selected = self.selected == Some(n);
                 let text = if count > 1 { format!("{n:>5} +{:<2} {name}", count - 1) } else { format!("{n:>5}     {name}") };
                 ui.horizontal(|ui| {
@@ -161,6 +162,9 @@ impl SpyApp {
                         self.open_add(n);
                     }
                     ui.label(RichText::new(units).small().weak());
+                    if noted {
+                        crate::notes::note_mark(ui);
+                    }
                     if frozen {
                         ui.label(RichText::new("FROZEN").small().color(theme::WARN));
                     }
@@ -200,6 +204,7 @@ impl SpyApp {
                 if ui.button("Add as a channel...").clicked() {
                     self.open_add(n);
                 }
+                self.notes_section(ui, n);
                 return;
             };
             ui.horizontal_wrapped(|ui| {
@@ -286,6 +291,7 @@ impl SpyApp {
                     });
                 }
             }
+            self.notes_section(ui, n);
         });
     }
 

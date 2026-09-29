@@ -58,15 +58,20 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
 10. **Unidentified signals.** Turn on *open* in the catalogue to see the signals nobody has identified
     yet. Chart one beside known ones (joint angles, speeds, torques) and *Compare* (in its details, or
     a channel's ⋯ menu) ranks every other charted channel by how closely it follows a straight line of
-    it (r, with the line), over the stretch in view; one click shows a pair in the XY plot.
+    it (r, with the line), over the stretch in view; one click shows a pair in the XY plot. *Your notes*
+    in a signal's details keep what you find (a name if you have one, the evidence, what is ruled out,
+    what is open, the next test) on this PC, and *Catalogue > Export your notes* writes them as a file
+    in the catalogue's own columns, to send to whoever keeps the catalogue. It names this program's
+    version, the date and the RobotWare version (when logged in to RWS), nothing else about the
+    controller, and refuses notes holding an address, a system id or a path.
 
 The built-in catalogue was measured on an IRB 2600 with RobotWare 6.16. Another robot or RobotWare
 version may use other numbers; the controller's refusal is shown per channel, and a catalogue file for
 another controller can be loaded (Catalogue menu).
 
 Settings live in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe` when a `settings.json` is
-already there. `--connect HOST[:PORT]` connects at startup. The log, `signal-spy.log`, is kept there
-too; if the window ever closes by itself, `crash.txt` in the same folder says why (for instance that
+already there. `--connect HOST[:PORT]` connects at startup. Your notes on signals, `signal-notes.json`,
+and the log, `signal-spy.log`, are kept there too; if the window ever closes by itself, `crash.txt` in the same folder says why (for instance that
 Windows refused it memory because the PC's memory was used up).
 
 ## Recordings

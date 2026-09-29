@@ -13,6 +13,7 @@ mod compare;
 mod derived_view;
 mod export;
 mod net;
+mod notes;
 mod oom;
 mod paths;
 mod phone;

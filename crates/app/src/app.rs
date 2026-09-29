@@ -188,6 +188,9 @@ pub struct SpyApp {
     pub xy_window_rect: Option<egui::Rect>,
     /// The compare window (one channel against every other charted one), while open.
     pub compare: Option<crate::compare::CompareState>,
+    /// The person's own notes on signals, and the editor while open.
+    pub notes: crate::notes::Notes,
+    pub note_edit: Option<crate::notes::Edit>,
     /// A CSV being written, and what to add to its "saved" message.
     pub export_job: Option<crate::export::ExportJob>,
     pub export_note: &'static str,
@@ -231,6 +234,7 @@ impl SpyApp {
         let settings_path = data_dir.join("settings.json");
         let first_run = !settings_path.exists();
         let (settings, note) = Settings::load(&settings_path);
+        let (notes, notes_note) = crate::notes::Notes::load(&data_dir.join(crate::notes::FILE));
         theme::install_fonts(&ctx);
         theme::apply(&ctx, settings.dark, settings.ui_scale);
 
@@ -335,6 +339,8 @@ impl SpyApp {
             xy_rect: None,
             xy_window_rect: None,
             compare: None,
+            notes,
+            note_edit: None,
             export_job: None,
             export_note: "",
             export_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -403,6 +409,10 @@ impl SpyApp {
         }
         // On screen, not only in the log: something the person wrote was not used.
         if let Some(n) = note {
+            app.toast(Level::Warn, n);
+        }
+        if let Some(n) = notes_note {
+            app.log.warn(n.clone());
             app.toast(Level::Warn, n);
         }
         if let Some(n) = crash_note {
@@ -644,6 +654,8 @@ impl SpyApp {
                     self.toast(Level::Info, "Using the built-in catalogue.");
                     ui.close();
                 }
+                ui.separator();
+                self.export_notes_button(ui);
             });
             ui.menu_button("View", |ui| {
                 if ui.checkbox(&mut self.settings.dark, "Dark").changed() {
@@ -1329,6 +1341,7 @@ impl eframe::App for SpyApp {
         self.compare_window(&ctx);
         self.xy_window(&ctx);
         self.add_dialog(&ctx);
+        self.notes_dialog(&ctx);
         self.sets_dialog(&ctx);
         self.approval_dialog(&ctx);
         self.reset_dialog(&ctx);
