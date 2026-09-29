@@ -2069,10 +2069,13 @@ fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     assert_eq!(pngs.len(), 1, "{pngs:?}");
     let png = std::fs::read(&pngs[0]).unwrap();
     assert!(png.starts_with(b"\x89PNG"));
-    // The plot's part, not the charts': its header's width and height are the plot's.
+    // The XY window's part, not the charts': the plot with its axes and their labels,
+    // and above it which channels, how many pairs, r and the line (G30: a picture of
+    // the plot alone said none of it). Its header's width and height are the window's.
     let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as f32;
-    let r = h.state().xy_rect.unwrap();
-    assert!((size(16) - r.width()).abs() <= 2.0 && (size(20) - r.height()).abs() <= 2.0, "{} x {} for a plot of {r:?}", size(16), size(20));
+    let (w, plot) = (h.state().xy_window_rect.unwrap(), h.state().xy_rect.unwrap());
+    assert!((size(16) - w.width()).abs() <= 2.0 && (size(20) - w.height()).abs() <= 2.0, "{} x {} for a window of {w:?}", size(16), size(20));
+    assert!(w.contains_rect(plot) && w.height() > plot.height() + 40.0, "the window {w:?} and its plot {plot:?}");
 }
 
 #[test]

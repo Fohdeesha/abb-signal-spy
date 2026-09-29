@@ -214,7 +214,7 @@ impl SpyApp {
         let mut open = true;
         let (mut png, mut rect) = (false, None);
         let title = if reviewing { "XY plot · reviewing, not live" } else { "XY plot" };
-        egui::Window::new(title).id(egui::Id::new("xy-window")).open(&mut open).default_size([560.0, 520.0]).resizable(true).show(ctx, |ui| {
+        let shown = egui::Window::new(title).id(egui::Id::new("xy-window")).open(&mut open).default_size([560.0, 520.0]).resizable(true).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (axis, choice) in [("X", &mut xy.x), ("Y", &mut xy.y)] {
                     ui.label(RichText::new(axis).strong());
@@ -228,7 +228,7 @@ impl SpyApp {
                 if ui.button("⇄").on_hover_text("Swap X and Y").clicked() {
                     std::mem::swap(&mut xy.x, &mut xy.y);
                 }
-                if ui.button("Save PNG").on_hover_text("Save a picture of the plot to the recordings folder").clicked() {
+                if ui.button("Save PNG").on_hover_text("Save a picture of this window to the recordings folder: the channels, the pairs, r and the line, and the plot with its axes").clicked() {
                     png = true;
                 }
                 if xy.zoomed {
@@ -315,6 +315,10 @@ impl SpyApp {
             rect = Some(resp.response.rect);
         });
         self.xy_rect = rect;
+        // Its picture is the whole window while a plot is in it: the title (which says
+        // when it is a review), the channels, the pairs, r and the line, and the plot with
+        // its axes (G30; the plot alone said none of that).
+        self.xy_window_rect = rect.and(shown.map(|w| w.response.rect));
         self.xy = open.then_some(xy);
         if png {
             self.request_png(Picture::Xy);

@@ -347,7 +347,7 @@ impl SpyApp {
     fn picture_rect(&self, what: Picture) -> Option<egui::Rect> {
         match what {
             Picture::Charts => self.charts_rect,
-            Picture::Xy => self.xy_rect,
+            Picture::Xy => self.xy_window_rect,
         }
     }
 

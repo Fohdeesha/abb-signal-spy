@@ -45,6 +45,8 @@ controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, 
    than its inputs.
 7. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
    marked REVIEWING. *Save CSV* and *Save PNG* above the charts save what is in view, live or reviewed.
+   *XY* plots one charted channel against another over the stretch in view (samples of the same
+   controller tick paired, with r and the least-squares line); its own *Save PNG* keeps the whole window.
 8. **Controller details** (Controller menu, optional): with the controller's RWS login, typed each
    time and never stored, the window names the robot system and its RobotWare version, puts the
    controller's event log on the charts and into recordings (a look every 5 s, which a setting turns

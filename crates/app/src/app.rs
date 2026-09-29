@@ -184,6 +184,8 @@ pub struct SpyApp {
     /// The XY plot, while its window is open, and where its plot is on screen.
     pub xy: Option<crate::xy::XyState>,
     pub xy_rect: Option<egui::Rect>,
+    /// The XY window around it, while a plot is drawn: what its Save PNG keeps (G30).
+    pub xy_window_rect: Option<egui::Rect>,
     /// A CSV being written, and what to add to its "saved" message.
     pub export_job: Option<crate::export::ExportJob>,
     pub export_note: &'static str,
@@ -329,6 +331,7 @@ impl SpyApp {
             png_pending: None,
             xy: None,
             xy_rect: None,
+            xy_window_rect: None,
             export_job: None,
             export_note: "",
             export_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
