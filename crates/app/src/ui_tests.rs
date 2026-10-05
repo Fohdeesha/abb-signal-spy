@@ -2246,6 +2246,7 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     h.get_by_label("Save").click();
     let _ = h.run_ok();
     assert!(h.state().note_edit.is_none(), "the editor stays open after saving");
+    assert_eq!(log_texts(&h).iter().filter(|t| t.contains("Your notes on 1403 are saved")).count(), 1, "said once: {:?}", log_texts(&h));
     let file = dir.join(crate::notes::FILE);
     let saved = std::fs::read_to_string(&file).unwrap();
     assert!(saved.contains("\"wrist configuration vector\"") && saved.contains("\"follows joint 5 at rest\"") && saved.contains("\"probable\""), "{saved}");
@@ -2283,6 +2284,7 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     h.get_by_label("Delete these notes").click();
     let _ = h.run_ok();
     assert!(h.state().notes.get(1403).is_none());
+    assert_eq!(log_texts(&h).iter().filter(|t| t.contains("Your notes on 1403 are deleted")).count(), 1, "said once: {:?}", log_texts(&h));
     assert!(!std::fs::read_to_string(&file).unwrap().contains("wrist"), "deleted from the file too");
     // A number the catalogue does not have takes notes too.
     h.state_mut().selected = Some(99_999);
@@ -2311,11 +2313,15 @@ fn your_notes_export_in_the_catalogues_columns_and_never_with_an_address() {
     export(&mut h);
     assert!(exported(&dir).is_empty(), "exported with an address in it");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("6914 (evidence): \"192.0.2.77\"")), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    // Said once in the log, each time (the cell's export of 2026-10-04 logged its line twice).
+    let said = |h: &Harness<'static, SpyApp>, what: &str| log_texts(h).iter().filter(|t| t.contains(what)).count();
+    assert_eq!(said(&h, "Not exported"), 1, "{:?}", log_texts(&h));
     // Taken out: exported, saying RobotWare is not known (not logged in yet).
     h.state_mut().notes.put(6914, note("", "seen at the cell, at rest")).unwrap();
     export(&mut h);
     let files = exported(&dir);
     assert_eq!(files.len(), 1);
+    assert_eq!(said(&h, "Exported your notes"), 1, "{:?}", log_texts(&h));
     let text = std::fs::read_to_string(&files[0]).unwrap();
     assert!(text.contains("# RobotWare: not known") && text.contains(&format!("by ABB Signal Spy {}.", env!("CARGO_PKG_VERSION"))), "{text}");
     assert!(text.contains("\n1403\ta guess\t") && text.contains("\n6914\t\t\t\t\t\t\topen\tseen at the cell, at rest\t"), "{text}");

@@ -405,9 +405,8 @@ impl SpyApp {
             let empty = note.is_empty();
             match self.notes.put(n, note) {
                 Ok(()) => {
-                    let what = if delete || empty { format!("Your notes on {n} are deleted.") } else { format!("Your notes on {n} are saved.") };
-                    self.log.info(what.clone());
-                    self.toast(Level::Info, what);
+                    // The toast logs it too.
+                    self.toast(Level::Info, if delete || empty { format!("Your notes on {n} are deleted.") } else { format!("Your notes on {n} are saved.") });
                     close = true;
                 }
                 // Kept open, the text as typed: nothing is lost to a failed save.
@@ -431,7 +430,7 @@ impl SpyApp {
             let more = if private.len() > 4 { format!(" and {} more", private.len() - 4) } else { String::new() };
             let why = format!("Not exported: your notes hold what identifies a controller or a PC (an address, a system id or a path), and the file is meant to be shared. Take it out of {list}{more}, then export again.");
             self.log.warn(why.clone());
-            self.toast(Level::Error, why);
+            self.show_toast(Level::Error, why);
             return;
         }
         let now = std::time::SystemTime::now();
@@ -450,9 +449,8 @@ impl SpyApp {
         match written {
             Ok(path) => {
                 let n = self.notes.map.values().filter(|x| !x.is_empty()).count();
-                let what = format!("Exported your notes on {n} signal(s) to {}.", path.display());
-                self.log.info(what.clone());
-                self.toast(Level::Info, what);
+                // The toast logs it too.
+                self.toast(Level::Info, format!("Exported your notes on {n} signal(s) to {}.", path.display()));
             }
             Err(e) => self.toast(Level::Error, format!("Your notes were not exported: {e}")),
         }
