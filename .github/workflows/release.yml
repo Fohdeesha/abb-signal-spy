@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new: ${{ steps.version.outputs.new }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.new == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install 1.96 --profile minimal
+      - run: cargo +1.96 build --release --locked -p abb-signal-spy -p signal-spy-probe
+      - name: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          mkdir dist
+          cp target/release/abb-signal-spy.exe "dist/abb-signal-spy-$VERSION.exe"
+          cp target/release/signal-spy-probe.exe "dist/signal-spy-probe-$VERSION.exe"
+          (cd dist && sha256sum *.exe > SHA256SUMS.txt)
+          previous=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            git log --no-merges --format='- %s' "$previous..HEAD" > notes.md
+          else
+            echo "First release." > notes.md
+          fi
+          gh release create "v$VERSION" dist/* --title "ABB Signal Spy $VERSION" --notes-file notes.md --target "$GITHUB_SHA"

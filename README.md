@@ -1,139 +1,46 @@
 # ABB Signal Spy
 
-A Windows app for reading, charting and recording the motion test signals an ABB IRC5 robot controller
-streams over its RobAPI InfoStream interface: motor currents and voltages, torques, the DC-link voltage,
-resolver angles, joint and motor positions and speeds, and several hundred more.
+A small Windows app for seeing what an ABB IRC5 is really doing. It reads the motion test signals the
+controller streams over RobAPI InfoStream (motor currents and torques, DC-link voltage, resolver angles,
+joint speeds and a few hundred more), charts them live and records them.
 
-It only reads. It never commands motion, never writes RAPID, configuration or I/O, and never takes
-mastership.
+It only ever reads. No motion, no RAPID, no config or I/O writes, no mastership.
 
-Not affiliated with or endorsed by ABB. ABB and IRC5 are trademarks of ABB.
+![Live charts](screenshots/live.png)
 
-**Status:** first usable version, in testing. Tested against RobotStudio's RobotWare 6 virtual
-controller, an in-process stand-in for the protocol, and a real IRC5 (IRB 2600, RobotWare 6.16).
+## Get it
 
-## Using it
+Grab the latest `.exe` from [Releases](../../releases). No installer, just run it. Windows 10 or 11.
 
-1. **Connect.** A real IRC5 answers on port 5515: type its address and press Connect. A RobotStudio
-   virtual controller picks a new port every time it starts: open **List** and pick it there.
-2. **One program at a time.** A controller streams test signals to one program at a time. A second
-   program is not refused; the two break each other's streams, and the controller can even hand the
-   second program's signals to the first under the first one's channel numbers. Close TuneMaster's
-   signal logging and RobotStudio's signal tools first. When other programs are connected, ABB Signal
-   Spy names them and asks before taking over. If another program takes the stream while it runs, it
-   stops and says so, before showing anything that could be the other program's signals, and it does
-   not take the stream back. If the network drops or goes quiet (nothing at all from the controller
-   for 3 s), it reconnects by itself: it first waits for the controller to let go of the broken
-   connection (usually at once when the network is back, up to a minute), and it never takes the
-   stream from a program that connected meanwhile (it asks, or stops and says why). If the controller
-   at the address turns out to be a different one (a cable moved to the next robot), it stops rather
-   than carry on.
-3. **Add channels.** Pick a signal in the catalogue and press Add. The dialog asks only what that signal
-   needs: the robot, the axis, or nothing. Up to 12 channels. *Channel sets...* adds a common group in
-   one go: the DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block.
-4. **Read and chart.** Values show as a 150 ms mean (for a joint speed that pads between its values
-   with zeros, the mean of the values it reports; for an angle within one turn, the mean on the circle);
-   charts show every sample. Space pauses the charts so you can scroll back through the last 10 minutes.
-   A value that stops updating is dimmed and marked STALE, never shown as live. Angles are in degrees;
-   click the unit to switch to radians.
-5. **Record.** REC records every sample. *Save last* saves the last seconds from memory, for when
-   something has just happened and nothing was recording. *Slow log* records count, mean, min and max
-   per interval, for runs of hours. M drops a marker.
-6. **Derived channels**, from a channel's menu (⋯): a resolver angle's **turn to a target** (the short
-   way round, ON TARGET within 0.25 degrees), the **PWM duty sum** of an axis (1.50 by construction), and
-   the **DC-link sag**: how far the drive's DC-link voltage dips below its resting level (the plateau),
-   which you set with the robot armed and still once the link has held level for 20 s (after the
-   motors go off it drains slowly, for about 20 minutes). A derived value is never shown as more live
-   than its inputs.
-7. **Look back.** *File > Open a recording* (or drop its folder on the window) charts a recording again,
-   marked REVIEWING. *Save CSV* and *Save PNG* above the charts save what is in view, live or reviewed.
-   *XY* plots one charted channel against another over the stretch in view (samples of the same
-   controller tick paired, with r and the least-squares line); its own *Save PNG* keeps the whole window.
-8. **Controller details** (Controller menu, optional): with the controller's RWS login, typed each
-   time and never stored, the window names the robot system and its RobotWare version, puts the
-   controller's event log on the charts and into recordings (a look every 5 s, which a setting turns
-   off), and a turn to target can take its target from the motor's commutator offset. Read-only, and
-   checked to be the same controller as the one streaming.
-9. **Phone view** (off until switched on) serves a read-only page with the current values to a phone
-   on the same network.
-10. **Unidentified signals.** Turn on *open* in the catalogue to see the signals nobody has identified
-    yet. Chart one beside known ones (joint angles, speeds, torques) and *Compare* (in its details, or
-    a channel's ⋯ menu) ranks every other charted channel by how closely it follows a straight line of
-    it (r, with the line), over the stretch in view; one click shows a pair in the XY plot. *Your notes*
-    in a signal's details keep what you find (a name if you have one, the evidence, what is ruled out,
-    what is open, the next test) on this PC, and *Catalogue > Export your notes* writes them as a file
-    in the catalogue's own columns, to send to whoever keeps the catalogue. It names this program's
-    version, the date and the RobotWare version (when logged in to RWS), nothing else about the
-    controller, and refuses notes holding an address, a system id or a path.
+## Use it
 
-The built-in catalogue was measured on an IRB 2600 with RobotWare 6.16. Another robot or RobotWare
-version may use other numbers; the controller's refusal is shown per channel, and a catalogue file for
-another controller can be loaded (Catalogue menu).
+1. Type the controller's address and hit **connect**. RobotStudio virtual controllers show up under **list**.
+2. Pick signals on the left and **add** them, up to 12.
+3. Watch them live, hit **record** before something happens, or **save last** right after it did.
 
-Settings live in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe` when a `settings.json` is
-already there. `--connect HOST[:PORT]` connects at startup. Your notes on signals,
-`signal-notes.json`, and the log, `signal-spy.log`, are kept there too; if the window ever closes by
-itself, `crash.txt` in the same folder says why (for instance that Windows refused it memory because
-the PC's memory was used up).
+Close TuneMaster's signal logging and RobotStudio's signal tools first. The controller streams to one
+program at a time, and Signal Spy tells you when someone else is on it instead of fighting over it.
 
-## Recordings
+Space pauses, and two cursors measure anything on the charts:
 
-Each recording is a folder under `Documents\TestSignals`, named for the local date and time it
-started, for example `2026-09-26_04-47-20 dc dip`:
+![Paused with cursors](screenshots/cursors.png)
 
-- `data.csv`: `controller_ms,channel,value`, one row per sample. `controller_ms` is the controller's own
-  clock; `channel` is `signal/unit/joint`, for example `4002/ROB_1/J2` (torque, ROB_1, joint 2).
-- `slow.csv` (slow logs): `controller_ms,channel,count,mean,min,max`, one row per channel per interval.
-- `recording.json`: the controller and its system id, each channel's name, units and sample time,
-  reconnects and controller restarts, markers, and whether any samples were lost. `anchors` map the
-  controller's clock to UTC: each applies from its `row` (the first data row it maps, counted from 0)
-  until the next anchor's, so rows on both sides of a controller restart map correctly. If the
-  controller behind the address changes during a recording, the recording is closed there and says so.
-  `derived` lists the derived channels shown (their values are not recorded; opening the recording
-  computes them again from the recorded inputs).
-- `* view.csv` and `* charts.png` beside the recording folders are *Save CSV* and *Save PNG*:
-  `time_utc,t_s,channel,name,units,value`, one row per sample, in the units the window shows.
-  `* signal-notes.tsv` is an export of your notes on signals.
+Or switch to the **live dashboard** for big numbers you can read from across the cell:
 
-String signals (the work object, the tool's name, a program position) are written quoted, and may
-contain commas, quotes and line breaks; any CSV reader, pandas included, reads them correctly.
+![Live dashboard](screenshots/dashboard.png)
 
-```python
-import json, pandas as pd
-meta = json.load(open("recording.json"))
-df = pd.read_csv("data.csv")
-wide = df.pivot_table(index="controller_ms", columns="channel", values="value")
-```
+Recordings go to `Documents\TestSignals`, one folder each: a plain `data.csv`
+(`controller_ms,channel,value`) plus a `recording.json` with the details. **file > open a recording**
+brings one back up.
 
-## Console probe
+The built-in signal list was measured on an IRB 2600 with RobotWare 6.16. Other robots or versions may
+number things differently.
 
-`signal-spy-probe` is the command-line side: `list` finds local virtual controllers, `hello` shows a
-controller's connected clients, `stream` records statistics for a set of signals, `typed` reports the
-record type of a list of numbers, `selftest` runs against a built-in stand-in, `rws` reads what the
-window's controller details read (the password from `SPY_RWS_PASSWORD`). It tears its streams down
-on Ctrl+C.
+## Build it
 
-## Building
+Rust 1.95 or newer with MSVC: `cargo build --release`.
 
-Rust 1.95 or later, on Windows with the MSVC toolchain:
+## License
 
-```
-cargo build --release
-cargo test --workspace
-```
-
-The workspace has three crates: `crates/core` (the protocol, decoder, session, store, catalogue and
-recorder, with no user interface), `crates/app` (the window, egui) and `crates/probe` (the console
-tool). The catalogue in `catalogue/` is generated from measurements that are not part of this
-repository; what you find out about a signal is welcome as an export of your notes (item 10 above).
-
-A Windows 7 (64-bit) build comes from `powershell -File tools\build_win7.ps1`: a pinned nightly
-compiler for Rust's tier-3 Windows 7 target, OpenGL only and no screen-reader support, and an import
-check that the exe needs nothing Windows 7 lacks. It has not yet been run on Windows 7.
-
-## Licence
-
-Copyright (C) 2026 Jon Sands.
-
-GPL-3.0-or-later: see [LICENSE](LICENSE). This program comes with no warranty; it only reads from
-the controller, but what you do with what it shows is yours to judge.
+Copyright (C) 2026 Jon Sands. GPL-3.0-or-later, see [LICENSE](LICENSE).
+Not affiliated with ABB; ABB and IRC5 are ABB's trademarks.
