@@ -82,7 +82,7 @@ impl SpyApp {
         let size = self.settings.dash_size;
         let mut resize = None;
         theme::section(ui, "02", "live dashboard", false, |ui| {
-            ui.label(RichText::new("each number is the mean of its last 150 ms, or of its smoothing if longer").color(p.ink2));
+            self.status_line(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let i = DASH_SIZES.iter().position(|s| (s - size).abs() < 0.5).unwrap_or(2);
                 if ui.add_enabled(i + 1 < DASH_SIZES.len(), egui::Button::new("bigger").min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
@@ -92,6 +92,9 @@ impl SpyApp {
                     resize = Some(DASH_SIZES[i - 1]);
                 }
                 ui.label(theme::b("size").color(p.ink2));
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new("each number is the mean of its last 150 ms, or of its smoothing if longer").color(p.ink2)).truncate());
+                });
             });
         });
         if let Some(s) = resize {

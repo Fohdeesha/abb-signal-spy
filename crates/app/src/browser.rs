@@ -98,17 +98,17 @@ impl SpyApp {
         fields::line(ui, &mut self.search, "Search the signals", |t| t.hint_text("search: number, name or unit").desired_width(w));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if theme::chip(ui, self.settings.show_named, "identified").on_hover_text("The signals with a known quantity").clicked() {
+            if theme::small_chip(ui, self.settings.show_named, "identified").on_hover_text("The signals with a known quantity").clicked() {
                 self.settings.show_named = !self.settings.show_named;
                 self.mark_settings_dirty();
             }
-            if theme::chip(ui, self.settings.show_open, "not yet").on_hover_text("Signals that respond but are not yet identified").clicked() {
+            if theme::small_chip(ui, self.settings.show_open, "not yet").on_hover_text("Signals that respond but are not yet identified").clicked() {
                 self.settings.show_open = !self.settings.show_open;
                 self.mark_settings_dirty();
             }
             let filters = (self.settings.show_inert as usize) + (self.only_favourites as usize) + (self.category.is_some() as usize) + (self.min_confidence.is_some() as usize);
             let text = if filters > 0 { format!("filters ({filters})") } else { "filters".to_string() };
-            let r = theme::drop_button(ui, &text, 34.0);
+            let r = theme::small_drop_button(ui, &text);
             egui::Popup::from_toggle_button_response(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.set_min_width(260.0);
                 if ui.checkbox(&mut self.settings.show_inert, "inert ones too").on_hover_text("Signals that returned nothing on the measured cell (features it did not use)").changed() {
@@ -163,7 +163,7 @@ impl SpyApp {
         if rows.is_empty() {
             ui.label(RichText::new("Nothing matches. Turn on 'not yet', or the inert ones in the filters, or look a number up below.").color(p.ink2));
         }
-        let bottom = 92.0;
+        let bottom = 50.0;
         let row_h = 38.0;
         let mut clicked = None;
         let mut add = None;
@@ -192,18 +192,19 @@ impl SpyApp {
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(2.0, p.ink));
         ui.add_space(6.0);
-        ui.scope(|ui| {
-            ui.label(RichText::new("number not in the list?").color(p.ink2));
-            ui.horizontal(|ui| {
-                let r = fields::line(ui, &mut self.raw_number, "Raw signal number", |t| t.desired_width(110.0).hint_text("e.g. 4002"));
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.add(egui::Button::new("look it up").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() || enter {
-                    match self.raw_number.trim().parse::<u32>() {
-                        Ok(n) if n > 0 => self.selected = Some(n),
-                        _ => self.toast(Level::Error, "Type a signal number (a whole number above 0)."),
-                    }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let look = theme::b("look it up").size(14.0);
+            let button_w = egui::WidgetText::from(look.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x + 2.0 * ui.spacing().button_padding.x;
+            let w = (ui.available_width() - button_w - 6.0 - 20.0).max(60.0);
+            let r = fields::line(ui, &mut self.raw_number, "Raw signal number", |t| t.min_size(egui::vec2(0.0, theme::SMALL_H)).desired_width(w).font(egui::FontId::proportional(14.0)).hint_text("number not listed"));
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.add(egui::Button::new(look).min_size(egui::vec2(0.0, theme::SMALL_H))).clicked() || enter {
+                match self.raw_number.trim().parse::<u32>() {
+                    Ok(n) if n > 0 => self.selected = Some(n),
+                    _ => self.toast(Level::Error, "Type a signal number (a whole number above 0)."),
                 }
-            });
+            }
         });
     }
 
@@ -211,9 +212,9 @@ impl SpyApp {
         let p = theme::pal(ui);
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
-            ui.label(RichText::new("01").font(egui::FontId::new(18.0, theme::heavy())).color(p.red));
+            ui.label(RichText::new("01").font(egui::FontId::new(18.0, theme::bold())).color(p.red));
             let unfold = theme::icon_button(ui, theme::Icon::FoldRight, "Unfold the signal list", egui::vec2(40.0, 40.0)).clicked();
-            let add = theme::upright_button(ui, "add signals", egui::vec2(40.0, 140.0)).clicked();
+            let add = theme::upright_button(ui, "add signals", egui::vec2(40.0, 110.0)).clicked();
             if unfold || add {
                 self.settings.signals_folded = false;
                 self.mark_settings_dirty();
@@ -236,7 +237,7 @@ impl SpyApp {
                     ui.horizontal(|ui| {
                         ui.label(theme::num(n.to_string(), 20.0));
                         let name = self.catalogue.get(n).map(|s| s.display_name()).unwrap_or_else(|| format!("Signal {n}"));
-                        ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(20.0, theme::heavy()))).truncate());
+                        ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(20.0, theme::bold()))).truncate());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if theme::icon_button(ui, theme::Icon::Close, "Close (Esc)", egui::vec2(40.0, 40.0)).clicked() {
                                 close = true;

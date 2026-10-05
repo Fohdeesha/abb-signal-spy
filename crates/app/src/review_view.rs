@@ -203,7 +203,7 @@ impl SpyApp {
         }
     }
 
-    pub fn review_strip(&mut self, ui: &mut egui::Ui) {
+    pub fn review_block(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let st = self.session.status().clone();
         let Some(rs) = &self.review else { return };
@@ -211,26 +211,26 @@ impl SpyApp {
         let name = rs.review.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let length = clock_text(rs.duration());
         let mut close = false;
-        let gap = 16.0;
-        let (block, button) = (230.0, 210.0);
-        let w = ((ui.available_width() - block - button - gap * 4.0) / 3.0).floor().max(80.0);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(block, 48.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 0.0, p.primary);
-            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 3.0))).layout(egui::Layout::top_down(egui::Align::Min)));
-            inner.spacing_mut().item_spacing.y = 0.0;
-            inner.label(RichText::new("REVIEWING").font(egui::FontId::new(20.0, theme::heavy())).color(p.on_primary));
-            inner.label(theme::b("not live").size(14.0).color(p.on_primary));
-            theme::status_cell(ui, w, "recording", if m.label.is_empty() { &name } else { &m.label }, p.ink, theme::Mark::None, p.ink).on_hover_text(rs_dir_text(&self.review));
-            let started = local_start(&m);
-            theme::status_cell(ui, w, "recorded", &format!("{}, {length}", started.get(..16).unwrap_or(&started)), p.ink, theme::Mark::None, p.ink).on_hover_text(format!("{started}: {}", kind_word(m.kind)));
-            let (word, color, mark) = SpyApp::phase_word(&st, p);
-            theme::status_cell(ui, w, "live session, still running", &word, color, mark, if mark == theme::Mark::Off { p.ink } else { color });
-            if ui.add(egui::Button::new("close the recording").min_size(egui::vec2(button, 46.0))).clicked() {
-                close = true;
-            }
+        ui.spacing_mut().item_spacing.y = 4.0;
+        egui::Frame::new().fill(p.primary).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(RichText::new("REVIEWING").font(egui::FontId::new(20.0, theme::bold())).color(p.on_primary));
+            ui.label(theme::b("not live").size(14.0).color(p.on_primary));
+            ui.add(egui::Label::new(theme::b(if m.label.is_empty() { &name } else { &m.label }).size(15.0).color(p.on_primary)).truncate()).on_hover_text(rs_dir_text(&self.review));
         });
+        let started = local_start(&m);
+        let when = format!("{}, {length}", started.get(..16).unwrap_or(&started));
+        crate::status::labelled_row(ui, "recorded", |ui| ui.add(egui::Label::new(theme::b(when).size(14.0).color(p.ink)).truncate())).on_hover_text(format!("{started}: {}", kind_word(m.kind)));
+        let (word, color, mark) = SpyApp::phase_word(&st, p);
+        crate::status::labelled_row(ui, "live session", |ui| {
+            crate::status::draw_mark(ui, mark, color);
+            ui.add(egui::Label::new(theme::b(&word).size(15.0).color(color)).truncate())
+        })
+        .on_hover_text("The live session goes on underneath while you review.");
+        if ui.add(egui::Button::new("close the recording").min_size(egui::vec2(ui.available_width(), theme::TOOL_H))).clicked() {
+            close = true;
+        }
         let mut notes: Vec<(String, egui::Color32)> = Vec::new();
         if !m.complete {
             notes.push(("Cut short: not closed properly (the program or the PC stopped while recording). The data up to then is here.".into(), p.hold));
@@ -239,15 +239,22 @@ impl SpyApp {
             notes.push((format!("{} samples lost while recording: the disk could not keep up.", m.samples_lost), p.red));
         }
         for (text, color) in notes {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                theme::square(ui, color, 10.0);
-                ui.label(theme::b(text).color(color));
-            });
+            ui.add(egui::Label::new(theme::b(text).size(15.0).color(color)).wrap());
         }
         if close {
             self.review = None;
         }
+    }
+
+    pub fn review_rail(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
+        let Some(rs) = &self.review else { return };
+        let name = rs.review.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let r = egui::Frame::new().fill(p.primary).inner_margin(egui::Margin::symmetric(0, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            theme::upright_label(ui, "REVIEWING", p.on_primary)
+        });
+        r.inner.on_hover_text(format!("Not live: the recording {name}. Unfold the list, or use file > close the recording, to go back to live."));
     }
 
     pub fn review_charts(&mut self, ui: &mut egui::Ui) {
@@ -309,7 +316,7 @@ impl SpyApp {
                         .inner_margin(egui::Margin::symmetric(10, 5))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(n).font(egui::FontId::new(16.0, theme::heavy())).color(if current { p.hold } else { p.ink }));
+                                ui.label(RichText::new(n).font(egui::FontId::new(16.0, theme::bold())).color(if current { p.hold } else { p.ink }));
                                 ui.label(if current { galley_text.color(p.ink).family(theme::bold()) } else { galley_text.color(p.ink2) });
                             });
                         });

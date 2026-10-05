@@ -149,19 +149,10 @@ pub fn channel_color(i: usize, dark: bool) -> Color32 {
     p[i % p.len()]
 }
 
-const NEXT: &[u8] = include_bytes!("../fonts/AtkinsonHyperlegibleNext-Variable.ttf");
-const MONO: &[u8] = include_bytes!("../fonts/AtkinsonHyperlegibleMono-Variable.ttf");
+const PLEX: &[u8] = include_bytes!("../fonts/IBMPlexSans-Variable.ttf");
 
 pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
-}
-
-pub fn heavy() -> FontFamily {
-    FontFamily::Name("heavy".into())
-}
-
-pub fn mono_bold() -> FontFamily {
-    FontFamily::Name("mono-bold".into())
 }
 
 fn face(bytes: &'static [u8], weight: f32) -> egui::FontData {
@@ -171,8 +162,8 @@ fn face(bytes: &'static [u8], weight: f32) -> egui::FontData {
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let egui_fallbacks: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    for (name, bytes, weight) in [("next-400", NEXT, 400.0), ("next-700", NEXT, 700.0), ("next-800", NEXT, 800.0), ("mono-400", MONO, 400.0), ("mono-700", MONO, 700.0)] {
-        fonts.font_data.insert(name.into(), std::sync::Arc::new(face(bytes, weight)));
+    for (name, weight) in [("plex-400", 400.0), ("plex-700", 700.0)] {
+        fonts.font_data.insert(name.into(), std::sync::Arc::new(face(PLEX, weight)));
     }
     let mut windows = Vec::new();
     let windir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into());
@@ -183,11 +174,9 @@ pub fn install_fonts(ctx: &egui::Context) {
         }
     }
     let family = |first: &str| -> Vec<String> { std::iter::once(first.to_string()).chain(windows.iter().cloned()).chain(egui_fallbacks.iter().cloned()).collect() };
-    fonts.families.insert(FontFamily::Proportional, family("next-400"));
-    fonts.families.insert(bold(), family("next-700"));
-    fonts.families.insert(heavy(), family("next-800"));
-    fonts.families.insert(FontFamily::Monospace, family("mono-400"));
-    fonts.families.insert(mono_bold(), family("mono-700"));
+    fonts.families.insert(FontFamily::Proportional, family("plex-400"));
+    fonts.families.insert(bold(), family("plex-700"));
+    fonts.families.insert(FontFamily::Monospace, family("plex-400"));
     ctx.set_fonts(fonts);
 }
 
@@ -196,7 +185,16 @@ pub fn b(text: impl Into<String>) -> RichText {
 }
 
 pub fn num(text: impl Into<String>, size: f32) -> RichText {
-    RichText::new(text).font(FontId::new(size, mono_bold()))
+    RichText::new(text).font(FontId::new(size, bold()))
+}
+
+pub fn fit_size(ui: &egui::Ui, text: &str, width: f32, sizes: &[f32]) -> f32 {
+    let smallest = sizes.last().copied().unwrap_or(14.0);
+    sizes.iter().copied().find(|&s| ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), FontId::new(s, bold()), Color32::WHITE).size().x) <= width).unwrap_or(smallest)
+}
+
+pub fn keep_together(text: &str) -> String {
+    text.replace("(every ", "(every\u{a0}").replace(" s)", "\u{a0}s)")
 }
 
 pub const TOOL_H: f32 = 36.0;
@@ -210,7 +208,7 @@ fn style(dark: bool) -> egui::Style {
             (TextStyle::Body, FontId::new(16.0, FontFamily::Proportional)),
             (TextStyle::Button, FontId::new(16.0, bold())),
             (TextStyle::Monospace, FontId::new(16.0, FontFamily::Monospace)),
-            (TextStyle::Heading, FontId::new(20.0, heavy())),
+            (TextStyle::Heading, FontId::new(20.0, bold())),
         ]
         .into(),
         drag_value_text_style: TextStyle::Body,
@@ -284,6 +282,7 @@ pub fn apply(ctx: &egui::Context, dark: bool, scale: f32) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Down,
+    Up,
     Right,
     Left,
     FoldLeft,
@@ -302,6 +301,7 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
     let line = |pts: &[(f32, f32)]| egui::Shape::line(pts.iter().map(|(x, y)| pos2(c.x + x, c.y + y)).collect(), st);
     let shapes = match icon {
         Icon::Down => vec![line(&[(-5.0, -2.5), (0.0, 2.5), (5.0, -2.5)])],
+        Icon::Up => vec![line(&[(-5.0, 2.5), (0.0, -2.5), (5.0, 2.5)])],
         Icon::Right => vec![line(&[(-2.5, -5.0), (2.5, 0.0), (-2.5, 5.0)])],
         Icon::Left => vec![line(&[(2.5, -5.0), (-2.5, 0.0), (2.5, 5.0)])],
         Icon::FoldLeft => vec![line(&[(-0.5, -5.0), (-5.0, 0.0), (-0.5, 5.0)]), line(&[(5.5, -5.0), (1.0, 0.0), (5.5, 5.0)])],
@@ -385,6 +385,14 @@ pub fn tool(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 pub fn drop_button(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response {
+    drop_button_text(ui, egui::WidgetText::from(text), height)
+}
+
+pub fn small_drop_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    drop_button_text(ui, b(text).size(14.0).into(), SMALL_H)
+}
+
+fn drop_button_text(ui: &mut egui::Ui, text: egui::WidgetText, height: f32) -> egui::Response {
     let id = ui.next_auto_id().with("chevron");
     let r = egui::Button::new((text, egui::Atom::custom(id, vec2(12.0, 10.0)))).min_size(vec2(0.0, height)).atom_ui(ui);
     if let Some(rect) = r.rect(id) {
@@ -468,10 +476,28 @@ pub fn upright_button(ui: &mut egui::Ui, text: &str, size: Vec2) -> egui::Respon
     r
 }
 
+pub fn upright_label(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
+    let galley = egui::WidgetText::from(b(text).size(15.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
+    let (w, h) = (galley.size().x, galley.size().y);
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), w), Sense::hover());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    let at = pos2(rect.center().x - h / 2.0, rect.bottom());
+    ui.painter().add(egui::epaint::TextShape::new(at, galley, color).with_angle(-std::f32::consts::FRAC_PI_2));
+    r
+}
+
 pub fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
+    chip_sized(ui, on, b(text), (24.0, 34.0))
+}
+
+pub fn small_chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
+    chip_sized(ui, on, b(text).size(14.0), (18.0, SMALL_H))
+}
+
+fn chip_sized(ui: &mut egui::Ui, on: bool, text: RichText, (pad, height): (f32, f32)) -> egui::Response {
     let p = pal(ui);
-    let galley = egui::WidgetText::from(b(text)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
-    let size = vec2(galley.size().x + 24.0, 34.0);
+    let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
+    let size = vec2(galley.size().x + pad, height);
     let (rect, r) = ui.allocate_exact_size(size, Sense::click());
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), on, galley.text()));
     if ui.is_rect_visible(rect) {
@@ -523,15 +549,15 @@ pub fn section<R>(ui: &mut egui::Ui, number: &str, title: &str, strong: bool, ri
 
 fn heading(ui: &mut egui::Ui, number: &str, title: &str) {
     let p = pal(ui);
-    ui.label(RichText::new(number).font(FontId::new(18.0, heavy())).color(p.red));
+    ui.label(RichText::new(number).font(FontId::new(18.0, bold())).color(p.red));
     if !title.is_empty() {
-        ui.label(RichText::new(title).font(FontId::new(18.0, heavy())).color(p.ink));
+        ui.label(RichText::new(title).font(FontId::new(18.0, bold())).color(p.ink));
     }
 }
 
 pub fn section_tools(ui: &mut egui::Ui, number: &str, title: &str, left_w: f32, right_w: f32, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
     let p = pal(ui);
-    let title_w = [number, title].iter().filter(|t| !t.is_empty()).map(|t| egui::WidgetText::from(RichText::new(*t).font(FontId::new(18.0, heavy()))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Body).size().x + ui.spacing().item_spacing.x).sum::<f32>();
+    let title_w = [number, title].iter().filter(|t| !t.is_empty()).map(|t| egui::WidgetText::from(RichText::new(*t).font(FontId::new(18.0, bold()))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Body).size().x + ui.spacing().item_spacing.x).sum::<f32>();
     let one_row = title_w + left_w + right_w + 24.0 <= ui.available_width();
     let mut right = Some(right);
     ui.horizontal(|ui| {
@@ -562,30 +588,6 @@ pub fn sheet_frame(ui: &egui::Ui) -> egui::Frame {
 pub enum Mark {
     On,
     Off,
-    None,
-}
-
-pub fn status_cell(ui: &mut egui::Ui, width: f32, key: &str, value: &str, color: Color32, mark: Mark, rule: Color32) -> egui::Response {
-    let p = pal(ui);
-    ui.allocate_ui_with_layout(vec2(width, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.set_width(width);
-        ui.set_height(46.0);
-        let top = ui.cursor().top();
-        ui.painter().hline(ui.max_rect().x_range(), top + 1.0, Stroke::new(2.0, rule));
-        ui.add_space(4.0);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ui.label(RichText::new(key).size(14.0).color(p.ink2));
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            match mark {
-                Mark::On => square(ui, color, 10.0),
-                Mark::Off => hollow(ui, color, 10.0),
-                Mark::None => {}
-            }
-            ui.add(egui::Label::new(b(value).size(17.0).color(color)).truncate());
-        });
-    })
-    .response
 }
 
 pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32, tip: &str) -> egui::Response {
@@ -672,17 +674,55 @@ mod tests {
         apply(&ctx, true, 1.0);
         ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
         let defs = ctx.fonts(|f| f.definitions().clone());
-        for (family, first) in [(FontFamily::Proportional, "next-400"), (bold(), "next-700"), (heavy(), "next-800"), (FontFamily::Monospace, "mono-400"), (mono_bold(), "mono-700")] {
+        for (family, first) in [(FontFamily::Proportional, "plex-400"), (bold(), "plex-700"), (FontFamily::Monospace, "plex-400")] {
             assert_eq!(defs.families[&family].first().map(String::as_str), Some(first), "{family:?}");
         }
-        let mono = egui::FontData::from_static(MONO);
-        assert_eq!(mono.variation_axes().first().map(|a| a.default), Some(200.0));
-        assert_eq!(defs.font_data["mono-400"].tweak.coords, egui::epaint::text::VariationCoords::new([("wght", 400.0)]));
+        let weight = egui::FontData::from_static(PLEX).variation_axes().into_iter().find(|a| format!("{}", a.tag) == "wght").expect("a weight axis");
+        assert!(weight.range.min <= 400.0 && weight.range.max >= 700.0 && weight.default != 700.0, "{weight:?}");
+        for (face, weight) in [("plex-400", 400.0), ("plex-700", 700.0)] {
+            assert_eq!(defs.font_data[face].tweak.coords, egui::epaint::text::VariationCoords::new([("wght", weight)]), "{face}");
+        }
         let text = "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 .,:;!?'\"()[]{}<>/\\|-_+=*&%$#@~ · ± ° Δ − – — … × ÅÄÖåäöÜüßéèçñ";
-        for (family, face) in [(FontFamily::Proportional, "next-400"), (mono_bold(), "mono-700")] {
+        for (family, face) in [(FontFamily::Proportional, "plex-400"), (bold(), "plex-700")] {
             let held = ctx.fonts_mut(|f| f.fonts.font(&family).characters().clone());
             let missing: String = text.chars().filter(|c| !c.is_whitespace() && held.get(c).and_then(|faces| faces.first()).map(String::as_str) != Some(face)).collect();
             assert!(missing.is_empty(), "not in {face}: {missing:?}");
+        }
+    }
+
+    #[test]
+    fn every_digit_is_as_wide_as_the_others_so_a_live_value_never_jitters() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        apply(&ctx, true, 1.0);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        for family in [FontFamily::Proportional, bold()] {
+            for size in [14.0, 28.0, 64.0] {
+                let widths: Vec<f32> = ('0'..='9').map(|d| ctx.fonts_mut(|f| f.layout_no_wrap(d.to_string(), FontId::new(size, family.clone()), Color32::WHITE).size().x)).collect();
+                assert!(widths.iter().all(|w| (w - widths[0]).abs() < 0.01), "{family:?} at {size} px: {widths:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_retry_interval_wraps_whole_or_not_at_all() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        apply(&ctx, true, 1.0);
+        let word = keep_together("reconnecting, try 12 (every 30 s)");
+        let mut rows = Vec::new();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            for width in [150.0, 200.0, 240.0] {
+                let job = egui::text::LayoutJob::simple(word.clone(), FontId::new(14.0, bold()), Color32::WHITE, width);
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                rows.push(galley.rows.iter().map(|r| r.text()).collect::<Vec<_>>());
+            }
+        })
+        .textures_delta
+        .clear();
+        for lines in rows {
+            assert!(lines.iter().skip(1).all(|l| !l.contains("s)") || l.trim_start().starts_with("(every")), "{lines:?}");
+            assert!(lines.iter().all(|l| !l.trim().starts_with('s') && !l.trim().starts_with("30")), "{lines:?}");
         }
     }
 }

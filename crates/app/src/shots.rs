@@ -61,7 +61,7 @@ fn key(signal: u32, unit: &str, axis: u8) -> ChannelKey {
 fn window(dir: &std::path::Path, dark: bool) -> Harness<'static, SpyApp> {
     let dir = dir.to_path_buf();
     Harness::builder().with_size((1366.0, 700.0)).with_max_steps(8).with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light }).wgpu().build_eframe(move |cc| {
-        let mut app = SpyApp::with_options(cc, dir.clone(), false, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() });
+        let mut app = SpyApp::with_options(cc, dir.clone(), false, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), vc_pause_patience: Duration::ZERO, ..Options::default() });
         app.settings.record_dir = Some(dir.join("recordings"));
         app.settings.dark = dark;
         crate::theme::apply(&app.ctx, dark, 1.0);
@@ -175,8 +175,24 @@ fn shots() {
         }
         settle(&mut h, 300);
         save(&mut h, "dark-7-review");
-        h.state_mut().session.disconnect();
+        h.state_mut().review = None;
+        h.state_mut().settings.status_open = true;
         settle(&mut h, 300);
+        save(&mut h, "dark-12-status-open");
+        h.state_mut().settings.status_open = false;
+        h.state_mut().toggle_recording();
+        settle(&mut h, 1_000);
+        fake.cut_network(Duration::from_secs(12), Duration::from_secs(12));
+        let end = Instant::now() + Duration::from_secs(15);
+        while !matches!(h.state().session.status().phase, Phase::Reconnecting { attempt, .. } if attempt >= 2) && Instant::now() < end {
+            let _ = h.run_ok();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = h.run_ok();
+        save(&mut h, "dark-13-reconnecting");
+        h.state_mut().toggle_recording();
+        h.state_mut().session.disconnect();
+        settle(&mut h, 12_000);
     }
     fake.with(|b| {
         b.mute.clear();

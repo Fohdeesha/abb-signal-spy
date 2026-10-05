@@ -196,6 +196,9 @@ fn a_real_controllers_flexpendant_alone_asks_nothing() {
     let _ = h.run_ok();
     assert_eq!(h.query_all_by_label_contains("192.168.126.10").count(), 0, "the pendant is named");
     assert_eq!(h.query_all_by_label_contains("FlexPendant").count(), 0, "the pendant is mentioned");
+    assert_eq!(h.query_all_by_label_contains("also connected").count(), 0, "nobody else is shown");
+    h.get_by_label("Show the whole status").click();
+    let _ = h.run_ok();
     assert!(h.query_by_label("none").is_some(), "other programs: none");
     h.state_mut().show_diag = true;
     let _ = h.run_ok();
@@ -2642,6 +2645,90 @@ fn the_signal_list_folds_away_and_is_remembered() {
 }
 
 #[test]
+fn the_state_stays_in_view_with_the_list_folded_and_on_the_dashboard() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("status-places");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.get_by_label("Fold the signal list").click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("not connected").is_some(), "the rail says the state");
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let k = spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(1).unwrap() };
+    assert!(h.state_mut().add_channels(vec![k], false));
+    h.state_mut().toggle_recording();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("streaming").is_some());
+    assert!(h.query_all_by_label_contains("rec 00:0").next().is_some(), "and that it records");
+    h.state_mut().dashboard = true;
+    let _ = h.run_ok();
+    assert!(h.query_by_label("streaming").is_some(), "the dashboard's heading says the state");
+    assert!(h.query_all_by_label_contains("recording 00:0").next().is_some(), "and the recording");
+    h.state_mut().toggle_recording();
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+}
+
+#[test]
+fn a_warning_gets_its_own_line_only_while_it_holds() {
+    let dir = temp_dir("warning-line");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let _ = h.run_ok();
+    let warning = "Another ABB Signal Spy window is open";
+    assert_eq!(h.query_all_by_label_contains(warning).count(), 0);
+    let top = h.state().signals_rect.expect("the list is drawn").top();
+    h.state_mut().another_instance = true;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains(warning).next().is_some(), "the warning is on screen");
+    assert!(h.state().signals_rect.unwrap().top() > top + 10.0, "on a line of its own above the sheets");
+    h.state_mut().another_instance = false;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.query_all_by_label_contains(warning).count(), 0);
+    assert_eq!(h.state().signals_rect.unwrap().top(), top, "and its room handed back");
+}
+
+#[test]
+fn a_number_not_in_the_list_is_looked_up_from_the_short_row() {
+    let dir = temp_dir("lookup");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let _ = h.run_ok();
+    set_value(&h, "Raw signal number", "4321");
+    let _ = h.run_ok();
+    assert_eq!(h.state().raw_number, "4321", "typed into the short row's field");
+    h.get_by_label("look it up").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().selected, Some(4321), "its details open");
+    h.state_mut().selected = None;
+    h.state_mut().raw_number = "four".into();
+    let _ = h.run_ok();
+    h.get_by_label("look it up").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().selected, None, "a word is not a number");
+}
+
+#[test]
+fn a_folded_list_still_says_reviewing() {
+    let dir = temp_dir("review-folded");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let folder = recording_on_disk(&dir, "one", "full", "", &full_csv());
+    h.state_mut().settings.signals_folded = true;
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("REVIEWING").is_some(), "not live, even folded");
+    assert!(h.query_by_label("not connected").is_none(), "the rail says the review, not the idle session");
+    h.get_by_label("Unfold the signal list").click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("REVIEWING").is_some());
+    h.get_by_label("close the recording").click();
+    let _ = h.run_ok();
+    assert!(h.state().review.is_none());
+    assert!(h.query_by_label("not connected").is_some(), "back to the live session's state");
+}
+
+#[test]
 fn reviewing_says_step_by_step_how_to_place_the_cursors() {
     let dir = temp_dir("review-steps");
     let mut h = harness(&dir, AskPolicy::Remote);
@@ -2680,20 +2767,32 @@ fn reviewing_says_step_by_step_how_to_place_the_cursors() {
 }
 
 #[test]
-fn the_strip_says_the_state_in_words_and_names_other_programs() {
+fn the_status_says_the_state_in_words_and_names_other_programs() {
     let b = Behaviour { extra_clients: vec!["192.0.2.27".into(), "192.168.126.10".into()], ..Behaviour::default() };
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("strip");
     let mut h = harness(&dir, AskPolicy::Remote);
     let _ = h.run_ok();
     assert!(h.query_by_label("not connected").is_some());
+    assert!(h.query_by_label("off").is_none(), "a calm status keeps to the state and the controller");
+    h.get_by_label("Show the whole status").click();
+    let _ = h.run_ok();
+    assert!(h.state().settings.status_open, "opening it is remembered");
     assert!(h.query_by_label("off").is_some(), "recording: off");
+    assert!(h.query_by_label("none").is_some(), "other programs: none");
+    let _ = h.run_ok();
+    let list = h.state().signals_rect.expect("the signal list is drawn");
+    assert!(list.height() > 300.0, "the open status leaves the list its room: {list:?}");
+    h.get_by_label("Show less of the status").click();
+    let _ = h.run_ok();
+    assert!(!h.state().settings.status_open);
+    assert!(h.query_by_label("off").is_none());
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
     let _ = h.run_ok();
     assert!(h.query_by_label("streaming").is_some());
     assert!(h.query_by_label(&format!("VC 127.0.0.1 : {}", fake.port())).is_some(), "the controller, a virtual one on this PC");
-    assert!(h.query_by_label("192.0.2.27").is_some(), "the other program is named");
+    assert!(h.query_by_label("also connected: 192.0.2.27").is_some(), "the other program is named without opening the status");
     assert_eq!(h.query_all_by_label_contains("192.168.126.10").count(), 0, "the pendant is not");
     add_via_dialog(&mut h, 4002, "add");
     h.get_by_label("record").click();

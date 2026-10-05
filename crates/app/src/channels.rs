@@ -325,7 +325,7 @@ impl SpyApp {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal(|ui| {
                 theme::square(ui, self.chans[i].color, 14.0);
-                ui.add(egui::Label::new(RichText::new(&name).font(egui::FontId::new(20.0, theme::heavy()))).wrap());
+                ui.add(egui::Label::new(RichText::new(&name).font(egui::FontId::new(20.0, theme::bold()))).wrap());
             });
             ui.horizontal_wrapped(|ui| {
                 let value = self.session.store().get(&key).and_then(|ch| {

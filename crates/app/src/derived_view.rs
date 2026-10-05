@@ -480,7 +480,7 @@ impl SpyApp {
         });
         ui.horizontal(|ui| {
             theme::square(ui, self.derived[i].color, 14.0);
-            ui.add(egui::Label::new(RichText::new(&label).font(egui::FontId::new(20.0, theme::heavy()))).wrap());
+            ui.add(egui::Label::new(RichText::new(&label).font(egui::FontId::new(20.0, theme::bold()))).wrap());
         });
         ui.add(egui::Label::new(RichText::new(self.derived_formula(&def)).size(14.0).color(p.ink2)).wrap());
         ui.label(RichText::new("Computed here from its inputs; never streamed, and never written into a recording as data (a recording keeps how, and a review computes it again).").size(14.0).color(p.ink3));

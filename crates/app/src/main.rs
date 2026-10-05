@@ -19,6 +19,7 @@ mod review_view;
 mod rws_view;
 mod sets;
 mod settings;
+mod status;
 mod theme;
 mod view;
 mod xy;

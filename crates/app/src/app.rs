@@ -90,6 +90,8 @@ pub struct AddDialog {
     pub axis: u8,
 }
 
+pub const SIGNALS_WIDTH: f32 = 298.0;
+
 pub struct SpyApp {
     pub ctx: egui::Context,
     pub session: Session,
@@ -871,80 +873,7 @@ impl SpyApp {
         st.others.iter().filter(|o| !o.pendant).collect()
     }
 
-    fn status_strip(&mut self, ui: &mut egui::Ui) {
-        let p = theme::pal(ui);
-        let st = self.session.status().clone();
-        self.update_rates(&st);
-        let gap = 16.0;
-        let link_w = 64.0;
-        let w = ((ui.available_width() - link_w - gap * 5.0) / 5.0).floor().max(80.0);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            let (word, color, mark) = Self::phase_word(&st, p);
-            let rule = if mark == theme::Mark::Off && color == p.ink2 { p.ink } else { color };
-            theme::status_cell(ui, w, "connection", &word, color, mark, rule);
-
-            let controller = match &st.target {
-                Some(t) if st.loopback => format!("VC {} : {}", t.host, t.port),
-                Some(t) => format!("{} : {}", t.host, t.port),
-                None => "none".into(),
-            };
-            let r = theme::status_cell(ui, w, "controller", &controller, if st.target.is_some() { p.ink } else { p.ink2 }, theme::Mark::None, p.ink);
-            if let Some(s) = self.rws.as_ref().and_then(|l| l.system.as_ref()) {
-                r.on_hover_text(format!("{} · RobotWare {} (from its RWS)", s.name, s.rw_version));
-            }
-
-            let live: Vec<f64> = st.channels.iter().filter(|c| matches!(c.state, spy_core::session::ChannelState::Defined { .. }) && c.rate > 0.0).map(|c| c.rate).collect();
-            let rate = match (live.iter().cloned().fold(f64::INFINITY, f64::min), live.iter().cloned().fold(0.0, f64::max)) {
-                _ if live.is_empty() => String::new(),
-                (lo, hi) if hi - lo <= hi * 0.05 => format!(" · {hi:.0} /s each"),
-                (lo, hi) => format!(" · {lo:.0} to {hi:.0} /s"),
-            };
-            theme::status_cell(ui, w, "channels", &format!("{} of {}{rate}", self.chans.len() + self.derived.len(), spy_core::session::MAX_CHANNELS), p.ink, theme::Mark::None, p.ink);
-
-            let (rec, rec_on) = match (&self.recorder, &self.slow) {
-                (Some(r), slow) => {
-                    let s = r.status();
-                    (format!("{} · {}{}", crate::record::clock(s.started.elapsed().as_secs()), crate::record::size_text(s.bytes), if slow.is_some() { " + slow log" } else { "" }), true)
-                }
-                (None, Some(r)) => {
-                    let s = r.status();
-                    (format!("slow log {} · {} rows", crate::record::clock(s.started.elapsed().as_secs()), s.rows), true)
-                }
-                (None, None) => ("off".into(), false),
-            };
-            let r = if rec_on { theme::status_cell(ui, w, "recording", &rec, p.red, theme::Mark::On, p.red) } else { theme::status_cell(ui, w, "recording", &rec, p.ink2, theme::Mark::Off, p.ink) };
-            if let Some(r2) = self.recorder.as_ref().or(self.slow.as_ref()) {
-                r.on_hover_text(r2.status().dir.display().to_string());
-            }
-
-            let others = Self::others_shown(&st);
-            if others.is_empty() {
-                theme::status_cell(ui, w, "other programs", "none", p.ink, theme::Mark::Off, p.ink);
-            } else {
-                for o in &others {
-                    let c = ui.ctx().clone();
-                    net::lookup(&self.hostnames, &o.address, move || c.request_repaint());
-                }
-                let names = self.client_names(&others);
-                let text = if names.len() == 1 { names[0].clone() } else { format!("{}: {}", names.len(), names.join(", ")) };
-                theme::status_cell(ui, w, "other programs", &text, p.hold, theme::Mark::On, p.hold)
-                    .on_hover_text(format!("Connected to this controller over RobAPI:\n{}\n\nRobotStudio counts whenever it is connected, even when it is not streaming.", names.join("\n")));
-            }
-
-            ui.allocate_ui_with_layout(egui::vec2(link_w, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() + 1.0, egui::Stroke::new(2.0, p.ink));
-                ui.add_space(14.0);
-                if ui.link(theme::b("details")).on_hover_text("The connection's counters, rates and identity").clicked() {
-                    self.show_diag = true;
-                }
-            });
-        });
-        self.notices(ui, &st);
-    }
-
-    fn notices(&mut self, ui: &mut egui::Ui, st: &spy_core::session::Status) {
-        let p = theme::pal(ui);
+    fn notices(&self, st: &spy_core::session::Status, p: &theme::Pal) -> Vec<(String, Color32)> {
         let mut lines: Vec<(String, Color32)> = Vec::new();
         if self.another_instance {
             lines.push(("Another ABB Signal Spy window is open. Two windows on the same controller break each other's streams: only one program at a time can stream test signals.".into(), p.hold));
@@ -959,13 +888,7 @@ impl SpyApp {
         if lost > 0 {
             lines.push((format!("{lost} samples lost by the recorder (the disk could not keep up)."), p.red));
         }
-        for (text, color) in lines {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                theme::square(ui, color, 10.0);
-                ui.add(egui::Label::new(theme::b(text).color(color)).wrap());
-            });
-        }
+        lines
     }
 
     pub fn client_names(&self, others: &[&spy_core::session::OtherClient]) -> Vec<String> {
@@ -1168,7 +1091,7 @@ impl SpyApp {
     fn log_pane(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("messages").font(egui::FontId::new(18.0, theme::heavy())));
+            ui.label(RichText::new("messages").font(egui::FontId::new(18.0, theme::bold())));
             ui.checkbox(&mut self.log_filter_warn, "warnings only");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, theme::Icon::Close, "Close the messages", egui::vec2(32.0, 30.0)).clicked() {
@@ -1452,16 +1375,23 @@ impl eframe::App for SpyApp {
             let r = ui.max_rect();
             ui.painter().hline(r.x_range(), r.bottom() + 1.0, egui::Stroke::new(1.0, p.line));
         });
-        egui::Panel::top("bar").frame(page.inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 0 })).show_separator_line(false).show(ui, |ui| self.controller_bar(ui));
-        egui::Panel::top("strip").frame(page.inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 })).show_separator_line(false).show(ui, |ui| {
-            if self.review.is_some() {
-                self.review_strip(ui);
-            } else {
-                self.status_strip(ui);
-            }
-        });
+        egui::Panel::top("bar").frame(page.inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 })).show_separator_line(false).show(ui, |ui| self.controller_bar(ui));
+        let st = self.session.status().clone();
+        self.update_rates(&st);
+        let notices = self.notices(&st, p);
+        if !notices.is_empty() {
+            egui::Panel::top("notices").frame(page.inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 8 })).show_separator_line(false).show(ui, |ui| {
+                for (text, color) in notices {
+                    ui.horizontal(|ui| {
+                        theme::square(ui, color, 10.0);
+                        ui.add(egui::Label::new(theme::b(text).color(color)).wrap());
+                    });
+                }
+            });
+        }
         egui::Panel::bottom("footer").frame(page.inner_margin(egui::Margin { left: 16, right: 8, top: 0, bottom: 2 })).show_separator_line(false).show(ui, |ui| self.footer(ui));
         let sheet = |left: i8, right: i8| egui::Frame::new().fill(p.sheet).inner_margin(egui::Margin::same(10)).outer_margin(egui::Margin { left, right, top: 0, bottom: 8 });
+        let column = egui::Frame::new().outer_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 8 });
         if self.show_log {
             egui::Panel::bottom("log").frame(sheet(8, 8)).resizable(true).default_size(190.0).size_range(90.0..=600.0).show_separator_line(false).show(ui, |ui| self.log_pane(ui));
         }
@@ -1470,9 +1400,45 @@ impl eframe::App for SpyApp {
             self.charts_rect = Some(central.response.rect);
         } else {
             if self.settings.signals_folded {
-                egui::Panel::left("signals-folded").frame(sheet(8, 0).inner_margin(egui::Margin::symmetric(6, 10))).exact_size(60.0).resizable(false).show_separator_line(false).show(ui, |ui| self.signals_strip(ui));
+                egui::Panel::left("signals-folded").frame(column).exact_size(60.0).resizable(false).show_separator_line(false).show(ui, |ui| {
+                    let rail = egui::Frame::new().fill(p.sheet).inner_margin(egui::Margin::symmetric(6, 10));
+                    rail.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if self.review.is_some() {
+                            self.review_rail(ui);
+                        } else {
+                            self.status_rail(ui);
+                        }
+                    });
+                    ui.add_space(8.0);
+                    rail.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_min_height(ui.available_height());
+                        self.signals_strip(ui);
+                    });
+                });
             } else {
-                egui::Panel::left("signals").frame(sheet(8, 0)).resizable(true).default_size(298.0).size_range(248.0..=470.0).show_separator_line(false).show(ui, |ui| self.browser(ui));
+                egui::Panel::left("signals").frame(column).resizable(true).default_size(SIGNALS_WIDTH).size_range(248.0..=470.0).show_separator_line(false).show(ui, |ui| {
+                    let top = theme::sheet_frame(ui).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if self.review.is_some() {
+                            self.review_block(ui);
+                            None
+                        } else {
+                            Some(self.status_block(ui))
+                        }
+                    });
+                    if let Some(rule) = top.inner {
+                        let r = top.response.rect;
+                        ui.painter().hline(r.x_range(), r.top() + 1.0, egui::Stroke::new(2.0, rule));
+                    }
+                    ui.add_space(8.0);
+                    theme::sheet_frame(ui).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_min_height(ui.available_height());
+                        self.browser(ui);
+                    });
+                });
             }
             egui::Panel::right("channels").frame(sheet(0, 8)).resizable(true).default_size(338.0).size_range(308.0..=490.0).show_separator_line(false).show(ui, |ui| {
                 if self.review.is_some() {

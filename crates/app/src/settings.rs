@@ -60,6 +60,7 @@ pub struct Settings {
     pub rws_port: u16,
     pub rws_events: bool,
     pub signals_folded: bool,
+    pub status_open: bool,
     pub dash_size: f32,
 }
 
@@ -88,6 +89,7 @@ impl Default for Settings {
             rws_port: spy_core::rws::DEFAULT_PORT,
             rws_events: true,
             signals_folded: false,
+            status_open: false,
             dash_size: 64.0,
         }
     }
@@ -137,6 +139,7 @@ impl Settings {
             rws_port: field(&obj, "rws_port", d.rws_port, &mut notes),
             rws_events: field(&obj, "rws_events", d.rws_events, &mut notes),
             signals_folded: field(&obj, "signals_folded", d.signals_folded, &mut notes),
+            status_open: field(&obj, "status_open", d.status_open, &mut notes),
             dash_size: field(&obj, "dash_size", d.dash_size, &mut notes),
         };
         s.sanitize(&mut notes);
@@ -393,6 +396,7 @@ mod tests {
             rws_port: 8080,
             rws_events: false,
             signals_folded: true,
+            status_open: true,
             dash_size: 80.0,
         };
         assert_ne!(s, Settings::default());
