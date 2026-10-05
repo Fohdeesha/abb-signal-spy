@@ -202,7 +202,7 @@ pub fn crop_png(image: &egui::ColorImage, rect: egui::Rect, pixels_per_point: f3
 impl SpyApp {
     /// A new file in the recordings folder, named for now, the label and what it is:
     /// a reviewed recording's own label while one is open (its rows carry no
-    /// controller or system id to tell them apart), the REC label otherwise.
+    /// controller or system id to tell them apart), the recording name otherwise.
     fn export_path(&self, what: &str, ext: &str) -> Result<PathBuf, String> {
         let dir = self.record_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -263,7 +263,7 @@ impl SpyApp {
             total += samples.len();
             series.push(Series { id: def.id(), name: crate::derived_view::file_name(def), units: def.units().into(), samples: Box::new(samples.into_iter().map(|(t, v)| (t, Value::Number(v)))) });
         }
-        let note = if skipped_text { " (text signals are not kept in the live history: record them with REC)" } else { "" };
+        let note = if skipped_text { " (text signals are not kept in the live history: use record to keep them)" } else { "" };
         self.start_export(total, note, move |p, stop| write_csv_until(p, from, utc_offset, series, stop));
     }
 

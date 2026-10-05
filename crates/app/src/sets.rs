@@ -151,7 +151,7 @@ impl SpyApp {
                 }
                 Scope::EachRobot => {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Robots");
+                        ui.label("robots");
                         for u in &self.settings.units {
                             let mut on = d.ticked.contains(u);
                             if ui.checkbox(&mut on, u).changed() {
@@ -184,11 +184,11 @@ impl SpyApp {
                     ui.label(RichText::new(format!("{} channel(s): {}", k.len(), names.join(", "))).small());
                 }
                 Err(e) => {
-                    ui.colored_label(theme::BAD, e);
+                    ui.colored_label(theme::pal(ui).red, e);
                 }
             }
             if loopback && set.signals.iter().any(|&n| self.catalogue.get(n).is_some_and(|s| s.has(flag::PHYSICAL))) {
-                ui.colored_label(theme::WARN, "You are connected to a virtual controller, which has no physical measurements: nothing will arrive for these.");
+                ui.colored_label(theme::pal(ui).hold, "You are connected to a virtual controller, which has no physical measurements: nothing will arrive for these.");
             }
             let fresh = keys.as_ref().map(|k| k.iter().filter(|k| !self.chans.iter().any(|c| &c.key == *k)).count()).unwrap_or(0);
             let free = MAX_CHANNELS - self.chans.len();
@@ -197,18 +197,18 @@ impl SpyApp {
             ui.horizontal(|ui| {
                 let ok = keys.is_ok();
                 let why = if let Err(e) = &keys { e.clone() } else if fresh == 0 { "They are all there already.".into() } else { format!("Needs {fresh} free channel(s); {free} of {MAX_CHANNELS} free. Replace the channels instead, or remove some first.") };
-                if ui.add_enabled(ok && fresh > 0 && fresh <= free, egui::Button::new(RichText::new("Add").strong())).on_disabled_hover_text(&why).clicked()
+                if ui.add_enabled(ok && fresh > 0 && fresh <= free, egui::Button::new(RichText::new("add").strong())).on_disabled_hover_text(&why).clicked()
                     && let Ok(k) = &keys
                 {
                     act = Some((k.clone(), set.overlay, false));
                 }
                 if !self.chans.is_empty()
-                    && ui.add_enabled(ok, egui::Button::new(format!("Replace all {} channels", self.chans.len()))).on_hover_text("Remove the channels there now and add this set instead").on_disabled_hover_text(&why).clicked()
+                    && ui.add_enabled(ok, egui::Button::new(format!("replace all {} channels", self.chans.len()))).on_hover_text("Remove the channels there now and add this set instead").on_disabled_hover_text(&why).clicked()
                     && let Ok(k) = &keys
                 {
                     act = Some((k.clone(), set.overlay, true));
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("cancel").clicked() {
                     close = true;
                 }
             });

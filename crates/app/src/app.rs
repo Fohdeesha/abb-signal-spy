@@ -33,6 +33,16 @@ pub struct ChanView {
     pub hold_nonzero: bool,
     pub lane: u32,
     pub stats: Stats,
+    /// Display only: its line and value smoothed over this many ms (0: off).
+    pub smooth_ms: u32,
+    /// Its chart's vertical scale (the first channel's, for an overlaid chart).
+    pub scale: crate::charts::Scale,
+}
+
+impl ChanView {
+    pub fn new(key: ChannelKey, color: Color32, lane: u32) -> ChanView {
+        ChanView { key, color, radians: false, hold_nonzero: false, lane, stats: Stats::default(), smooth_ms: 0, scale: crate::charts::Scale::default() }
+    }
 }
 
 /// min / max / mean since the last reset, in the native unit, of the samples as the
@@ -163,8 +173,13 @@ pub struct SpyApp {
     pub cursor_a: Option<f64>,
     pub cursor_b: Option<f64>,
     pub markers: Vec<Marker>,
-    /// A chart's locked vertical scale, by (lane, display unit): see `charts::lanes`.
-    pub lane_lock: HashMap<(u32, String), (f64, f64)>,
+    /// A chart's vertical scale as Ctrl + wheel left it, by (lane, display unit) (see
+    /// `charts::lanes`), until "reset scale" or a double-click.
+    pub lane_zoom: HashMap<(u32, String), (f64, f64)>,
+    /// The vertical range each chart showed last.
+    pub lane_ranges: HashMap<(u32, String), (f64, f64)>,
+    /// The wheel over a live chart, between notches.
+    pub wheel_acc: f32,
 
     pub recorder: Option<Recorder>,
     pub slow: Option<Recorder>,
@@ -181,6 +196,8 @@ pub struct SpyApp {
     /// screen, for saving what is in view; a picture of them asked for.
     pub view_ms: Option<(i64, i64)>,
     pub charts_rect: Option<egui::Rect>,
+    /// Where the signal list is: its details open beside it.
+    pub signals_rect: Option<egui::Rect>,
     pub png_pending: Option<crate::export::Picture>,
     /// The XY plot, while its window is open, and where its plot is on screen.
     pub xy: Option<crate::xy::XyState>,
@@ -205,6 +222,15 @@ pub struct SpyApp {
     pub recordings_list: Option<Vec<(PathBuf, spy_core::recording::Meta)>>,
     pub recording_path_input: String,
 
+    /// The channel (its id) whose options fill the right panel instead of the list.
+    pub options_for: Option<String>,
+    /// The chart (lane and unit) filling the middle on its own.
+    pub expanded: Option<(u32, String)>,
+    /// The big numbers in place of the charts (G47).
+    pub dashboard: bool,
+    /// The messages (the log) open above the footer.
+    pub show_log: bool,
+
     pub confirm_reset: bool,
     pub show_about: bool,
     pub show_diag: bool,
@@ -218,8 +244,8 @@ pub struct SpyApp {
     pub title: String,
 }
 
-pub fn chan_color(i: usize) -> Color32 {
-    theme::PALETTE[i % theme::PALETTE.len()]
+pub fn chan_color(i: usize, dark: bool) -> Color32 {
+    theme::channel_color(i, dark)
 }
 
 impl SpyApp {
@@ -323,7 +349,9 @@ impl SpyApp {
             cursor_a: None,
             cursor_b: None,
             markers: Vec::new(),
-            lane_lock: HashMap::new(),
+            lane_zoom: HashMap::new(),
+            lane_ranges: HashMap::new(),
+            wheel_acc: 0.0,
             recorder: None,
             slow: None,
             snapshot_job: None,
@@ -335,6 +363,7 @@ impl SpyApp {
             phone_built: Instant::now(),
             view_ms: None,
             charts_rect: None,
+            signals_rect: None,
             png_pending: None,
             xy: None,
             xy_rect: None,
@@ -350,6 +379,10 @@ impl SpyApp {
             show_recordings: false,
             recordings_list: None,
             recording_path_input: String::new(),
+            options_for: None,
+            expanded: None,
+            dashboard: false,
+            show_log: false,
             confirm_reset: false,
             show_about: false,
             show_diag: false,
@@ -381,7 +414,7 @@ impl SpyApp {
                 } else {
                     c.lane
                 };
-                app.chans.push(ChanView { key, color: chan_color(i), radians: c.radians, hold_nonzero: c.hold_nonzero, lane, stats: Stats::default() });
+                app.chans.push(ChanView { radians: c.radians, hold_nonzero: c.hold_nonzero, smooth_ms: c.smooth_ms, scale: c.scale, ..ChanView::new(key, chan_color(i, app.settings.dark), lane) });
             }
         }
         app.sync_channels();
@@ -401,7 +434,7 @@ impl SpyApp {
                 app.next_lane = app.next_lane.max(d.lane + 1);
                 d.lane
             };
-            let color = chan_color(app.chans.len() + app.derived.len());
+            let color = chan_color(app.chans.len() + app.derived.len(), app.settings.dark);
             let target_text = match &d.def {
                 spy_core::derived::Derived::Turn { target_deg: Some(t), .. } => view::fmt(*t),
                 _ => String::new(),
@@ -448,7 +481,7 @@ impl SpyApp {
         self.settings.channels = self
             .chans
             .iter()
-            .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane })
+            .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane, smooth_ms: c.smooth_ms, scale: c.scale })
             .collect();
         // A plateau is not kept: it was measured on the controller of the moment; nor a
         // target read from a controller (its commutator offset). A typed target is.
@@ -483,11 +516,22 @@ impl SpyApp {
         // their silence before a first record is not reported as a fault.
         let text: Vec<ChannelKey> = keys.iter().filter(|k| self.catalogue.get(k.signal).is_some_and(view::is_text)).cloned().collect();
         self.session.set_channels_expecting_text(keys, text);
-        for (i, c) in self.chans.iter_mut().enumerate() {
-            c.color = chan_color(i);
-        }
         self.prune_derived();
+        self.recolor();
         self.mark_settings_dirty();
+    }
+
+    /// Each channel's colour by its place, from the theme in use: after a change of
+    /// channels, and of theme.
+    pub fn recolor(&mut self) {
+        let dark = self.settings.dark;
+        for (i, c) in self.chans.iter_mut().enumerate() {
+            c.color = chan_color(i, dark);
+        }
+        let n = self.chans.len();
+        for (j, d) in self.derived.iter_mut().enumerate() {
+            d.color = chan_color(n + j, dark);
+        }
     }
 
     pub fn channel_info(&self, key: &ChannelKey) -> ChannelInfo {
@@ -595,94 +639,119 @@ impl SpyApp {
     // ------------------------------------------------------------------ top bar
 
     fn menu(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("Open a recording...").on_hover_text("Chart a recording made earlier. The live session carries on meanwhile.").clicked() {
-                    self.show_recordings = true;
-                    self.recordings_list = None;
-                    ui.close();
-                }
-                if self.review.is_some() && ui.button("Close the recording").clicked() {
-                    self.review = None;
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button("Open the recordings folder").clicked() {
-                    let d = self.record_dir();
-                    let _ = std::fs::create_dir_all(&d);
-                    crate::paths::open_folder(&d);
-                    ui.close();
-                }
-                if ui.button("Open the settings folder").clicked() {
-                    if let Some(p) = self.settings_path.parent() {
-                        crate::paths::open_folder(p);
+        // Menu entries in the plain face: a menu of bold lines is hard to scan.
+        fn plain(ui: &mut egui::Ui) {
+            ui.style_mut().override_text_style = Some(egui::TextStyle::Body);
+        }
+        ui.scope(|ui| {
+            plain(ui);
+            ui.spacing_mut().interact_size.y = 28.0;
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 2.0);
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("file", |ui| {
+                    plain(ui);
+                    if ui.button("open a recording...").on_hover_text("Chart a recording made earlier. The live session carries on meanwhile.").clicked() {
+                        self.show_recordings = true;
+                        self.recordings_list = None;
+                        ui.close();
                     }
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.menu_button("Controller", |ui| {
-                let connected = self.session.status().phase.is_connected();
-                if ui.button("Controller details (RWS)...").on_hover_text("Read-only: the controller's name and RobotWare version, its event log on the charts, a motor's commutator offset. Needs the controller's RWS login, which is not stored.").clicked() {
-                    self.show_rws = true;
-                    ui.close();
-                }
-                if ui.add_enabled(connected, egui::Button::new("Reset InfoStream...")).on_hover_text("Removes EVERY client's test-signal streams on the controller. Only for when a crashed program left streams behind.").clicked() {
-                    self.confirm_reset = true;
-                    ui.close();
-                }
-                if ui.button("Diagnostics").clicked() {
-                    self.show_diag = true;
-                    ui.close();
-                }
-            });
-            ui.menu_button("Catalogue", |ui| {
-                if ui.button("About this catalogue").clicked() {
-                    self.show_catalogue_info = true;
-                    ui.close();
-                }
-                if ui.button("Load a catalogue file...").on_hover_text("For another robot or RobotWare version: a catalogue file made with the scan tool or shared by someone else.").clicked() {
-                    ui.close();
-                    self.load_catalogue_dialog();
-                }
-                if ui.add_enabled(self.settings.catalogue_file.is_some(), egui::Button::new("Back to the built-in catalogue")).clicked() {
-                    self.catalogue = Catalogue::builtin();
-                    self.settings.catalogue_file = None;
-                    self.mark_settings_dirty();
-                    self.toast(Level::Info, "Using the built-in catalogue.");
-                    ui.close();
-                }
-                ui.separator();
-                self.export_notes_button(ui);
-            });
-            ui.menu_button("View", |ui| {
-                if ui.checkbox(&mut self.settings.dark, "Dark").changed() {
-                    theme::apply(&self.ctx, self.settings.dark, self.settings.ui_scale);
-                    self.mark_settings_dirty();
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Text size");
-                    for (label, s) in [("S", 0.9f32), ("M", 1.0), ("L", 1.2), ("XL", 1.45)] {
-                        if ui.selectable_label((self.settings.ui_scale - s).abs() < 0.01, label).clicked() {
-                            self.settings.ui_scale = s;
-                            theme::apply(&self.ctx, self.settings.dark, s);
-                            self.mark_settings_dirty();
+                    if self.review.is_some() && ui.button("close the recording").clicked() {
+                        self.review = None;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("open the recordings folder").clicked() {
+                        let d = self.record_dir();
+                        let _ = std::fs::create_dir_all(&d);
+                        crate::paths::open_folder(&d);
+                        ui.close();
+                    }
+                    if ui.button("open the settings folder").clicked() {
+                        if let Some(p) = self.settings_path.parent() {
+                            crate::paths::open_folder(p);
                         }
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("quit").clicked() {
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-            });
-            ui.menu_button("Help", |ui| {
-                if ui.button("Quick guide").clicked() {
-                    self.show_guide = true;
-                    ui.close();
-                }
-                if ui.button("About").clicked() {
-                    self.show_about = true;
-                    ui.close();
-                }
+                ui.menu_button("controller", |ui| {
+                    plain(ui);
+                    let connected = self.session.status().phase.is_connected();
+                    if ui.button("controller details (RWS)...").on_hover_text("Read-only: the controller's name and RobotWare version, its event log on the charts, a motor's commutator offset. Needs the controller's RWS login, which is not stored.").clicked() {
+                        self.show_rws = true;
+                        ui.close();
+                    }
+                    if ui.add_enabled(connected, egui::Button::new("reset InfoStream...")).on_hover_text("Removes EVERY client's test-signal streams on the controller. Only for when a crashed program left streams behind.").clicked() {
+                        self.confirm_reset = true;
+                        ui.close();
+                    }
+                    if ui.button("connection details").clicked() {
+                        self.show_diag = true;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("catalogue", |ui| {
+                    plain(ui);
+                    if ui.button("about this catalogue").clicked() {
+                        self.show_catalogue_info = true;
+                        ui.close();
+                    }
+                    if ui.button("load a catalogue file...").on_hover_text("For another robot or RobotWare version: a catalogue file made with the scan tool or shared by someone else.").clicked() {
+                        ui.close();
+                        self.load_catalogue_dialog();
+                    }
+                    if ui.add_enabled(self.settings.catalogue_file.is_some(), egui::Button::new("back to the built-in catalogue")).clicked() {
+                        self.catalogue = Catalogue::builtin();
+                        self.settings.catalogue_file = None;
+                        self.mark_settings_dirty();
+                        self.toast(Level::Info, "Using the built-in catalogue.");
+                        ui.close();
+                    }
+                    ui.separator();
+                    self.export_notes_button(ui);
+                });
+                ui.menu_button("view", |ui| {
+                    plain(ui);
+                    if ui.checkbox(&mut self.settings.dark, "dark").changed() {
+                        theme::apply(&self.ctx, self.settings.dark, self.settings.ui_scale);
+                        self.recolor();
+                        self.mark_settings_dirty();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("text size");
+                        for (label, s) in [("S", 0.9f32), ("M", 1.0), ("L", 1.2), ("XL", 1.45)] {
+                            if ui.selectable_label((self.settings.ui_scale - s).abs() < 0.01, label).clicked() {
+                                self.settings.ui_scale = s;
+                                theme::apply(&self.ctx, self.settings.dark, s);
+                                self.mark_settings_dirty();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.checkbox(&mut self.dashboard, "live dashboard").on_hover_text("Big numbers in place of the charts, to read from a step away.");
+                    if ui.checkbox(&mut self.settings.signals_folded, "fold the signal list").changed() {
+                        self.mark_settings_dirty();
+                    }
+                    if ui.checkbox(&mut self.show_log, "messages").changed() {
+                        ui.close();
+                    }
+                    ui.separator();
+                    self.phone_switch(ui);
+                });
+                ui.menu_button("help", |ui| {
+                    plain(ui);
+                    if ui.button("quick guide").clicked() {
+                        self.show_guide = true;
+                        ui.close();
+                    }
+                    if ui.button("about").clicked() {
+                        self.show_about = true;
+                        ui.close();
+                    }
+                });
             });
         });
     }
@@ -692,39 +761,62 @@ impl SpyApp {
         self.show_catalogue_info = true;
     }
 
+    /// The controller's address, connecting, and the recording buttons: one sheet across
+    /// the top.
     fn controller_bar(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
         let phase = self.session.status().phase.clone();
         let active = phase.is_active();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Controller").strong());
-            ui.add_enabled_ui(!active, |ui| {
-                fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("address, e.g. 192.168.125.1").desired_width(170.0))
-                    .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.");
-                ui.label(":");
-                fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(48.0)).on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.");
-                self.target_menu(ui);
+        theme::sheet_frame(ui).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(fields::HEIGHT);
+                ui.label(theme::b("controller").color(p.ink2));
+                // Locked while connected: the address of the session under way.
+                ui.add_enabled_ui(!active, |ui| {
+                    fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("e.g. 192.168.125.1").desired_width(150.0))
+                        .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.")
+                        .on_disabled_hover_text("Disconnect to change the address.");
+                });
+                ui.label(theme::b("port").color(p.ink2));
+                ui.add_enabled_ui(!active, |ui| {
+                    fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(64.0))
+                        .on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.")
+                        .on_disabled_hover_text("Disconnect to change the port.");
+                    self.target_menu(ui);
+                });
+                match &phase {
+                    Phase::Idle | Phase::Stopped { .. } => {
+                        if theme::primary(ui, "connect", fields::HEIGHT).clicked() {
+                            self.connect();
+                        }
+                    }
+                    _ => {
+                        if theme::primary(ui, "disconnect", fields::HEIGHT).clicked() {
+                            self.session.disconnect();
+                        }
+                    }
+                }
+                theme::vrule(ui, 32.0);
+                self.record_controls(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (text, icon) = if self.dashboard { ("back to the charts", theme::Icon::Collapse) } else { ("live dashboard", theme::Icon::Grid) };
+                    if theme::icon_text_button(ui, icon, text, fields::HEIGHT, self.dashboard).on_hover_text("Big numbers in place of the charts, to read from a step away").clicked() {
+                        self.dashboard = !self.dashboard;
+                    }
+                });
             });
-            match &phase {
-                Phase::Idle | Phase::Stopped { .. } => {
-                    if ui.add(egui::Button::new(RichText::new("Connect").strong()).min_size(egui::vec2(80.0, 0.0))).clicked() {
-                        self.connect();
-                    }
-                }
-                _ => {
-                    if ui.add(egui::Button::new("Disconnect").min_size(egui::vec2(80.0, 0.0))).clicked() {
-                        self.session.disconnect();
-                    }
-                }
-            }
-            ui.separator();
-            self.record_controls(ui);
         });
     }
 
     fn target_menu(&mut self, ui: &mut egui::Ui) {
-        let resp = ui.menu_button("▾ List", |ui| {
-            ui.set_min_width(360.0);
-            ui.label(RichText::new("Virtual controllers on this PC").strong());
+        let p = theme::pal(ui);
+        let button = theme::drop_button(ui, "list", fields::HEIGHT).on_hover_text("Virtual controllers on this PC, saved controllers and recent ones");
+        if button.clicked() && matches!(self.discovery, Discovery::Idle) {
+            self.start_discovery();
+        }
+        egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(420.0);
+            ui.label(theme::b("virtual controllers on this PC"));
             match &self.discovery {
                 Discovery::Idle => {
                     ui.label("Not searched yet.");
@@ -736,7 +828,7 @@ impl SpyApp {
                     });
                 }
                 Discovery::Done(Err(e)) => {
-                    ui.colored_label(theme::BAD, e.as_str());
+                    ui.colored_label(p.red, e.as_str());
                 }
                 Discovery::Done(Ok(list)) => {
                     let list = list.clone();
@@ -759,11 +851,11 @@ impl SpyApp {
                     }
                 }
             }
-            if ui.button("Search again").clicked() || matches!(self.discovery, Discovery::Idle) {
+            if ui.button("search again").clicked() {
                 self.start_discovery();
             }
             ui.separator();
-            ui.label(RichText::new("Saved controllers").strong());
+            ui.label(theme::b("saved controllers"));
             if self.settings.controllers.is_empty() {
                 ui.label(RichText::new("None yet.").weak());
             }
@@ -775,7 +867,7 @@ impl SpyApp {
                         self.port_input = c.port.to_string();
                         ui.close();
                     }
-                    if ui.small_button("🗑").on_hover_text("Forget this controller").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Close, "Forget this controller", egui::vec2(36.0, 36.0)).clicked() {
                         remove = Some(i);
                     }
                 });
@@ -785,8 +877,8 @@ impl SpyApp {
                 self.mark_settings_dirty();
             }
             ui.horizontal(|ui| {
-                fields::line(ui, &mut self.name_input, "Name for the saved controller", |t| t.hint_text("name").desired_width(120.0));
-                if ui.button("Save the address above").clicked() {
+                fields::line(ui, &mut self.name_input, "Name for the saved controller", |t| t.hint_text("name").desired_width(140.0));
+                if ui.button("save the address").clicked() {
                     match self.parse_target() {
                         Ok(t) => {
                             let name = if self.name_input.trim().is_empty() { t.host.clone() } else { self.name_input.trim().to_string() };
@@ -801,7 +893,7 @@ impl SpyApp {
             });
             if !self.settings.recent.is_empty() {
                 ui.separator();
-                ui.label(RichText::new("Recent").strong());
+                ui.label(theme::b("recent"));
                 for t in self.settings.recent.clone() {
                     if ui.button(t.to_string()).clicked() {
                         self.host_input = t.host.clone();
@@ -811,7 +903,6 @@ impl SpyApp {
                 }
             }
         });
-        resp.response.on_hover_text("Local virtual controllers, saved controllers and recent ones");
     }
 
     pub fn start_discovery(&mut self) {
@@ -849,74 +940,146 @@ impl SpyApp {
             }
     }
 
-    fn session_line(&mut self, ui: &mut egui::Ui) {
-        let st = self.session.status().clone();
+    /// Frames and samples a second, over the last second or so.
+    fn update_rates(&mut self, st: &spy_core::session::Status) {
         let now = Instant::now();
         let dt = now.duration_since(self.rates.0).as_secs_f64();
         if dt >= 1.0 {
             self.rates = (now, st.counters.frames, st.counters.samples, (st.counters.frames.saturating_sub(self.rates.1)) as f64 / dt, (st.counters.samples.saturating_sub(self.rates.2)) as f64 / dt);
         }
-        ui.horizontal_wrapped(|ui| {
-            let (word, color) = match &st.phase {
-                Phase::Idle => ("NOT CONNECTED".to_string(), theme::IDLE),
-                Phase::Connecting => ("CONNECTING".into(), theme::WARN),
-                Phase::Handshaking => ("HANDSHAKE".into(), theme::WARN),
-                Phase::AwaitingApproval => ("WAITING FOR YOUR ANSWER".into(), theme::WARN),
-                Phase::SettingUp => ("SETTING UP".into(), theme::WARN),
-                // Set up, and nothing arriving (another program gets the samples, a VC
-                // paused): the advice beside it says why. Not a green STREAMING.
-                Phase::Streaming if st.advice.is_some() => ("NOT RECEIVING".into(), theme::WARN),
-                Phase::Streaming => ("STREAMING".into(), theme::OK),
-                Phase::Reconnecting { attempt, retry_in } => (format!("RECONNECTING (attempt {attempt}, every {:.0} s)", retry_in.as_secs_f64()), theme::WARN),
-                Phase::TearingDown => ("DISCONNECTING".into(), theme::WARN),
-                Phase::Stopped { .. } => ("STOPPED".into(), theme::BAD),
-            };
-            ui.label(RichText::new("●").color(color));
-            ui.label(RichText::new(word).strong().color(color));
-            if let Some(t) = &st.target {
-                ui.label(RichText::new(t.to_string()).monospace());
-            }
-            if let Phase::Stopped { reason } = &st.phase {
-                ui.label(RichText::new(reason).color(theme::BAD));
-            }
-            if let Some(a) = &st.advice {
-                ui.label(RichText::new(a).color(theme::WARN).strong());
-            }
-            if st.phase.is_connected() {
-                ui.separator();
-                let live = st.channels.iter().filter(|c| matches!(c.state, spy_core::session::ChannelState::Defined { .. })).count();
-                ui.label(format!("{live} ch"));
-                ui.label(format!("{:.0} frames/s", self.rates.3));
-                ui.label(format!("{:.0} samples/s", self.rates.4));
-                ui.label(format!("keepalives {}", st.counters.ayas)).on_hover_text("The controller's 'are you alive' checks, all answered. Each names a 16 s timeout for an unanswered one, though an IRC5 left unanswered for 60 s did not drop the connection.");
-                if st.counters.reconnects > 0 {
-                    ui.label(RichText::new(format!("reconnect attempts {}", st.counters.reconnects)).color(theme::WARN))
-                        .on_hover_text("Connections tried by the program itself since the last Connect, the ones that failed included: an outage of a few seconds can take several.");
-                }
-                if let Some(a) = &st.announce
-                    && let Some(id) = &a.system_id {
-                        ui.label(RichText::new(short_id(id)).weak()).on_hover_text(format!("Controller system id {id}"));
-                    }
-                if let Some(s) = self.rws.as_ref().and_then(|l| l.system.as_ref()) {
-                    ui.label(RichText::new(format!("{} · RobotWare {}", s.name, s.rw_version)).weak()).on_hover_text("From the controller's RWS (Controller menu)");
-                }
-            }
-            if !st.others.is_empty() {
-                ui.separator();
-                let names = self.client_names(&st.others);
-                let text = format!("Other RobAPI clients: {}", names.join(", "));
-                // The pendant alone is every real IRC5's normal state: said, not warned.
-                let label = if st.others.iter().all(|o| o.pendant) { RichText::new(text).weak() } else { RichText::new(text).color(theme::WARN) };
-                ui.label(label).on_hover_text("Other programs connected to this controller over RobAPI. RobotStudio counts whenever it is connected, even when it is not streaming. The controller's FlexPendant is always connected, on its internal network (192.168.126.x).");
-            }
-            let lost = st.counters.dropped_to_taps;
-            if lost > 0 {
-                ui.label(RichText::new(format!("{lost} samples lost by the recorder (the disk could not keep up)")).color(theme::BAD));
-            }
-        });
     }
 
-    pub fn client_names(&self, others: &[spy_core::session::OtherClient]) -> Vec<String> {
+    /// The connection's state in a word or two, its colour, and whether its square is
+    /// filled (a session under way) or empty.
+    pub fn phase_word(st: &spy_core::session::Status, p: &theme::Pal) -> (String, Color32, theme::Mark) {
+        let (word, color) = match &st.phase {
+            Phase::Idle => ("not connected".to_string(), p.ink2),
+            Phase::Connecting => ("connecting".into(), p.hold),
+            Phase::Handshaking => ("handshake".into(), p.hold),
+            Phase::AwaitingApproval => ("waiting for your answer".into(), p.hold),
+            Phase::SettingUp => ("setting up".into(), p.hold),
+            // Set up, and nothing arriving (another program gets the samples, a VC
+            // paused): the notice under the strip says why. Not a green "streaming".
+            Phase::Streaming if st.advice.is_some() => ("not receiving".into(), p.hold),
+            Phase::Streaming => ("streaming".into(), p.live),
+            Phase::Reconnecting { attempt, retry_in } => (format!("reconnecting, try {attempt} (every {:.0} s)", retry_in.as_secs_f64()), p.hold),
+            Phase::TearingDown => ("disconnecting".into(), p.hold),
+            Phase::Stopped { .. } => ("stopped".into(), p.red),
+        };
+        let mark = if matches!(st.phase, Phase::Idle | Phase::Stopped { .. }) { theme::Mark::Off } else { theme::Mark::On };
+        (word, color, mark)
+    }
+
+    /// The other programs on the controller worth naming: every real IRC5 also lists its
+    /// pendant, always there, so it is left out (G48).
+    pub fn others_shown(st: &spy_core::session::Status) -> Vec<&spy_core::session::OtherClient> {
+        st.others.iter().filter(|o| !o.pendant).collect()
+    }
+
+    /// The strip under the controller bar (G49, the bridge's): the connection, the
+    /// controller, the channels, the recording and the other programs, each a labelled
+    /// cell under a rule.
+    fn status_strip(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
+        let st = self.session.status().clone();
+        self.update_rates(&st);
+        let gap = 16.0;
+        let link_w = 64.0;
+        let w = ((ui.available_width() - link_w - gap * 5.0) / 5.0).floor().max(80.0);
+        // Top-aligned: every cell's rule on one line.
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            let (word, color, mark) = Self::phase_word(&st, p);
+            let rule = if mark == theme::Mark::Off && color == p.ink2 { p.ink } else { color };
+            theme::status_cell(ui, w, "connection", &word, color, mark, rule);
+
+            let controller = match &st.target {
+                Some(t) if st.loopback => format!("VC {} : {}", t.host, t.port),
+                Some(t) => format!("{} : {}", t.host, t.port),
+                None => "none".into(),
+            };
+            let r = theme::status_cell(ui, w, "controller", &controller, if st.target.is_some() { p.ink } else { p.ink2 }, theme::Mark::None, p.ink);
+            if let Some(s) = self.rws.as_ref().and_then(|l| l.system.as_ref()) {
+                r.on_hover_text(format!("{} · RobotWare {} (from its RWS)", s.name, s.rw_version));
+            }
+
+            let live: Vec<f64> = st.channels.iter().filter(|c| matches!(c.state, spy_core::session::ChannelState::Defined { .. }) && c.rate > 0.0).map(|c| c.rate).collect();
+            let rate = match (live.iter().cloned().fold(f64::INFINITY, f64::min), live.iter().cloned().fold(0.0, f64::max)) {
+                _ if live.is_empty() => String::new(),
+                (lo, hi) if hi - lo <= hi * 0.05 => format!(" · {hi:.0} /s each"),
+                (lo, hi) => format!(" · {lo:.0} to {hi:.0} /s"),
+            };
+            theme::status_cell(ui, w, "channels", &format!("{} of {}{rate}", self.chans.len() + self.derived.len(), spy_core::session::MAX_CHANNELS), p.ink, theme::Mark::None, p.ink);
+
+            let (rec, rec_on) = match (&self.recorder, &self.slow) {
+                (Some(r), slow) => {
+                    let s = r.status();
+                    (format!("{} · {}{}", crate::record::clock(s.started.elapsed().as_secs()), crate::record::size_text(s.bytes), if slow.is_some() { " + slow log" } else { "" }), true)
+                }
+                (None, Some(r)) => {
+                    let s = r.status();
+                    (format!("slow log {} · {} rows", crate::record::clock(s.started.elapsed().as_secs()), s.rows), true)
+                }
+                (None, None) => ("off".into(), false),
+            };
+            let r = if rec_on { theme::status_cell(ui, w, "recording", &rec, p.red, theme::Mark::On, p.red) } else { theme::status_cell(ui, w, "recording", &rec, p.ink2, theme::Mark::Off, p.ink) };
+            if let Some(r2) = self.recorder.as_ref().or(self.slow.as_ref()) {
+                r.on_hover_text(r2.status().dir.display().to_string());
+            }
+
+            let others = Self::others_shown(&st);
+            if others.is_empty() {
+                theme::status_cell(ui, w, "other programs", "none", p.ink, theme::Mark::Off, p.ink);
+            } else {
+                for o in &others {
+                    let c = ui.ctx().clone();
+                    net::lookup(&self.hostnames, &o.address, move || c.request_repaint());
+                }
+                let names = self.client_names(&others);
+                let text = if names.len() == 1 { names[0].clone() } else { format!("{}: {}", names.len(), names.join(", ")) };
+                theme::status_cell(ui, w, "other programs", &text, p.hold, theme::Mark::On, p.hold)
+                    .on_hover_text(format!("Connected to this controller over RobAPI:\n{}\n\nRobotStudio counts whenever it is connected, even when it is not streaming.", names.join("\n")));
+            }
+
+            ui.allocate_ui_with_layout(egui::vec2(link_w, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() + 1.0, egui::Stroke::new(2.0, p.ink));
+                ui.add_space(14.0);
+                if ui.link(theme::b("details")).on_hover_text("The connection's counters, rates and identity").clicked() {
+                    self.show_diag = true;
+                }
+            });
+        });
+        self.notices(ui, &st);
+    }
+
+    /// What needs saying under the strip, only while it is true: why the session
+    /// stopped, what to do about samples not arriving, a second window, samples lost.
+    fn notices(&mut self, ui: &mut egui::Ui, st: &spy_core::session::Status) {
+        let p = theme::pal(ui);
+        let mut lines: Vec<(String, Color32)> = Vec::new();
+        if self.another_instance {
+            lines.push(("Another ABB Signal Spy window is open. Two windows on the same controller break each other's streams: only one program at a time can stream test signals.".into(), p.hold));
+        }
+        if let Phase::Stopped { reason } = &st.phase {
+            lines.push((reason.clone(), p.red));
+        }
+        if let Some(a) = &st.advice {
+            lines.push((a.clone(), p.hold));
+        }
+        let lost = st.counters.dropped_to_taps;
+        if lost > 0 {
+            lines.push((format!("{lost} samples lost by the recorder (the disk could not keep up)."), p.red));
+        }
+        for (text, color) in lines {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                theme::square(ui, color, 10.0);
+                ui.add(egui::Label::new(theme::b(text).color(color)).wrap());
+            });
+        }
+    }
+
+    pub fn client_names(&self, others: &[&spy_core::session::OtherClient]) -> Vec<String> {
         let names = self.hostnames.lock().unwrap_or_else(|e| e.into_inner()).clone();
         others
             .iter()
@@ -927,9 +1090,6 @@ impl SpyApp {
                 }
                 if o.same_pc {
                     s.push_str(" [this PC]");
-                }
-                if o.pendant {
-                    s.push_str(" [FlexPendant]");
                 }
                 let extra: Vec<String> = o.attributes.iter().filter(|(k, _)| k != "a").map(|(k, v)| format!("{k}={v}")).collect();
                 if !extra.is_empty() {
@@ -947,27 +1107,31 @@ impl SpyApp {
         if st.phase != Phase::AwaitingApproval {
             return;
         }
-        for o in &st.others {
+        let others = Self::others_shown(&st);
+        for o in &others {
             let c = ctx.clone();
             net::lookup(&self.hostnames, &o.address, move || c.request_repaint());
         }
-        let names = self.client_names(&st.others);
+        let names = self.client_names(&others);
         egui::Modal::new(egui::Id::new("approval")).show(ctx, |ui| {
-            ui.set_max_width(520.0);
+            ui.set_max_width(540.0);
             ui.heading("Other programs are connected to this controller");
             ui.add_space(6.0);
             for n in &names {
-                ui.label(RichText::new(format!("•  {n}")).monospace());
+                ui.horizontal(|ui| {
+                    theme::square(ui, theme::pal(ui).hold, 10.0);
+                    ui.label(RichText::new(n).monospace());
+                });
             }
             ui.add_space(6.0);
             ui.label("Another tool, such as RobotStudio or TuneMaster, may be streaming test signals from this controller. Only one program at a time can: taking InfoStream will stop its streams.");
             ui.label(RichText::new("RobotStudio counts as a client whenever it is connected, even when it is not streaming anything.").weak());
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("Take InfoStream").strong()).clicked() {
+                if theme::primary(ui, "take InfoStream", fields::HEIGHT).clicked() {
                     self.session.answer(true, &st.others);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
                     self.session.answer(false, &st.others);
                 }
             });
@@ -985,11 +1149,11 @@ impl SpyApp {
             ui.label("Use it only when the controller refuses new channels (\"no channel available\") because a program that crashed left its streams behind.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("Reset InfoStream").color(theme::BAD)).clicked() {
+                if theme::red_button(ui, egui::Button::new("reset InfoStream").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
                     self.session.reset_infostream();
                     self.confirm_reset = false;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
                     self.confirm_reset = false;
                 }
             });
@@ -1008,25 +1172,26 @@ impl SpyApp {
             ui.add_space(6.0);
             ui.label("Copyright (C) 2026 Jon Sands. Free software under the GNU General Public License, version 3 or later: you may share and change it under its terms. It comes with ABSOLUTELY NO WARRANTY.");
             ui.label(RichText::new(format!("Catalogue: {} ({})", self.catalogue.title, self.catalogue.source)).weak());
+            ui.label(RichText::new("Set in Atkinson Hyperlegible Next and Mono, by the Braille Institute of America: copyright 2020-2024 The Atkinson Hyperlegible Next and Mono Project Authors, under the SIL Open Font License 1.1.").weak());
         });
         self.show_about = open;
 
         let mut open = self.show_guide;
         egui::Window::new("Quick guide").open(&mut open).collapsible(false).default_width(520.0).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
-            ui.label(RichText::new("1. Connect").strong());
-            ui.label("Real IRC5: type its address (the port is 5515) and press Connect. RobotStudio virtual controller: open ▾ List and pick it; its port changes every time it starts.");
-            ui.label(RichText::new("2. Only one program at a time").strong());
+            ui.label(theme::b("1. Connect"));
+            ui.label("Real IRC5: type its address (the port is 5515) and press connect. RobotStudio virtual controller: open the list beside the port and pick it; its port changes every time it starts.");
+            ui.label(theme::b("2. Only one program at a time"));
             ui.label("A controller streams test signals to one program at a time. Close TuneMaster's signal logging or RobotStudio's signal tools first. If other programs are connected, this program lists them and asks before taking over.");
-            ui.label(RichText::new("3. Add channels").strong());
-            ui.label("Pick a signal in the catalogue on the left, then Add. The dialog asks only what that signal needs: the robot, the axis, or nothing. 'Channel sets...' adds a common group in one go (both DC links, one robot's torques). Up to 12 channels.");
-            ui.label(RichText::new("4. Read and chart").strong());
-            ui.label("Values show on the right (a 150 ms average); charts are raw. Space pauses the charts so you can scroll back through the last 10 minutes. A reading that stops updating is dimmed and marked STALE, never shown as live.");
-            ui.label(RichText::new("5. Record").strong());
-            ui.label("REC records every sample. 'Save last' saves what just happened, even if nothing was recording. 'Slow log' logs averages for runs of hours. M drops a marker.");
-            ui.label(RichText::new("6. Look back").strong());
-            ui.label("File > Open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live. 'Save CSV' and 'Save PNG' above the charts save what is in view, live or reviewed.");
+            ui.label(theme::b("3. Add channels"));
+            ui.label("Pick a signal in the list on the left, then add it. The dialog asks only what that signal needs: the robot, the axis, or nothing. 'add a set' adds a common group in one go (both DC links, one robot's torques). Up to 12 channels.");
+            ui.label(theme::b("4. Read and chart"));
+            ui.label("Values show on the right; click a channel there for its options: smoothing, the vertical scale, its chart. Smoothing changes only the screen. Space pauses the charts so you can look back through the last 10 minutes. A reading that stops updating is marked stale, never shown as live.");
+            ui.label(theme::b("5. Record"));
+            ui.label("record keeps every sample. 'save last' saves what just happened, even if nothing was recording. 'slow log' logs averages for runs of hours. The arrow beside each sets its name, seconds or interval. M drops a marker.");
+            ui.label(theme::b("6. Look back"));
+            ui.label("file > open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live. 'save csv' and 'save png' above the charts save what is in view, live or reviewed; a CSV always holds the samples as they came.");
             ui.add_space(6.0);
-            ui.label(RichText::new("Angles are in degrees; click an angle's unit in the channel table to switch it to radians.").weak());
+            ui.label(RichText::new("Angles are in degrees; a channel's options switch one to radians.").weak());
         });
         self.show_guide = open;
 
@@ -1036,7 +1201,7 @@ impl SpyApp {
             ui.heading(&self.catalogue.title);
             ui.label(format!("Source: {}", self.catalogue.source));
             ui.label(&self.catalogue.measured_on);
-            ui.label(RichText::new(&self.catalogue.caveat).color(theme::WARN));
+            ui.label(RichText::new(&self.catalogue.caveat).color(theme::pal(ui).hold));
             ui.label(RichText::new(&self.catalogue.credits).weak());
             let named = self.catalogue.signals.iter().filter(|s| s.named).count();
             ui.label(format!("{} signal numbers, {named} with a named quantity.", self.catalogue.signals.len()));
@@ -1046,7 +1211,7 @@ impl SpyApp {
             let mut path: String = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
             ui.horizontal(|ui| {
                 fields::line(ui, &mut path, "Catalogue file", |t| t.hint_text("C:\\path\\to\\catalogue.json").desired_width(380.0));
-                if ui.button("Load").clicked() {
+                if ui.button("load").clicked() {
                     load_path = Some(path.clone());
                 }
             });
@@ -1067,32 +1232,44 @@ impl SpyApp {
         }
 
         let mut open = self.show_diag;
-        egui::Window::new("Diagnostics").open(&mut open).default_width(520.0).show(ctx, |ui| {
+        let rws_system = self.rws.as_ref().and_then(|l| l.system.as_ref()).map(|s| format!("{} · RobotWare {}", s.name, s.rw_version));
+        let rates = (self.rates.3, self.rates.4);
+        let others = {
+            let st = self.session.status().clone();
+            self.client_names(&Self::others_shown(&st)).join(", ")
+        };
+        egui::Window::new("Connection details").open(&mut open).default_width(560.0).show(ctx, |ui| {
             let st = self.session.status().clone();
             let c = &st.counters;
             egui::Grid::new("diag").striped(true).show(ui, |ui| {
                 let mut row = |k: &str, v: String| {
-                    ui.label(k);
+                    ui.label(RichText::new(k).color(theme::pal(ui).ink2));
                     ui.label(RichText::new(v).monospace());
                     ui.end_row();
                 };
-                row("Phase", format!("{:?}", st.phase));
-                row("Controller", st.target.as_ref().map(|t| t.to_string()).unwrap_or_default());
-                row("Local address", st.local.map(|a| a.to_string()).unwrap_or_default());
-                row("System id", st.announce.as_ref().and_then(|a| a.system_id.clone()).unwrap_or_default());
-                row("Client list as sent", st.announce.as_ref().and_then(|a| a.raw_client_list.clone()).unwrap_or_default());
-                row("Subscription", st.subscription.map(|s| s.to_string()).unwrap_or_default());
-                row("Frames / bytes", format!("{} / {}", c.frames, c.bytes));
-                row("Sample frames / samples", format!("{} / {}", c.sample_frames, c.samples));
-                row("Keepalives answered", c.ayas.to_string());
-                row("Reconnect attempts", c.reconnects.to_string());
-                row("Lost frame sync", c.desyncs.to_string());
-                row("Frames without trailer", c.no_trailer.to_string());
-                row("Records for others' streams", c.foreign_records.to_string());
-                row("Other subscriptions' frames", c.foreign_subscription.to_string());
-                row("Unexpected frames", c.unexpected_frames.to_string());
-                row("Controller clock resets", c.clock_resets.to_string());
-                row("Lost by recorders", c.dropped_to_taps.to_string());
+                row("phase", format!("{:?}", st.phase));
+                row("controller", st.target.as_ref().map(|t| t.to_string()).unwrap_or_default());
+                if let Some(s) = &rws_system {
+                    row("from its RWS", s.clone());
+                }
+                row("frames a second", format!("{:.0}", rates.0));
+                row("samples a second", format!("{:.0}", rates.1));
+                row("other programs", if others.is_empty() { "none".into() } else { others.clone() });
+                row("local address", st.local.map(|a| a.to_string()).unwrap_or_default());
+                row("system id", st.announce.as_ref().and_then(|a| a.system_id.clone()).unwrap_or_default());
+                row("client list as sent", st.announce.as_ref().and_then(|a| a.raw_client_list.clone()).unwrap_or_default());
+                row("subscription", st.subscription.map(|s| s.to_string()).unwrap_or_default());
+                row("frames / bytes", format!("{} / {}", c.frames, c.bytes));
+                row("sample frames / samples", format!("{} / {}", c.sample_frames, c.samples));
+                row("keepalives answered", c.ayas.to_string());
+                row("reconnect attempts", c.reconnects.to_string());
+                row("lost frame sync", c.desyncs.to_string());
+                row("frames without trailer", c.no_trailer.to_string());
+                row("records for others' streams", c.foreign_records.to_string());
+                row("other subscriptions' frames", c.foreign_subscription.to_string());
+                row("unexpected frames", c.unexpected_frames.to_string());
+                row("controller clock resets", c.clock_resets.to_string());
+                row("lost by recorders", c.dropped_to_taps.to_string());
                 for (k, v) in &c.defects {
                     row(k, v.to_string());
                 }
@@ -1102,21 +1279,106 @@ impl SpyApp {
     }
 
     fn log_pane(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Log").strong());
+            ui.label(RichText::new("messages").font(egui::FontId::new(18.0, theme::heavy())));
             ui.checkbox(&mut self.log_filter_warn, "warnings only");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, theme::Icon::Close, "Close the messages", egui::vec2(32.0, 30.0)).clicked() {
+                    self.show_log = false;
+                }
+            });
         });
         let entries = self.log.since(self.log.next_seq().saturating_sub(400));
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+            // Lines to copy from, for a report.
+            ui.style_mut().interaction.selectable_labels = true;
             for e in entries.iter().filter(|e| !self.log_filter_warn || e.level >= Level::Warn) {
                 let color = match e.level {
-                    Level::Info => ui.visuals().text_color(),
-                    Level::Warn => theme::WARN,
-                    Level::Error => theme::BAD,
+                    Level::Info => p.ink,
+                    Level::Warn => p.hold,
+                    Level::Error => p.red,
                 };
                 ui.label(RichText::new(view::log_line(e)).color(color).monospace());
             }
         });
+    }
+
+    /// The line along the bottom: the time, what the charts do with the mouse while
+    /// they can be moved, where a recording goes, or the newest message; and the
+    /// messages themselves a click away.
+    fn footer(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
+        let rect = ui.max_rect();
+        ui.painter().hline(rect.x_range(), rect.top() + 1.0, egui::Stroke::new(2.0, p.ink));
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.set_min_height(30.0);
+            ui.label(theme::num(view::local_hms(std::time::SystemTime::now()), 16.0).color(p.red));
+            ui.add_space(4.0);
+            let hint = self.mouse_hint();
+            let mut open_folder = None;
+            if let Some(h) = hint {
+                ui.add(egui::Label::new(RichText::new(h).color(p.ink)).truncate());
+            } else if let Some(r) = self.recorder.as_ref().or(self.slow.as_ref()) {
+                let dir = r.status().dir;
+                ui.add(egui::Label::new(format!("recording to {}", dir.display())).truncate());
+                if ui.link(theme::b("open the folder")).clicked() {
+                    open_folder = Some(dir);
+                }
+            } else if let Some(e) = self.log.since(self.log.next_seq().saturating_sub(1)).last().filter(|e| !self.toasts.iter().any(|t| t.text == e.text)) {
+                // (Not while a toast says it: once on screen is enough.)
+                let color = match e.level {
+                    Level::Info => p.ink2,
+                    Level::Warn => p.hold,
+                    Level::Error => p.red,
+                };
+                ui.add(egui::Label::new(RichText::new(&e.text).color(color)).truncate());
+                if let Some(d) = &self.last_folder
+                    && e.text.contains(&d.display().to_string())
+                    && ui.link(theme::b("open the folder")).clicked()
+                {
+                    open_folder = Some(d.clone());
+                }
+            }
+            if let Some(d) = open_folder {
+                crate::paths::open_folder(&d);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let n = self.log.next_seq();
+                let text = format!("messages ({n})");
+                if ui.add(egui::Button::new(theme::b(text).size(15.0)).selected(self.show_log).min_size(egui::vec2(0.0, 26.0))).clicked() {
+                    self.show_log = !self.show_log;
+                }
+                if let Some(ph) = &self.phone {
+                    ui.label(RichText::new(format!("phone view on, port {}", ph.port())).color(p.ink2)).on_hover_text(ph.urls.join("\n"));
+                }
+            });
+        });
+    }
+
+    /// While the charts can be moved (paused, or a recording), how: said where it is
+    /// read, with Ctrl + wheel for the vertical scale (G48).
+    fn mouse_hint(&self) -> Option<String> {
+        const MOVE: &str = "drag to move through time · wheel zooms time · ctrl + wheel zooms the vertical scale · double-click goes back";
+        if let Some(rs) = &self.review {
+            return Some(if rs.cursors_on { format!("click a chart for cursor A, right-click for B · {MOVE}") } else { MOVE.into() });
+        }
+        if self.dashboard {
+            return None;
+        }
+        // The cursors' distance apart, while both are placed (the rows read their values).
+        let apart = match (self.cursors_on, self.cursor_a, self.cursor_b) {
+            (true, Some(a), Some(b)) => format!("A and B {:.3} s apart · ", (b - a).abs()),
+            _ => String::new(),
+        };
+        if self.paused_at.is_some() {
+            return Some(format!("{apart}paused. {MOVE} · space: live"));
+        }
+        if self.cursors_on {
+            return Some(format!("{apart}click a chart for cursor A, right-click for B · space pauses"));
+        }
+        None
     }
 
     fn toasts(&mut self, ctx: &egui::Context) {
@@ -1125,15 +1387,18 @@ impl SpyApp {
         if self.toasts.is_empty() {
             return;
         }
-        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0)).show(ctx, |ui| {
+        // Clicks pass through: a message over the channels must not take a click meant
+        // for a button under it.
+        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -44.0)).interactable(false).show(ctx, |ui| {
+            let p = theme::pal(ui);
             for t in &self.toasts {
                 let color = match t.level {
-                    Level::Info => theme::OK,
-                    Level::Warn => theme::WARN,
-                    Level::Error => theme::BAD,
+                    Level::Info => p.live,
+                    Level::Warn => p.hold,
+                    Level::Error => p.red,
                 };
-                egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, color)).show(ui, |ui| {
-                    ui.set_max_width(420.0);
+                egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(2.0, color)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    ui.set_max_width(440.0);
                     ui.label(&t.text);
                 });
             }
@@ -1145,7 +1410,11 @@ impl SpyApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (space, m) = ctx.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::M)));
+        let (space, m, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::M), i.key_pressed(egui::Key::Escape)));
+        // Escape closes a signal's details (no dialog over them: a dialog takes it first).
+        if esc && self.add.is_none() && self.note_edit.is_none() && self.sets.is_none() {
+            self.selected = None;
+        }
         // While reviewing, the live charts are hidden: pausing them unseen, or putting a
         // marker into a live recording from what is under review, would mislead.
         if self.review.is_some() {
@@ -1316,27 +1585,59 @@ impl eframe::App for SpyApp {
         self.take_screenshot(&ctx);
         self.shortcuts(&ctx);
 
-        egui::Panel::top("top").show(ui, |ui| {
+        // The page, and square sheets on it 8 px apart (G49).
+        let p = theme::pal(ui);
+        let page = egui::Frame::new().fill(p.page);
+        egui::Panel::top("menu").frame(page.inner_margin(egui::Margin::symmetric(4, 1))).show_separator_line(false).show(ui, |ui| {
             self.menu(ui);
-            if self.another_instance {
-                ui.colored_label(theme::WARN, "Another ABB Signal Spy window is open. Two windows on the same controller break each other's streams: only one program at a time can stream test signals.");
-            }
-            self.controller_bar(ui);
-            self.session_line(ui);
-            self.review_banner(ui);
+            let r = ui.max_rect();
+            ui.painter().hline(r.x_range(), r.bottom() + 1.0, egui::Stroke::new(1.0, p.line));
         });
-        egui::Panel::bottom("log").resizable(true).default_size(130.0).min_size(60.0).show(ui, |ui| self.log_pane(ui));
-        egui::Panel::left("catalogue").resizable(true).default_size(330.0).min_size(240.0).show(ui, |ui| self.browser(ui));
-        // While a recording is reviewed it has the charts and the right panel; the
-        // live session carries on underneath, and its line above says so.
-        let central = if self.review.is_some() {
-            egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.review_table(ui));
-            egui::CentralPanel::default().show(ui, |ui| self.review_charts(ui))
+        egui::Panel::top("bar").frame(page.inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 0 })).show_separator_line(false).show(ui, |ui| self.controller_bar(ui));
+        egui::Panel::top("strip").frame(page.inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 })).show_separator_line(false).show(ui, |ui| {
+            if self.review.is_some() {
+                self.review_strip(ui);
+            } else {
+                self.status_strip(ui);
+            }
+        });
+        egui::Panel::bottom("footer").frame(page.inner_margin(egui::Margin { left: 16, right: 8, top: 0, bottom: 2 })).show_separator_line(false).show(ui, |ui| self.footer(ui));
+        let sheet = |left: i8, right: i8| egui::Frame::new().fill(p.sheet).inner_margin(egui::Margin::same(10)).outer_margin(egui::Margin { left, right, top: 0, bottom: 8 });
+        if self.show_log {
+            egui::Panel::bottom("log").frame(sheet(8, 8)).resizable(true).default_size(190.0).size_range(90.0..=600.0).show_separator_line(false).show(ui, |ui| self.log_pane(ui));
+        }
+        if self.dashboard && self.review.is_none() {
+            let central = egui::CentralPanel::default().frame(sheet(8, 8)).show(ui, |ui| self.dashboard_ui(ui));
+            self.charts_rect = Some(central.response.rect);
         } else {
-            egui::Panel::right("channels").resizable(true).default_size(430.0).min_size(300.0).show(ui, |ui| self.channel_table(ui));
-            egui::CentralPanel::default().show(ui, |ui| self.charts(ui))
-        };
-        self.charts_rect = Some(central.response.rect);
+            if self.settings.signals_folded {
+                egui::Panel::left("signals-folded").frame(sheet(8, 0).inner_margin(egui::Margin::symmetric(6, 10))).exact_size(60.0).resizable(false).show_separator_line(false).show(ui, |ui| self.signals_strip(ui));
+            } else {
+                egui::Panel::left("signals").frame(sheet(8, 0)).resizable(true).default_size(298.0).size_range(248.0..=470.0).show_separator_line(false).show(ui, |ui| self.browser(ui));
+            }
+            // While a recording is reviewed it has the charts and the right panel; the
+            // live session carries on underneath, and the strip says so.
+            egui::Panel::right("channels").frame(sheet(0, 8)).resizable(true).default_size(338.0).size_range(308.0..=490.0).show_separator_line(false).show(ui, |ui| {
+                if self.review.is_some() {
+                    self.review_table(ui);
+                } else if self.options_for.is_some() {
+                    self.channel_options(ui);
+                } else {
+                    self.channel_table(ui);
+                }
+            });
+            let central = egui::CentralPanel::default().frame(sheet(8, 8)).show(ui, |ui| {
+                if self.review.is_some() {
+                    self.review_charts(ui);
+                } else {
+                    self.charts(ui);
+                }
+            });
+            self.charts_rect = Some(central.response.rect);
+            if !self.settings.signals_folded {
+                self.signal_details(&ctx);
+            }
+        }
 
         self.recordings_window(&ctx);
         self.rws_window(&ctx);

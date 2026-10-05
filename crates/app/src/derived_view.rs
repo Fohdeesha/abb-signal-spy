@@ -12,7 +12,6 @@ use spy_core::session::{Status, MAX_CHANNELS};
 use spy_core::store::ChannelKey;
 
 use crate::app::{chan_color, SpyApp, Stats};
-use crate::channels::health_color;
 use crate::fields;
 use crate::theme;
 use crate::view::{self, Health};
@@ -174,7 +173,7 @@ impl SpyApp {
         let lane = self.next_lane;
         self.next_lane += 1;
         let label = self.derived_label(&def);
-        let color = chan_color(self.chans.len() + self.derived.len());
+        let color = chan_color(self.chans.len() + self.derived.len(), self.settings.dark);
         self.derived.push(DerivedView { live: Live::new(def), color, lane, stats: Stats::default(), target_text: String::new(), target_from: None });
         self.derived_changed(Some(format!("Added {label}.")));
         true
@@ -374,19 +373,21 @@ impl SpyApp {
         self.derived_changed(Some(text));
     }
 
-    /// The derived channels' cards, below the channels'.
-    pub fn derived_cards(&mut self, ui: &mut egui::Ui, st: &Status) {
+    /// The derived channels' rows, below the channels'. Clicked, a row's options open;
+    /// a turn's target and a sag's plateau are set on the row itself, since neither
+    /// shows anything until they are. The id of the row clicked, if one was.
+    pub fn derived_rows(&mut self, ui: &mut egui::Ui, st: &Status, cursors: Option<&std::collections::HashMap<String, crate::charts::CursorReading>>) -> Option<String> {
         if self.derived.is_empty() {
-            return;
+            return None;
         }
+        let p = theme::pal(ui);
         ui.add_space(4.0);
-        ui.label(RichText::new("Derived").strong()).on_hover_text("Computed here from the channels above; never streamed, and never written into a recording as data (a recording keeps how, and a review computes them again).");
-        let mut remove = None;
+        ui.label(theme::b("derived").color(p.ink2)).on_hover_text("Computed here from the channels above; never streamed, and never written into a recording as data (a recording keeps how, and a review computes them again).");
+        let mut open = None;
         let mut set_target = None;
         let mut set_plateau = None;
         let mut from_controller = None;
         let rws = self.rws_ready();
-        let mut changed = false;
         for i in 0..self.derived.len() {
             let h = self.derived_health(i, st);
             let def = self.derived[i].live.def().clone();
@@ -395,30 +396,15 @@ impl SpyApp {
             let value = view::readout(&self.derived[i].live.lock(), reading(&def));
             let color = self.derived[i].color;
             let units = def.units();
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 2.0, color);
-                    ui.label(RichText::new(&label).strong()).on_hover_text(&formula);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button("⋯", |ui| {
-                            if ui.button("Remove").clicked() {
-                                remove = Some(i);
-                                ui.close();
-                            }
-                            if ui.button("Reset min/max").clicked() {
-                                let upto = self.derived[i].stats.upto;
-                                self.derived[i].stats = Stats { upto, ..Stats::default() };
-                                ui.close();
-                            }
-                            if ui.button("Own chart").clicked() {
-                                self.derived[i].lane = self.next_lane;
-                                self.next_lane += 1;
-                                changed = true;
-                                ui.close();
-                            }
-                        });
+            let stale = h == Health::Stale;
+            let s = self.derived[i].stats;
+            let cursor = cursors.map(|c| c.get(&def.id()).cloned().unwrap_or_default());
+            let (r, _) = crate::channels::clickable_row(ui, &format!("Options for {label}"), stale, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+                        theme::paint_icon(ui.painter(), rect, theme::Icon::Right, p.ink3);
                         let why = match h {
                             Health::Waiting if !def.is_set() => match def {
                                 Derived::Turn { .. } => "Type the target angle below.",
@@ -427,17 +413,24 @@ impl SpyApp {
                             Health::Stale => "Nothing new to show: an input is stale, or the inputs' samples do not line up in time. The value shown is NOT current.",
                             _ => "The least live of its inputs.",
                         };
-                        ui.label(RichText::new(h.word()).small().strong().color(health_color(h))).on_hover_text(why);
+                        crate::channels::status_word(ui, h).on_hover_text(why);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        theme::square(ui, color, 12.0);
+                        ui.add(egui::Label::new(theme::b(&label)).truncate()).on_hover_text(&formula);
                     });
                 });
                 // The value line.
                 ui.horizontal(|ui| {
                     let (text, on_target) = value_text(&def, value, h.is_live());
-                    let mut rt = RichText::new(text).monospace().size(20.0);
+                    let mut rt = theme::num(text, 28.0);
                     if !h.is_live() {
-                        rt = rt.weak();
+                        rt = rt.color(p.ink2);
+                        if stale {
+                            rt = rt.strikethrough();
+                        }
                     } else if on_target {
-                        rt = rt.color(theme::OK).strong();
+                        rt = rt.color(p.live);
                     }
                     let how = match def {
                         Derived::Turn { .. } => "The newest sample: a turn is never averaged.",
@@ -445,37 +438,39 @@ impl SpyApp {
                     };
                     ui.label(rt).on_hover_text(how);
                     if !on_target && !units.is_empty() {
-                        ui.label(RichText::new(units).weak());
+                        ui.label(RichText::new(units).size(18.0).color(p.ink2));
                     }
-                    if let (Derived::Sag { plateau_v: Some(p), .. }, Some(v)) = (&def, value)
-                        && *p != 0.0
+                    if let (Derived::Sag { plateau_v: Some(pl), .. }, Some(v)) = (&def, value)
+                        && *pl != 0.0
                     {
-                        ui.label(RichText::new(sag_share(v, *p)).small().weak());
+                        ui.label(RichText::new(sag_share(v, *pl)).size(14.0).color(p.ink2));
                     }
                 });
-                let s = self.derived[i].stats;
                 let f = |x: f64| if x.is_finite() { view::fmt(x) } else { "--".into() };
+                if let Some(c) = &cursor {
+                    crate::channels::cursor_lines(ui, c, p);
+                }
                 match &def {
                     Derived::Turn { target_deg, .. } => {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("target").small());
+                            ui.label(theme::b("target").size(14.0));
                             let hint = target_deg.map(view::fmt).unwrap_or_else(|| "deg".into());
-                            let r = fields::line(ui, &mut self.derived[i].target_text, &format!("Target of {label}"), |t| t.desired_width(70.0).hint_text(hint));
-                            if ui.small_button("Set").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                            let r = fields::line(ui, &mut self.derived[i].target_text, &format!("Target of {label}"), |t| t.desired_width(80.0).hint_text(hint));
+                            if ui.add(egui::Button::new("set").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                                 set_target = Some(i);
                             }
                             if let Some(t) = target_deg {
-                                ui.label(RichText::new(format!("{} deg", view::fmt(*t))).small().monospace());
+                                ui.label(RichText::new(format!("{} deg", view::fmt(*t))).monospace().size(14.0));
                             }
                         });
                         if let Derived::Turn { angle, .. } = &def {
                             let instance = commutator_instance(angle);
                             let why: &str = match &instance {
                                 Err(why) => why,
-                                Ok(_) => "Log in to the controller's RWS first (Controller menu).",
+                                Ok(_) => "Log in to the controller's RWS first (controller menu).",
                             };
                             if ui
-                                .add_enabled(rws && instance.is_ok(), egui::Button::new("Commutator offset").small())
+                                .add_enabled(rws && instance.is_ok(), egui::Button::new("commutator offset").min_size(egui::vec2(0.0, theme::SMALL_H)))
                                 .on_hover_text("Read this motor's Commutator Offset (MOTOR_CALIB com_offset) from the controller as the target: what the resolver reads at the commutation position.")
                                 .on_disabled_hover_text(why)
                                 .clicked()
@@ -485,26 +480,33 @@ impl SpyApp {
                         }
                     }
                     Derived::DutySum { .. } => {
-                        ui.label(RichText::new(format!("{:.2} expected   min {}  max {}", derived::DUTY_SUM, f(s.min), f(s.max))).small().monospace());
+                        ui.label(RichText::new(format!("{:.2} expected   min {}  max {}", derived::DUTY_SUM, f(s.min), f(s.max))).monospace().size(14.0).color(p.ink2));
                     }
                     Derived::Sag { plateau_v, .. } => {
                         ui.horizontal_wrapped(|ui| {
                             match plateau_v {
-                                Some(p) => {
-                                    ui.label(RichText::new(format!("plateau {} V   deepest {} V", view::fmt(*p), f(s.max))).small().monospace());
+                                Some(pl) => {
+                                    ui.label(RichText::new(format!("plateau {} V   deepest {} V", view::fmt(*pl), f(s.max))).monospace().size(14.0).color(p.ink2));
                                 }
                                 None => {
-                                    ui.label(RichText::new("With the robot armed and still:").small());
+                                    ui.label(RichText::new("With the robot armed and still:").size(14.0));
                                 }
                             }
-                            let text = if plateau_v.is_some() { "Set again" } else { "Set the plateau" };
-                            if ui.small_button(text).on_hover_text("The mean of the DC link's last two seconds, with the robot armed and still. Refused until the link has held that level for 20 s: after the motors go off it drains slowly, for about 20 minutes.").clicked() {
+                            let text = if plateau_v.is_some() { "set again" } else { "set the plateau" };
+                            if ui
+                                .add(egui::Button::new(text).min_size(egui::vec2(0.0, theme::SMALL_H)))
+                                .on_hover_text("The mean of the DC link's last two seconds, with the robot armed and still. Refused until the link has held that level for 20 s: after the motors go off it drains slowly, for about 20 minutes.")
+                                .clicked()
+                            {
                                 set_plateau = Some(i);
                             }
                         });
                     }
                 }
             });
+            if r.clicked() {
+                open = Some(def.id());
+            }
         }
         if let Some(i) = set_target {
             self.set_target(i);
@@ -515,13 +517,53 @@ impl SpyApp {
         if let Some(i) = from_controller {
             self.request_com_offset(i);
         }
-        if let Some(i) = remove {
+        open
+    }
+
+    /// A derived channel's options, in place of the list.
+    pub fn derived_options(&mut self, ui: &mut egui::Ui, i: usize) {
+        let p = theme::pal(ui);
+        let def = self.derived[i].live.def().clone();
+        let label = self.derived_label(&def);
+        let mut back = false;
+        let mut remove = false;
+        theme::section(ui, "03", "", true, |ui| {
+            if theme::icon_text_button(ui, theme::Icon::Left, "all channels", theme::SMALL_H, false).clicked() {
+                back = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::outline_button(ui, "remove", p.red, theme::SMALL_H).on_hover_text(format!("Remove {label}")).clicked() {
+                    remove = true;
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            theme::square(ui, self.derived[i].color, 14.0);
+            ui.add(egui::Label::new(RichText::new(&label).font(egui::FontId::new(20.0, theme::heavy()))).wrap());
+        });
+        ui.add(egui::Label::new(RichText::new(self.derived_formula(&def)).size(14.0).color(p.ink2)).wrap());
+        ui.label(RichText::new("Computed here from its inputs; never streamed, and never written into a recording as data (a recording keeps how, and a review computes it again).").size(14.0).color(p.ink3));
+        ui.add_space(8.0);
+        let own = !self.chans.iter().any(|c| c.lane == self.derived[i].lane) && self.derived.iter().filter(|d| d.lane == self.derived[i].lane).count() == 1;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!own, egui::Button::new("its own chart").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                self.derived[i].lane = self.next_lane;
+                self.next_lane += 1;
+                self.mark_settings_dirty();
+            }
+            if ui.add(egui::Button::new("reset min/max").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                let upto = self.derived[i].stats.upto;
+                self.derived[i].stats = Stats { upto, ..Stats::default() };
+            }
+        });
+        if back {
+            self.options_for = None;
+        }
+        if remove {
             let d = self.derived.remove(i);
             let text = format!("Removed {}.", self.derived_label(d.live.def()));
+            self.options_for = None;
             self.derived_changed(Some(text));
-        }
-        if changed {
-            self.mark_settings_dirty();
         }
     }
 }

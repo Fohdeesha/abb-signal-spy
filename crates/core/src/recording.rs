@@ -812,7 +812,7 @@ pub fn write_snapshot(
             e.value_type = r.kind;
             if r.kind == Some(ValueKind::String) {
                 // The live history keeps only when a string event came, not its text.
-                meta.notes = "String signals are not kept in the live history; record them with REC to keep their text.".into();
+                meta.notes = "String signals are not kept in the live history; use record to keep their text.".into();
                 meta.channels.push(e);
                 continue;
             }

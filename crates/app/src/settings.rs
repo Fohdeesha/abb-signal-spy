@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 use spy_core::session::Target;
 
+/// The live dashboard's number sizes, px, smallest first.
+pub const DASH_SIZES: [f32; 5] = [40.0, 52.0, 64.0, 80.0, 100.0];
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SavedController {
     pub name: String,
@@ -25,6 +28,12 @@ pub struct SavedChannel {
     pub hold_nonzero: bool,
     #[serde(default)]
     pub lane: u32,
+    /// Display only (G47): its line and value smoothed over this many ms, 0 for off.
+    #[serde(default)]
+    pub smooth_ms: u32,
+    /// Its chart's vertical scale.
+    #[serde(default)]
+    pub scale: crate::charts::Scale,
 }
 
 /// A derived channel (its plateau, if a sag, is never kept).
@@ -51,6 +60,9 @@ pub struct Settings {
     pub snapshot_s: f64,
     pub phone_port: u16,
     pub catalogue_file: Option<PathBuf>,
+    /// The signal list shows the identified signals (named), the not yet identified ones
+    /// (open) and the inert ones as these say.
+    pub show_named: bool,
     pub show_open: bool,
     pub show_inert: bool,
     pub favourites: Vec<u32>,
@@ -60,6 +72,10 @@ pub struct Settings {
     /// RWS's port (no login is ever kept), and whether its event log is looked at.
     pub rws_port: u16,
     pub rws_events: bool,
+    /// The signal list folded to a strip.
+    pub signals_folded: bool,
+    /// The live dashboard's number size, px.
+    pub dash_size: f32,
 }
 
 impl Default for Settings {
@@ -77,6 +93,7 @@ impl Default for Settings {
             snapshot_s: 30.0,
             phone_port: 8090,
             catalogue_file: None,
+            show_named: true,
             show_open: false,
             show_inert: false,
             favourites: Vec::new(),
@@ -85,6 +102,8 @@ impl Default for Settings {
             derived: Vec::new(),
             rws_port: spy_core::rws::DEFAULT_PORT,
             rws_events: true,
+            signals_folded: false,
+            dash_size: 64.0,
         }
     }
 }
@@ -129,6 +148,7 @@ impl Settings {
             snapshot_s: field(&obj, "snapshot_s", d.snapshot_s, &mut notes),
             phone_port: field(&obj, "phone_port", d.phone_port, &mut notes),
             catalogue_file: field(&obj, "catalogue_file", d.catalogue_file, &mut notes),
+            show_named: field(&obj, "show_named", d.show_named, &mut notes),
             show_open: field(&obj, "show_open", d.show_open, &mut notes),
             show_inert: field(&obj, "show_inert", d.show_inert, &mut notes),
             favourites: field(&obj, "favourites", d.favourites, &mut notes),
@@ -137,6 +157,8 @@ impl Settings {
             derived: derived(&obj, &mut notes),
             rws_port: field(&obj, "rws_port", d.rws_port, &mut notes),
             rws_events: field(&obj, "rws_events", d.rws_events, &mut notes),
+            signals_folded: field(&obj, "signals_folded", d.signals_folded, &mut notes),
+            dash_size: field(&obj, "dash_size", d.dash_size, &mut notes),
         };
         s.sanitize(&mut notes);
         let note = (!notes.is_empty()).then(|| format!("Parts of the settings file ({}) could not be used and were left out (the rest loaded): {}.", path.display(), notes.join("; ")));
@@ -162,6 +184,19 @@ impl Settings {
         }
         if !(self.ui_scale.is_finite() && (0.6..=2.5).contains(&self.ui_scale)) {
             self.ui_scale = 1.0;
+        }
+        if !(self.dash_size.is_finite() && (DASH_SIZES[0]..=DASH_SIZES[DASH_SIZES.len() - 1]).contains(&self.dash_size)) {
+            self.dash_size = 64.0;
+        }
+        for c in &mut self.channels {
+            if !crate::charts::SMOOTHING.iter().any(|(ms, _)| *ms == c.smooth_ms) {
+                notes.push(format!("the smoothing of signal {} ({} ms is not one of the choices)", c.signal, c.smooth_ms));
+                c.smooth_ms = 0;
+            }
+            if !c.scale.is_valid() {
+                notes.push(format!("the vertical scale of signal {} (not a range)", c.signal));
+                c.scale = crate::charts::Scale::default();
+            }
         }
         if self.channels.len() > spy_core::session::MAX_CHANNELS {
             notes.push(format!("{} channels, of which only the first {} can be used", self.channels.len(), spy_core::session::MAX_CHANNELS));
@@ -325,6 +360,25 @@ mod tests {
     }
 
     #[test]
+    fn a_smoothing_or_scale_a_hand_edit_spoiled_is_left_out() {
+        let (s, note) = load_text(
+            "display",
+            r#"{"dash_size": 9999, "channels": [
+                {"signal": 4002, "unit": "ROB_1", "axis": 1, "smooth_ms": 33},
+                {"signal": 4002, "unit": "ROB_1", "axis": 2, "scale": {"kind": "fixed", "lo": 5, "hi": 1}},
+                {"signal": 4002, "unit": "ROB_1", "axis": 3, "smooth_ms": 100, "scale": {"kind": "centred", "half": 50}}
+            ]}"#,
+        );
+        assert_eq!(s.channels.len(), 3, "the channels themselves are kept");
+        assert_eq!(s.channels[0].smooth_ms, 0, "not a choice: off");
+        assert_eq!(s.channels[1].scale, crate::charts::Scale::default(), "not a range: fit");
+        assert_eq!((s.channels[2].smooth_ms, s.channels[2].scale), (100, crate::charts::Scale::Centred { half: 50.0 }), "good ones kept");
+        assert_eq!(s.dash_size, 64.0);
+        let note = note.expect("the person is told");
+        assert!(note.contains("smoothing of signal 4002") && note.contains("vertical scale of signal 4002"), "{note}");
+    }
+
+    #[test]
     fn duplicates_go_before_the_cut_to_twelve() {
         // A, A, then eleven more: twelve distinct channels, the second A named.
         let mut list = vec![r#"{"signal": 4002, "unit": "ROB_1", "axis": 1}"#.to_string(); 2];
@@ -358,12 +412,13 @@ mod tests {
             last_target: Some(Target { host: "10.0.0.2".into(), port: 5515 }),
             dark: false,
             window_s: 30.0,
-            channels: vec![SavedChannel { signal: 6000, unit: "ROB_2".into(), axis: 1, radians: true, hold_nonzero: true, lane: 4 }],
+            channels: vec![SavedChannel { signal: 6000, unit: "ROB_2".into(), axis: 1, radians: true, hold_nonzero: true, lane: 4, smooth_ms: 100, scale: crate::charts::Scale::Fixed { lo: -2.5, hi: 7.0 } }],
             record_dir: Some(PathBuf::from(r"D:\rec")),
             slow_interval_ms: 5000,
             snapshot_s: 60.0,
             phone_port: 9000,
             catalogue_file: Some(PathBuf::from(r"D:\cat.json")),
+            show_named: false,
             show_open: true,
             show_inert: true,
             favourites: vec![5027],
@@ -372,6 +427,8 @@ mod tests {
             derived: vec![SavedDerived { def: spy_core::derived::Derived::Turn { angle: key(5138, "ROB_2", 3), target_deg: Some(90.0) }, lane: 5 }],
             rws_port: 8080,
             rws_events: false,
+            signals_folded: true,
+            dash_size: 80.0,
         };
         assert_ne!(s, Settings::default());
         let dir = TestDir::new("settings-all");

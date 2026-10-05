@@ -1,23 +1,53 @@
 //! Text fields that answer UI Automation. egui's own text fields ignore a value set
 //! through it (an assistive tool filling a field in, or a script), and a one-line field
 //! had no name a tool could find it by: its hint reaches UI Automation only as a
-//! placeholder. Every text field in the window goes through here.
+//! placeholder. Every text field in the window goes through here, and so every one is
+//! drawn alike: square, 40 px tall, its edge brighter under the pointer and doubled
+//! while typed into, and dashed while it cannot be changed.
 
-use eframe::egui::{Response, TextEdit, Ui};
+use eframe::egui::{self, Margin, Response, Stroke, TextEdit, Ui};
+
+use crate::theme;
+
+/// A one-line field's height.
+pub const HEIGHT: f32 = 40.0;
 
 /// A one-line text field, named `name` for assistive tools; `shape` sets its hint, width
 /// and the rest. A value set through UI Automation replaces the text, a line break
 /// becoming a space as in a paste.
 pub fn line(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(TextEdit<'_>) -> TextEdit<'_>) -> Response {
-    let mut r = ui.add(shape(TextEdit::singleline(text)));
+    let edit = TextEdit::singleline(text).min_size(egui::vec2(0.0, HEIGHT)).vertical_align(egui::Align::Center);
+    let mut r = framed(ui, shape(edit));
     answer(ui, &mut r, name, text, false);
     r
 }
 
 /// A text field of several lines; a value set keeps its line breaks.
 pub fn lines(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(TextEdit<'_>) -> TextEdit<'_>) -> Response {
-    let mut r = ui.add(shape(TextEdit::multiline(text)));
+    let mut r = framed(ui, shape(TextEdit::multiline(text)));
     answer(ui, &mut r, name, text, true);
+    r
+}
+
+/// The field, with its face and edge drawn under it: egui's own frame cannot be dashed.
+fn framed(ui: &mut Ui, edit: TextEdit<'_>) -> Response {
+    let under = ui.painter().add(egui::Shape::Noop);
+    let r = ui.add(edit.frame(egui::Frame::new().inner_margin(Margin::symmetric(10, 4))));
+    let p = theme::pal(ui);
+    let rect = r.rect;
+    if !r.enabled() {
+        ui.painter().set(under, egui::Shape::rect_filled(rect, 0.0, p.off_face));
+        theme::dashed_rect(ui.painter(), rect, Stroke::new(1.0, p.off_edge));
+    } else {
+        let edge = if r.has_focus() {
+            Stroke::new(2.0, p.ink)
+        } else if r.hovered() {
+            Stroke::new(1.0, p.field_edge_hover)
+        } else {
+            Stroke::new(1.0, p.field_edge)
+        };
+        ui.painter().set(under, egui::Shape::Rect(egui::epaint::RectShape::new(rect, 0.0, p.field, edge, egui::StrokeKind::Inside)));
+    }
     r
 }
 

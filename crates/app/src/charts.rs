@@ -1,10 +1,14 @@
-//! The charts: stacked lanes on one controller-time axis, a rolling window of
-//! 1 s to 10 min (10 s by default), pause and scroll back through the 10-minute
-//! history, per-lane autoscale with a lock, hover with the wall-clock time, two
-//! cursors with the time and value difference, and statistics of the visible window.
-//! A gap is drawn as a gap, never interpolated across, and a stale channel's
+//! The charts (the middle sheet, "02 charts"): stacked lanes on one controller-time
+//! axis, a rolling window of 1 s to 10 min (10 s by default), hover with the
+//! wall-clock time, markers, the controller's events and two cursors. They zoom live
+//! too (G47): the wheel changes the window, Ctrl + wheel a chart's vertical scale, a
+//! drag pauses and moves through the 10-minute history, a double-click goes back. A
+//! chart's vertical scale fits what is in view with a floor, or is fixed, or centred
+//! on zero; a channel can be smoothed on the screen; one chart can fill the middle
+//! (G48). A gap is drawn as a gap, never interpolated across, and a stale channel's
 //! empty stretch is shaded.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use eframe::egui::{self, RichText};
@@ -12,7 +16,7 @@ use egui_plot::{HoverPosition, Legend, Line, Plot, PlotPoints, Span, VLine};
 
 use spy_core::catalogue::flag;
 use spy_core::session::{Phase, Status};
-use spy_core::store::{Channel, Ring};
+use spy_core::store::{Channel, Column, Ring};
 use spy_core::timeline::Timeline;
 
 use crate::app::SpyApp;
@@ -37,7 +41,7 @@ impl Src {
     }
 }
 
-/// One line on the charts, and one row of the cursor table.
+/// One line on the charts.
 #[derive(Clone)]
 pub(crate) struct Member {
     pub(crate) id: String,
@@ -50,14 +54,16 @@ pub(crate) struct Member {
     /// For the legend, and wherever channels are listed side by side (Compare, the XY
     /// plot): with its number, since several signals share a catalogue name.
     pub(crate) name: String,
-    /// For a chart's title and the cursor table.
-    pub(crate) title: String,
     frozen: bool,
     pub(crate) health: Health,
     /// Nothing yet in the store.
     src: Option<Src>,
     /// The smallest span its chart autoscales to.
     min_span: f64,
+    /// Smoothed on the screen over this many ms (0: off).
+    smooth_ms: u32,
+    /// Its chart's scale (the chart's first channel's rules).
+    scale: Scale,
 }
 
 impl Member {
@@ -77,9 +83,65 @@ impl Member {
     }
 }
 
+/// One channel's cursor readings (G47: on its row, not in a table): its value at A
+/// and at B, in its display unit, and the statistics between them (or of the stretch
+/// in view while both are not placed).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CursorReading {
+    pub a: Option<f64>,
+    pub b: Option<f64>,
+    pub between: RangeStats,
+}
 pub const XY_HOVER: &str = "Plot one channel against another over the stretch in view (pause and scroll to pick it)";
 
 pub const WINDOWS: [(f64, &str); 9] = [(1.0, "1 s"), (2.0, "2 s"), (5.0, "5 s"), (10.0, "10 s"), (30.0, "30 s"), (60.0, "1 min"), (120.0, "2 min"), (300.0, "5 min"), (600.0, "10 min")];
+
+/// A channel's smoothing choices (G47), ms: a moving average over that long, on the
+/// screen only. Recordings and every saved file keep the samples as they came.
+pub const SMOOTHING: [(u32, &str); 6] = [(0, "off"), (10, "10 ms"), (50, "50 ms"), (100, "100 ms"), (500, "500 ms"), (1000, "1 s")];
+
+/// A chart's vertical scale (G47), shared by everything overlaid on it; in the
+/// chart's display unit.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Scale {
+    /// Fit what is in view, never tighter than `floor` (`None`: the unit's own floor,
+    /// [`min_span_for`]), so a still joint's dither does not fill the chart.
+    Fit { floor: Option<f64> },
+    /// From `lo` to `hi`.
+    Fixed { lo: f64, hi: f64 },
+    /// From `-half` to `half`.
+    Centred { half: f64 },
+}
+
+impl Default for Scale {
+    fn default() -> Scale {
+        Scale::Fit { floor: None }
+    }
+}
+
+impl Scale {
+    /// Whether it describes a range a chart can show (a hand-edited settings file).
+    pub fn is_valid(&self) -> bool {
+        match *self {
+            Scale::Fit { floor: None } => true,
+            Scale::Fit { floor: Some(f) } => f.is_finite() && f >= 0.0,
+            Scale::Fixed { lo, hi } => lo.is_finite() && hi.is_finite() && lo < hi,
+            Scale::Centred { half } => half.is_finite() && half > 0.0,
+        }
+    }
+
+    /// The range for data spanning `lo..hi` (infinite when there is none in view), the
+    /// unit's own floor being `unit_floor`.
+    pub fn range(&self, lo: f64, hi: f64, unit_floor: f64) -> (f64, f64) {
+        match *self {
+            Scale::Fixed { lo, hi } => (lo, hi),
+            Scale::Centred { half } => (-half, half),
+            Scale::Fit { floor } if lo.is_finite() && hi.is_finite() => autoscale(lo, hi, floor.unwrap_or(unit_floor)),
+            Scale::Fit { .. } => (-1.0, 1.0),
+        }
+    }
+}
 
 /// Statistics of one channel over a time range, in display units.
 #[derive(Debug, Clone, Copy, Default)]
@@ -102,6 +164,166 @@ pub fn range_stats(values: impl Iterator<Item = f64>) -> RangeStats {
         max = max.max(v);
     }
     RangeStats { n, mean, min, max, sd: if n > 1 { (m2 / (n - 1) as f64).sqrt() } else { 0.0 } }
+}
+
+/// A channel's trace smoothed for the screen (G47): each sample replaced by the mean
+/// of the samples in the `window_ms` up to it, started afresh after a gap (never
+/// averaged across one), then cut into `columns` as the raw trace is
+/// ([`Ring::decimate_at`]). `transform` is given every sample in order, from
+/// `window_ms` before `from`.
+pub(crate) fn smoothed(ring: &Ring, from: i64, to: i64, columns: usize, window_ms: i64, mut transform: impl FnMut(i64, f64) -> f64) -> Vec<Vec<Column>> {
+    let mut segments: Vec<Vec<Column>> = Vec::new();
+    if columns == 0 || to <= from {
+        return segments;
+    }
+    let span = (to - from) as f64;
+    let gap = ring.gap_ms();
+    let mut current: Vec<Column> = Vec::new();
+    let mut col_idx: Option<usize> = None;
+    let mut window: VecDeque<(i64, f64)> = VecDeque::new();
+    let mut sum = 0.0;
+    let mut prev_t: Option<i64> = None;
+    // From a window before the stretch, so its first point is a full mean; one sample
+    // past its end, so the line reaches the right edge.
+    let first_shown = from - gap.ceil() as i64;
+    let after = ring.range(to, i64::MAX).next().map(|(t, _)| t + 1).unwrap_or(to);
+    for (t, raw) in ring.range(from.saturating_sub(window_ms), after) {
+        let v = transform(t, raw);
+        let broken = prev_t.is_some_and(|p| (t - p) as f64 > gap);
+        prev_t = Some(t);
+        if broken || !v.is_finite() {
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+            col_idx = None;
+            window.clear();
+            sum = 0.0;
+            if !v.is_finite() {
+                continue;
+            }
+        }
+        window.push_back((t, v));
+        sum += v;
+        while window.front().is_some_and(|&(t0, _)| t0 <= t - window_ms) {
+            if let Some((_, old)) = window.pop_front() {
+                sum -= old;
+            }
+        }
+        if t < first_shown {
+            continue;
+        }
+        let m = sum / window.len() as f64;
+        let c = ((((t - from) as f64 / span) * columns as f64).floor().clamp(-1.0, columns as f64) as i64).max(0) as usize;
+        if col_idx == Some(c)
+            && let Some(last) = current.last_mut()
+        {
+            last.min = last.min.min(m);
+            last.max = last.max.max(m);
+            last.last_v = m;
+        } else {
+            current.push(Column { t, min: m, max: m, first_v: m, last_v: m });
+            col_idx = Some(c);
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+/// What a chart's mouse did this frame, acted on after all are drawn.
+#[derive(Default)]
+struct LaneEvents {
+    /// The time stretch it showed (seconds on the chart's axis).
+    view: Option<(f64, f64)>,
+    clicked_at: Option<f64>,
+    secondary_at: Option<f64>,
+    double: bool,
+    /// Dragged while live: pause where it is.
+    drag_live: bool,
+    /// The wheel while live: the window's length.
+    wheel: f32,
+    /// Ctrl + wheel: the vertical range it now holds.
+    zoom_y: Option<(f64, f64)>,
+    /// The vertical range it showed.
+    y: Option<(f64, f64)>,
+}
+
+/// Steps a time axis ticks at, seconds.
+const TIME_STEPS: [f64; 22] = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0];
+
+/// A labelled tick's least distance from the next, px: a clock's width and some.
+pub const TIME_LABEL_PX: f64 = 92.0;
+
+/// The time axis's ticks: labelled ones at least [`TIME_LABEL_PX`] apart and finer,
+/// unlabelled ones between, all whole steps from `anchor` (the live edge, so they read
+/// "-8 s" ... "now"; or a whole second of the wall clock while paused).
+pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_plot::GridMark> {
+    let (lo, hi) = input.bounds;
+    if !(input.base_step_size > 0.0 && hi > lo && anchor.is_finite()) {
+        return Vec::new();
+    }
+    // egui_plot's base step spans its grid's least spacing, GRID_PX.
+    let px = f64::from(GRID_PX) / input.base_step_size;
+    let last = TIME_STEPS[TIME_STEPS.len() - 1];
+    let major = TIME_STEPS.iter().copied().find(|s| s * px >= TIME_LABEL_PX).unwrap_or(last);
+    let minor = TIME_STEPS.iter().copied().find(|s| s * px >= 24.0 && ((major / s).round() * s - major).abs() < 1e-9).unwrap_or(major);
+    let mut out = Vec::new();
+    for step in [minor, major] {
+        let (k0, k1) = (((lo - anchor) / step).ceil() as i64, ((hi - anchor) / step).floor() as i64);
+        if k1.saturating_sub(k0) > 10_000 {
+            continue;
+        }
+        out.extend((k0..=k1).map(|k| egui_plot::GridMark { value: anchor + k as f64 * step, step_size: step }));
+    }
+    // One mark to a place, the coarser kept.
+    out.sort_by(|a, b| a.value.total_cmp(&b.value));
+    out.dedup_by(|later, earlier| {
+        let same = (later.value - earlier.value).abs() < minor * 0.1;
+        if same && later.step_size > earlier.step_size {
+            *earlier = *later;
+        }
+        same
+    });
+    out
+}
+
+/// The grid's least spacing, px, as the charts set it.
+pub const GRID_PX: f32 = 8.0;
+
+/// Where a live chart's ticks start: its right edge; a paused one's, a whole second of
+/// the wall clock (found near the middle of what it shows).
+fn time_anchor(bounds: (f64, f64), live_end: Option<f64>, tl: &Timeline) -> f64 {
+    if let Some(end) = live_end {
+        return end;
+    }
+    let mid = (bounds.0 + bounds.1) / 2.0;
+    let wall = tl.wall(tl.origin().unwrap_or(0) + (mid * 1000.0).round() as i64).and_then(|w| w.duration_since(std::time::UNIX_EPOCH).ok());
+    match wall {
+        Some(d) => mid - f64::from(d.subsec_millis()) / 1000.0,
+        None => 0.0,
+    }
+}
+
+/// The time axis's words: seconds before now while live (the last tick "now"), the
+/// wall clock while paused.
+fn time_label(mark: egui_plot::GridMark, live_end: Option<f64>, tl: &Timeline) -> String {
+    let x = mark.value;
+    match live_end {
+        Some(end) => {
+            let d = x - end;
+            if d.abs() < mark.step_size * 1e-3 { "now".into() } else { format!("{} s", view::fmt_short((d * 1000.0).round() / 1000.0)) }
+        }
+        None => match tl.wall(tl.origin().unwrap_or(0) + (x * 1000.0).round() as i64) {
+            // Ticks less than a second apart: tenths, or the ticks would repeat the second.
+            Some(w) if mark.step_size < 0.999 => {
+                let t = view::local_time(w);
+                t.get(..10).map_or(t.clone(), str::to_string)
+            }
+            Some(w) => view::local_hms(w),
+            None => format!("{x:.1} s"),
+        },
+    }
 }
 
 impl SpyApp {
@@ -155,6 +377,8 @@ impl SpyApp {
             let sig = self.catalogue.get(c.key.signal);
             let d = view::display(sig, c.radians);
             let cs = st.channels.iter().find(|s| s.key == c.key);
+            // An overlaid chart's scale is its first channel's.
+            let scale = self.chans.iter().enumerate().find(|(j, o)| o.lane == c.lane && charted[*j] && self.units_of(*j) == d.units).map_or(c.scale, |(_, o)| o.scale);
             out.push(Member {
                 id: c.key.id(),
                 lane: (c.lane, d.units.clone()),
@@ -163,16 +387,16 @@ impl SpyApp {
                 hold: c.hold_nonzero,
                 reading: view::reading(sig),
                 name: view::short_label(&self.catalogue, &c.key),
-                title: view::label(&self.catalogue, &c.key),
                 frozen: sig.is_some_and(|s| s.has(flag::FROZEN)),
                 health: view::health(cs, connected, sig, st.loopback),
                 src: store.get(&c.key).map(Src::Stream),
                 min_span: min_span_for(&d.units, sig),
+                smooth_ms: c.smooth_ms,
+                scale,
             });
         }
         for (i, d) in self.derived.iter().enumerate() {
             let def = d.live.def();
-            let title = self.derived_label(def);
             out.push(Member {
                 id: def.id(),
                 lane: (d.lane, def.units().to_string()),
@@ -180,12 +404,13 @@ impl SpyApp {
                 factor: 1.0,
                 hold: false,
                 reading: crate::derived_view::reading(def),
-                name: title.clone(),
-                title,
+                name: self.derived_label(def),
                 frozen: false,
                 health: self.derived_health(i, st),
                 src: Some(Src::Derived(d.live.ring())),
                 min_span: min_span(def.units()),
+                smooth_ms: 0,
+                scale: Scale::default(),
             });
         }
         out
@@ -196,106 +421,184 @@ impl SpyApp {
         view::display(self.catalogue.get(c.key.signal), c.radians).units
     }
 
+    /// The vertical range a chart showed last: where a fixed scale starts from.
+    pub fn lane_view_range(&self, lane: u32, units: &str) -> Option<(f64, f64)> {
+        self.lane_ranges.get(&(lane, units.to_string())).copied()
+    }
+
+    /// Each charted channel's cursor readings, by id: at A, at B, and the statistics
+    /// between them, or of the stretch in view while both are not placed.
+    pub(crate) fn cursor_readings(&self, st: &Status) -> HashMap<String, CursorReading> {
+        let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, st)).collect();
+        let origin = st.timeline.origin().unwrap_or(0);
+        let (a, b) = (self.cursor_a, self.cursor_b);
+        let (from, to) = match (a, b) {
+            (Some(a), Some(b)) => (origin + (a.min(b) * 1000.0).floor() as i64, origin + (a.max(b) * 1000.0).ceil() as i64 + 1),
+            _ => self.view_ms.unwrap_or((i64::MIN, i64::MAX)),
+        };
+        let mut out = HashMap::new();
+        for m in self.members(&charted, st) {
+            let Some(src) = &m.src else {
+                out.insert(m.id.clone(), CursorReading::default());
+                continue;
+            };
+            let r = src.lock();
+            let at = |x: f64| view::value_at(&r, m.reading, origin + (x * 1000.0).round() as i64).map(|v| v * m.factor);
+            let s = view::window_stats(&r, m.reading, from, to);
+            let between = RangeStats { n: s.n, mean: s.mean * m.factor, min: s.min * m.factor, max: s.max * m.factor, sd: s.sd * m.factor };
+            out.insert(m.id.clone(), CursorReading { a: a.and_then(at), b: b.and_then(at), between });
+        }
+        out
+    }
+
     pub fn charts(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
         self.chart_toolbar(ui);
         let st = self.session.status().clone();
         if self.chans.is_empty() {
-            ui.centered_and_justified(|ui| ui.label(RichText::new("Charts appear here once channels are added.").weak()));
+            ui.centered_and_justified(|ui| ui.label(RichText::new("Charts appear here once channels are added.").color(p.ink2)));
             return;
         }
         let tl = st.timeline.clone();
         let Some(newest) = self.session.store().newest() else {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(if st.phase.is_connected() { "Waiting for the first samples..." } else { "Connect to a controller to see the charts." }).weak())
-            });
+            ui.centered_and_justified(|ui| ui.label(RichText::new(if st.phase.is_connected() { "Waiting for the first samples..." } else { "Connect to a controller to see the charts." }).color(p.ink2)));
             return;
         };
         if st.phase != Phase::Streaming && self.paused_at.is_none() {
-            ui.colored_label(theme::WARN, "Not streaming: the charts show the last data received.");
+            ui.horizontal(|ui| {
+                theme::square(ui, p.hold, 10.0);
+                ui.label(theme::b("Not streaming: the charts show the last data received.").color(p.hold));
+            });
         }
         let end_ms = self.paused_at.unwrap_or(newest);
         let x_max = tl.seconds(end_ms);
         let x_min = x_max - self.window_s;
         let live = self.paused_at.is_none();
+        // While live, a little room right of "now", so its word is not cut at the edge.
+        let x_right = if live { x_max + self.window_s * 18.0 / f64::from((ui.available_width() - 60.0).max(100.0)) } else { x_max };
         let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, &st)).collect();
-        let lanes = self.lanes(&charted);
-        if lanes.is_empty() {
-            ui.centered_and_justified(|ui| ui.label(RichText::new("Nothing to chart: the channels are text signals or were refused (see the table).").weak()));
+        let all_lanes = self.lanes(&charted);
+        if all_lanes.is_empty() {
+            ui.centered_and_justified(|ui| ui.label(RichText::new("Nothing to chart: the channels are text signals or were refused (see their rows).").color(p.ink2)));
             return;
         }
         let all = self.members(&charted, &st);
-        let stats_h = if self.cursors_on { 26.0 * (all.len() as f32 + 2.0) } else { 0.0 };
-        let lane_h = ((ui.available_height() - stats_h) / lanes.len() as f32 - 22.0).max(80.0);
-        let mut clicked_a: Option<f64> = None;
-        let mut clicked_b: Option<f64> = None;
-        let mut visible_x = (x_min, x_max);
+        // One chart filling the middle (G48), while it is still there.
+        if self.expanded.as_ref().is_some_and(|e| !all_lanes.contains(e)) {
+            self.expanded = None;
+        }
+        let lanes: Vec<(u32, String)> = match &self.expanded {
+            Some(e) => vec![e.clone()],
+            None => all_lanes.clone(),
+        };
+        if self.expanded.is_some() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("showing 1 of {} charts", all_lanes.len())).color(p.ink2));
+                if theme::icon_text_button(ui, theme::Icon::Collapse, "show all charts", 34.0, false).clicked() {
+                    self.expanded = None;
+                }
+            });
+        }
+        let title_h = 30.0;
+        let axis_h = 26.0;
+        let fit = (ui.available_height() - axis_h) / lanes.len() as f32 - title_h - 8.0;
+        let lane_h = fit.max(90.0);
+        // More charts than fit, scrolled: each has its own time axis, since the last one's
+        // is out of sight.
+        let every_axis = fit < 90.0;
 
         // Six pixels either side of a mark's line, in the chart's seconds (the stretch the
         // last frame showed).
         let mark_tol = self.view_ms.map_or(self.window_s, |(a, b)| (b - a) as f64 / 1000.0) * 6.0 / f64::from(ui.available_width().max(100.0));
+        let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
+        // The controller's own events (RWS), to the second.
+        let events: Vec<(f64, egui::Color32, String)> = self.events_on_timeline(&tl).into_iter().map(|(t, e)| (tl.seconds(t), e.color(p), format!("controller: {}", e.text()))).collect();
+        let (ca, cb, cursors_on) = (self.cursor_a, self.cursor_b, self.cursors_on);
+        // What each vertical line is, for the hover: the lines have no names, so that they
+        // stay out of the legend (a review's events once covered half of every chart there).
+        let mut marks: Vec<(f64, String)> = markers.iter().map(|(x, l)| (*x, format!("marker {l}"))).collect();
+        marks.extend(events.iter().map(|(x, _, l)| (*x, l.clone())));
+        if cursors_on {
+            marks.extend(ca.map(|a| (a, "cursor A".to_string())));
+            marks.extend(cb.map(|b| (b, "cursor B".to_string())));
+        }
+        let pause_fresh = self.pause_fresh;
+        let origin = tl.origin().unwrap_or(0);
+        // The stretch the charts showed last frame: the markers named in the titles.
+        let shown_x = match self.view_ms {
+            Some((a, b)) if !live => ((a - origin) as f64 / 1000.0, (b - origin) as f64 / 1000.0),
+            _ => (x_min, x_max),
+        };
         let mut transforms = Vec::new();
-        egui::ScrollArea::vertical().id_salt("lanes").auto_shrink([false, false]).max_height(ui.available_height() - stats_h).show(ui, |ui| {
-            for lane in &lanes {
+        let mut events_out: Vec<((u32, String), LaneEvents)> = Vec::new();
+        let mut title_acts: Vec<((u32, String), TitleAct)> = Vec::new();
+        egui::ScrollArea::vertical().id_salt("lanes").auto_shrink([false, false]).show(ui, |ui| {
+            for (k, lane) in lanes.iter().enumerate() {
                 let members: Vec<&Member> = all.iter().filter(|m| &m.lane == lane).collect();
                 let Some(first) = members.first() else { continue };
-                let title = if members.len() == 1 { first.title.clone() } else { format!("{} (+{} overlaid)", first.title, members.len() - 1) };
-                let locked = self.lane_lock.get(lane).copied();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&title).small().strong());
-                    ui.label(RichText::new(format!("[{}]", lane.1)).small().weak());
-                    if members.iter().any(|m| m.frozen) {
-                        theme::badge(ui, "FROZEN", theme::WARN, "Holds the last RAPID path position; does not move while EGM drives the robot.");
-                    }
-                    let mut lock = locked.is_some();
-                    if ui.toggle_value(&mut lock, "🔒").on_hover_text("Lock this chart's vertical scale").changed() {
-                        if lock {
-                            self.lane_lock.insert(lane.clone(), (f64::NAN, f64::NAN));
-                        } else {
-                            self.lane_lock.remove(lane);
-                        }
-                    }
-                });
-
-                let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
-                // The controller's own events (RWS), to the second.
-                let events: Vec<(f64, egui::Color32, String)> = self.events_on_timeline(&tl).into_iter().map(|(t, e)| (tl.seconds(t), e.color(), format!("controller: {}", e.text()))).collect();
-                let (ca, cb) = (self.cursor_a, self.cursor_b);
-                // What each vertical line is, for the hover: the lines have no names, so
-                // that they stay out of the legend (a review's events once covered half of
-                // every chart there).
-                let mut marks: Vec<(f64, String)> = markers.iter().map(|(x, l)| (*x, format!("marker {l}"))).collect();
-                marks.extend(events.iter().map(|(x, _, l)| (*x, l.clone())));
-                if self.cursors_on {
-                    marks.extend(ca.map(|a| (a, "cursor A".to_string())));
-                    marks.extend(cb.map(|b| (b, "cursor B".to_string())));
+                let hover_id = egui::Id::new(("lane-hovered", lane.0, &lane.1));
+                let hovered_before = ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
+                let zoomed = self.lane_zoom.get(lane).copied();
+                let top = ui.cursor().top();
+                let in_view: Vec<&str> = markers.iter().filter(|(x, _)| (shown_x.0..=shown_x.1).contains(x)).map(|(_, l)| l.as_str()).collect();
+                // The newest marker in view, named over the top chart only.
+                let act = lane_title(ui, &members, zoomed.is_some(), self.expanded.as_ref() == Some(lane), hovered_before, if k == 0 { in_view.last().copied() } else { None });
+                if act != TitleAct::None {
+                    title_acts.push((lane.clone(), act));
                 }
-
                 let tl2 = tl.clone();
                 let units = lane.1.clone();
                 let shown = self.hover_text.clone();
-                // The widest its channels need (a motor's angle beside a joint's).
-                let min_span = members.iter().map(|m| m.min_span).fold(0.0, f64::max);
+                let marks2 = marks.clone();
+                let last_lane = k + 1 == lanes.len();
+                let (tl3, tl4) = (tl.clone(), tl.clone());
+                let live_end = live.then_some(x_max);
                 let mut plot = Plot::new(("lane", lane.0, &lane.1))
                     .height(lane_h)
                     .link_axis("x-link", [true, false])
                     .link_cursor("x-link", [true, false])
-                    .legend(Legend::default().position(egui_plot::Corner::LeftTop))
-                    .y_axis_min_width(56.0)
-                    .show_axes([true, true])
-                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, &marks, mark_tol)));
-                plot = if live {
-                    plot.allow_drag(false).allow_zoom(false).allow_scroll(false).allow_boxed_zoom(false).allow_double_click_reset(false)
-                } else {
-                    plot.allow_drag([true, false]).allow_zoom([true, false]).allow_scroll([true, false]).allow_boxed_zoom(false).allow_double_click_reset(false)
-                };
-
-                let pause_fresh = self.pause_fresh;
-                let cursors_on = self.cursors_on;
-                let origin = tl.origin().unwrap_or(0);
-
+                    .custom_x_axes(vec![theme::time_axis(p, move |mark, _| time_label(mark, live_end, &tl3))])
+                    .grid_spacing(GRID_PX..=300.0)
+                    .x_grid_spacer(move |input| {
+                        let anchor = time_anchor(input.bounds, live_end, &tl4);
+                        time_marks(input, anchor)
+                    })
+                    .custom_y_axes(vec![theme::value_axis(p)])
+                    .show_axes([last_lane || every_axis, true])
+                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, &marks2, mark_tol)))
+                    .allow_drag([true, false])
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .allow_boxed_zoom(false)
+                    .allow_double_click_reset(false);
+                if members.len() > 1 {
+                    plot = plot.legend(Legend::default().position(egui_plot::Corner::LeftTop));
+                }
+                let (scale, min_span) = (first.scale, members.iter().map(|m| m.min_span).fold(0.0, f64::max));
                 let resp = plot.show(ui, |pu| {
+                    let mut ev = LaneEvents::default();
                     let b = pu.plot_bounds();
-                    let (vx0, vx1) = if live || pause_fresh || !b.is_valid_x() { (x_min, x_max) } else { (b.min()[0], b.max()[0]) };
+                    let dragged = pu.response().dragged();
+                    let (mut vx0, mut vx1) = if (live && !dragged) || pause_fresh || !b.is_valid_x() { (x_min, x_right) } else { (b.min()[0], b.max()[0]) };
+                    // The wheel over this chart: the window while live, time around the
+                    // pointer while paused; with Ctrl, the vertical scale (G47).
+                    let hovered = pu.response().hovered();
+                    let (zoom, scroll) = if hovered { pu.ctx().input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y)) } else { (1.0, 0.0) };
+                    if hovered && (zoom != 1.0 || scroll != 0.0) {
+                        // Taken here: the charts' scroll area must not move as well.
+                        pu.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                    }
+                    if scroll != 0.0 {
+                        if live {
+                            ev.wheel = scroll;
+                        } else if let Some(px) = pu.pointer_coordinate().map(|q| q.x) {
+                            let f = f64::from((-scroll * 0.0025).exp());
+                            let w = ((vx1 - vx0) * f).clamp(0.05, 600.0);
+                            let k = (px - vx0) / (vx1 - vx0).max(1e-9);
+                            (vx0, vx1) = (px - w * k, px - w * k + w);
+                            pu.set_plot_bounds_x(vx0..=vx1);
+                        }
+                    }
                     let from = origin + (vx0 * 1000.0).floor() as i64;
                     let to = origin + (vx1 * 1000.0).ceil() as i64 + 1;
                     let px = pu.response().rect.width().max(50.0) as usize;
@@ -308,12 +611,17 @@ impl SpyApp {
                         // time: a longer run of zeros is a stop and is drawn as zero.
                         // Primed from just before the window, so its left edge is right.
                         let mut zh = view::ZeroHold::new();
-                        if hold {
+                        let smooth = i64::from(m.smooth_ms);
+                        if hold && smooth == 0 {
                             for (t, v) in ring.range(from - view::ZERO_HOLD_MS.ceil() as i64 - 1, from) {
                                 zh.apply_at(t, v);
                             }
                         }
-                        let segs = ring.decimate_at(from, to, px, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor);
+                        let segs = if smooth > 0 {
+                            smoothed(&ring, from, to, px, smooth, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor)
+                        } else {
+                            ring.decimate_at(from, to, px, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor)
+                        };
                         let last = ring.last().map(|(t, _)| t);
                         drop(ring);
                         for (si, seg) in segs.iter().enumerate() {
@@ -337,7 +645,7 @@ impl SpyApp {
                                 // A lone point would be invisible as a line.
                                 pts.push([pts[0][0] + 0.0005, pts[0][1]]);
                             }
-                            pu.line(Line::new(m.name.clone(), PlotPoints::from(pts)).color(m.color).width(1.4).id(egui::Id::new((&m.id, si))));
+                            pu.line(Line::new(m.name.clone(), PlotPoints::from(pts)).color(m.color).width(2.0).id(egui::Id::new((&m.id, si))));
                         }
                         // A stale channel: shade from its last sample to the right edge.
                         if matches!(m.health, Health::Stale | Health::NotConnected)
@@ -345,182 +653,334 @@ impl SpyApp {
                         {
                             let x = (t - origin) as f64 / 1000.0;
                             if x < vx1 {
-                                pu.span(Span::new(format!("{} stale", m.name), x..=vx1).fill(theme::WARN.gamma_multiply(0.08)).border_width(0.0));
+                                pu.span(Span::new(format!("{} stale", m.name), x..=vx1).fill(p.hold.gamma_multiply(0.10)).border_width(0.0));
                             }
                         }
                     }
                     for (x, _) in &markers {
                         if *x >= vx0 && *x <= vx1 {
-                            pu.vline(VLine::new("", *x).color(theme::WARN).width(1.0));
+                            pu.vline(VLine::new("", *x).color(p.hold).width(2.0).style(egui_plot::LineStyle::dashed_dense()));
                         }
                     }
                     for (x, color, _) in &events {
                         if *x >= vx0 && *x <= vx1 {
-                            pu.vline(VLine::new("", *x).color(*color).width(1.0).style(egui_plot::LineStyle::dashed_loose()));
+                            pu.vline(VLine::new("", *x).color(*color).width(1.5).style(egui_plot::LineStyle::dashed_loose()));
                         }
                     }
                     if cursors_on {
                         if let Some(a) = ca {
-                            pu.vline(VLine::new("", a).color(egui::Color32::from_rgb(0x5A, 0x9B, 0xD5)).width(1.5));
+                            pu.vline(VLine::new("", a).color(p.ink).width(2.5));
                         }
                         if let Some(bx) = cb {
-                            pu.vline(VLine::new("", bx).color(egui::Color32::from_rgb(0xD3, 0x72, 0x95)).width(1.5));
+                            pu.vline(VLine::new("", bx).color(p.ink).width(2.0).style(egui_plot::LineStyle::dashed_dense()));
                         }
                     }
-                    if live || pause_fresh {
-                        pu.set_plot_bounds_x(x_min..=x_max);
+                    if (live && !dragged) || pause_fresh {
+                        pu.set_plot_bounds_x(x_min..=x_right);
                     }
-                    let (y0, y1) = match locked {
-                        Some((a, bb)) if a.is_finite() && bb.is_finite() => (a, bb),
-                        _ if ymin.is_finite() => autoscale(ymin, ymax, min_span),
-                        _ => (-1.0, 1.0),
+                    ev.drag_live = live && dragged;
+                    let (mut y0, mut y1) = match zoomed {
+                        Some(z) => z,
+                        None => scale.range(ymin, ymax, min_span),
                     };
+                    if zoom != 1.0
+                        && let Some(py) = pu.pointer_coordinate().map(|q| q.y)
+                    {
+                        let z = f64::from(zoom);
+                        (y0, y1) = (py - (py - y0) / z, py + (y1 - py) / z);
+                        ev.zoom_y = Some((y0, y1));
+                    }
                     pu.set_plot_bounds_y(y0..=y1);
-                    let clicked = pu.response().clicked();
-                    let secondary = pu.response().secondary_clicked();
-                    let x_at = pu.pointer_coordinate().map(|p| p.x);
-                    ((vx0, vx1), (y0, y1), clicked, secondary, x_at)
+                    ev.view = Some((vx0, vx1));
+                    ev.y = Some((y0, y1));
+                    let x_at = pu.pointer_coordinate().map(|q| q.x);
+                    if pu.response().clicked() {
+                        ev.clicked_at = x_at;
+                    }
+                    if pu.response().secondary_clicked() {
+                        ev.secondary_at = x_at;
+                    }
+                    ev.double = pu.response().double_clicked();
+                    ev
                 });
                 transforms.push(resp.transform);
-                let ((vx0, vx1), (y0, y1), clicked, secondary, x_at) = resp.inner;
-                visible_x = (vx0, vx1);
-                // A lock taken this frame captures the scale in view.
-                if let Some(l) = self.lane_lock.get_mut(lane)
-                    && !l.0.is_finite() {
-                        *l = (y0, y1);
-                    }
-                if self.cursors_on {
-                    if clicked {
-                        clicked_a = x_at;
-                    }
-                    if secondary {
-                        clicked_b = x_at;
-                    }
+                let lane_rect = egui::Rect::from_min_max(egui::pos2(resp.response.rect.left(), top), resp.response.rect.right_bottom());
+                let now_hovered = ui.rect_contains_pointer(lane_rect.expand2(egui::vec2(60.0, 0.0)));
+                ui.data_mut(|d| d.insert_temp(hover_id, now_hovered));
+                if now_hovered != hovered_before {
+                    ui.ctx().request_repaint();
                 }
+                events_out.push((lane.clone(), resp.inner));
+                ui.add_space(8.0);
             }
         });
         self.lane_transforms = transforms;
         self.pause_fresh = false;
-        let origin = tl.origin().unwrap_or(0);
-        self.view_ms = Some((origin + (visible_x.0 * 1000.0).floor() as i64, origin + (visible_x.1 * 1000.0).ceil() as i64 + 1));
-        if let Some(a) = clicked_a {
-            self.cursor_a = Some(a);
+        let mut visible_x = (x_min, x_max);
+        for (lane, ev) in events_out {
+            if let Some(v) = ev.view {
+                visible_x = v;
+            }
+            if let Some(y) = ev.y {
+                self.lane_ranges.insert(lane.clone(), y);
+            }
+            if let Some(z) = ev.zoom_y {
+                self.lane_zoom.insert(lane.clone(), z);
+            }
+            if ev.drag_live {
+                self.paused_at = Some(newest);
+            }
+            if ev.wheel != 0.0 {
+                self.wheel_window(ev.wheel);
+            }
+            if ev.double {
+                // Back: the chart's own scale, and the stretch where it paused.
+                self.lane_zoom.remove(&lane);
+                if self.paused_at.is_some() {
+                    self.pause_fresh = true;
+                }
+            }
+            if self.cursors_on {
+                if let Some(a) = ev.clicked_at {
+                    self.cursor_a = Some(a);
+                }
+                if let Some(b) = ev.secondary_at {
+                    self.cursor_b = Some(b);
+                }
+            }
         }
-        if let Some(b) = clicked_b {
-            self.cursor_b = Some(b);
-        }
-        if self.cursors_on {
-            self.cursor_table(ui, &tl, visible_x, &all);
-        }
-    }
-
-    fn chart_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Window");
-            let cur = WINDOWS.iter().find(|(s, _)| (s - self.window_s).abs() < 1e-9).map(|(_, l)| *l).unwrap_or("custom");
-            egui::ComboBox::from_id_salt("window").selected_text(cur).width(70.0).show_ui(ui, |ui| {
-                for (s, l) in WINDOWS {
-                    if ui.selectable_label((s - self.window_s).abs() < 1e-9, l).clicked() {
-                        self.window_s = s;
-                        self.mark_settings_dirty();
-                        // Paused, the charts keep the person's view; a length chosen now is
-                        // shown at once, ending where the view ends (the charts did not
-                        // change on the cell, and the person looked for the change).
-                        if self.paused_at.is_some() {
-                            if let Some((_, end)) = self.view_ms {
-                                self.paused_at = Some(end - 1);
-                            }
-                            self.pause_fresh = true;
-                        }
+        for (lane, act) in title_acts {
+            match act {
+                TitleAct::Expand => self.expanded = Some(lane),
+                TitleAct::Collapse => self.expanded = None,
+                TitleAct::ZoomIn | TitleAct::ZoomOut => {
+                    if let Some((a, b)) = self.lane_zoom.get(&lane).copied().or_else(|| self.lane_ranges.get(&lane).copied()) {
+                        let (c, half) = ((a + b) / 2.0, (b - a) / 2.0 * if act == TitleAct::ZoomIn { 0.5 } else { 2.0 });
+                        self.lane_zoom.insert(lane, (c - half, c + half));
                     }
                 }
-            });
-            let paused = self.paused_at.is_some();
-            if ui.button(if paused { "▶ Live" } else { "⏸ Pause" }).on_hover_text("Space. While paused, drag to scroll back and use the wheel to zoom, through the last 10 minutes.").clicked() {
-                self.toggle_pause();
+                TitleAct::ResetScale => {
+                    self.lane_zoom.remove(&lane);
+                }
+                TitleAct::None => {}
             }
-            if paused {
-                ui.label(RichText::new("PAUSED: drag to scroll, wheel to zoom").color(theme::WARN));
-            }
-            ui.separator();
-            ui.toggle_value(&mut self.cursors_on, "Cursors").on_hover_text("Click a chart to place cursor A, right-click for cursor B. Shows the time and value differences, and statistics.");
-            if self.cursors_on && ui.small_button("clear").clicked() {
-                self.cursor_a = None;
-                self.cursor_b = None;
-            }
-            ui.separator();
-            fields::line(ui, &mut self.marker_text, "Marker label", |t| t.hint_text("marker label").desired_width(110.0));
-            if ui.button("Marker").on_hover_text("M: mark this moment on the charts and in any running recording").clicked() {
-                self.add_marker();
-            }
-            if !self.markers.is_empty() && ui.small_button("clear markers").clicked() {
-                self.markers.clear();
-            }
-            ui.separator();
-            if ui.button("Save CSV").on_hover_text("Save every channel's samples in view to a CSV file in the recordings folder").clicked() {
-                self.export_live_csv();
-            }
-            if ui.button("Save PNG").on_hover_text("Save a picture of the charts to the recordings folder").clicked() {
-                self.request_png(crate::export::Picture::Charts);
-            }
-            ui.separator();
-            if ui.selectable_label(self.xy.is_some(), "XY").on_hover_text(XY_HOVER).clicked() {
-                self.toggle_xy();
-            }
-        });
+        }
+        self.view_ms = Some((origin + (visible_x.0 * 1000.0).floor() as i64, origin + (visible_x.1 * 1000.0).ceil() as i64 + 1));
     }
 
-    fn cursor_table(&mut self, ui: &mut egui::Ui, tl: &Timeline, visible: (f64, f64), members: &[Member]) {
-        ui.separator();
-        let origin = tl.origin().unwrap_or(0);
-        let (a, b) = (self.cursor_a, self.cursor_b);
-        let range = match (a, b) {
-            (Some(a), Some(b)) => (a.min(b), a.max(b)),
-            _ => visible,
-        };
-        ui.horizontal(|ui| {
-            match (a, b) {
-                (Some(a), Some(b)) => ui.label(RichText::new(format!("A {:.3} s   B {:.3} s   Δt {:.3} s  (statistics between A and B)", a, b, b - a)).strong()),
-                (Some(a), None) => ui.label(format!("A {a:.3} s   right-click to place B   (statistics of the visible window)")),
-                _ => ui.label("Click a chart to place cursor A, right-click for B   (statistics of the visible window)"),
-            };
-        });
-        let at = |m: &Member, x: f64| -> Option<f64> {
-            let r = m.src.as_ref()?.lock();
-            view::value_at(&r, m.reading, origin + (x * 1000.0).round() as i64)
-        };
-        egui::Grid::new("cursor-stats").striped(true).num_columns(8).show(ui, |ui| {
-            for h in ["channel", "at A", "at B", "B − A", "mean", "min", "max", "std dev"] {
-                ui.label(RichText::new(h).small().strong());
+    /// The wheel over a live chart (G47): a notch longer or shorter a window.
+    fn wheel_window(&mut self, delta: f32) {
+        self.wheel_acc += delta;
+        // egui spreads a notch's 40 points over a few frames; their sum can fall a
+        // hair short.
+        const NOTCH: f32 = 40.0;
+        while self.wheel_acc.abs() >= NOTCH - 0.5 {
+            let up = self.wheel_acc > 0.0;
+            self.wheel_acc -= NOTCH.copysign(self.wheel_acc);
+            let i = WINDOWS.iter().position(|(s, _)| *s >= self.window_s - 1e-9).unwrap_or(WINDOWS.len() - 1);
+            // The wheel turned away from you zooms in: a shorter window.
+            let j = if up { i.saturating_sub(1) } else { (i + 1).min(WINDOWS.len() - 1) };
+            if WINDOWS[j].0 != self.window_s {
+                self.window_s = WINDOWS[j].0;
+                self.mark_settings_dirty();
             }
-            ui.end_row();
-            for m in members {
-                let va = a.and_then(|x| at(m, x)).map(|v| v * m.factor);
-                let vb = b.and_then(|x| at(m, x)).map(|v| v * m.factor);
-                let s = match &m.src {
-                    Some(src) => {
-                        let r = src.lock();
-                        let from = origin + (range.0 * 1000.0).floor() as i64;
-                        let to = origin + (range.1 * 1000.0).ceil() as i64 + 1;
-                        let s = view::window_stats(&r, m.reading, from, to);
-                        RangeStats { n: s.n, mean: s.mean * m.factor, min: s.min * m.factor, max: s.max * m.factor, sd: s.sd * m.factor }
-                    }
-                    None => RangeStats::default(),
-                };
-                let f = |v: Option<f64>| v.map(view::fmt).unwrap_or_else(|| "--".into());
-                ui.label(RichText::new(&m.title).small().color(m.color));
-                ui.label(RichText::new(f(va)).small().monospace());
-                ui.label(RichText::new(f(vb)).small().monospace());
-                ui.label(RichText::new(f(va.zip(vb).map(|(x, y)| y - x))).small().monospace());
-                let has = s.n > 0;
-                ui.label(RichText::new(if has { view::fmt(s.mean) } else { "--".into() }).small().monospace());
-                ui.label(RichText::new(if has { view::fmt(s.min) } else { "--".into() }).small().monospace());
-                ui.label(RichText::new(if has { view::fmt(s.max) } else { "--".into() }).small().monospace());
-                ui.label(RichText::new(if has { format!("{} {}", view::fmt(s.sd), m.lane.1) } else { "--".into() }).small().monospace());
-                ui.end_row();
-            }
-        });
+        }
     }
+
+    /// The charts' heading and its tools: the window, pause, cursors, a marker, and
+    /// the files.
+    fn chart_toolbar(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal(ui);
+        let paused = self.paused_at.is_some();
+        let window_s = self.window_s;
+        let cursors_on = self.cursors_on;
+        let placed = self.cursor_a.is_some() || self.cursor_b.is_some();
+        let markers = self.markers.len();
+        let xy_open = self.xy.is_some();
+        let mut label = std::mem::take(&mut self.marker_text);
+        let (mut window, mut pause, mut cursors, mut clear_cursors, mut marker, mut clear_markers) = (None, false, false, false, false, false);
+        let (mut xy, mut png, mut csv) = (false, false, false);
+        ui.scope(|ui| {
+            ui.spacing_mut().button_padding.x = 9.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().interact_size.y = theme::TOOL_H;
+            let cur = WINDOWS.iter().find(|(s, _)| (s - window_s).abs() < 1e-9).map(|(_, l)| *l).unwrap_or("custom");
+            let cursors_text = if cursors_on { "cursors: on" } else { "cursors" };
+            let mut left_texts = vec![cur, if paused { "back to live" } else { "pause" }, cursors_text, "marker"];
+            if cursors_on && placed {
+                left_texts.push("clear cursors");
+            }
+            // The window's chevron, the marker's arrow, and the paused tag.
+            let extra = 20.0 + 32.0 + if paused { 80.0 } else { 0.0 };
+            let left_w = theme::buttons_width(ui, &left_texts, extra);
+            let right_w = theme::buttons_width(ui, &["save csv", "save png", "xy plot"], 0.0);
+            theme::section_tools(
+                ui,
+                "02",
+                "charts",
+                left_w,
+                right_w,
+                |ui| {
+                    let r = theme::drop_button(ui, cur, theme::TOOL_H).on_hover_text("How much the charts show: the wheel over a chart changes it too");
+                    egui::Popup::menu(&r).show(|ui| {
+                        for (s, l) in WINDOWS {
+                            if ui.selectable_label((s - window_s).abs() < 1e-9, l).clicked() {
+                                window = Some(s);
+                                ui.close();
+                            }
+                        }
+                    });
+                    if paused {
+                        pause = theme::primary(ui, "back to live", theme::TOOL_H).on_hover_text("Space").clicked();
+                        theme::badge(ui, "paused", p.hold, "The charts are held: drag to move through the last 10 minutes, the wheel zooms time, Ctrl + wheel the vertical scale.");
+                    } else {
+                        pause = theme::tool(ui, "pause").on_hover_text("Space. While paused, drag to move back through the last 10 minutes; the wheel zooms time.").clicked();
+                    }
+                    cursors = ui.add(egui::Button::new(cursors_text).selected(cursors_on).min_size(egui::vec2(0.0, theme::TOOL_H))).on_hover_text("Click a chart to place cursor A, right-click for cursor B: each channel's row reads them").clicked();
+                    if cursors_on && placed {
+                        clear_cursors = theme::tool(ui, "clear cursors").clicked();
+                    }
+                    marker = theme::split(
+                        ui,
+                        "Marker label",
+                        |ui| theme::tool(ui, "marker").on_hover_text("M: mark this moment on the charts and in any running recording"),
+                        |ui| {
+                            ui.label(theme::b("the next marker's label"));
+                            fields::line(ui, &mut label, "Marker label", |t| t.hint_text(format!("M{}", markers + 1)).desired_width(220.0));
+                            if markers > 0 && ui.button("clear the markers").clicked() {
+                                clear_markers = true;
+                            }
+                        },
+                    )
+                    .clicked();
+                },
+                |ui| {
+                    xy = ui.add(egui::Button::new("xy plot").selected(xy_open).min_size(egui::vec2(0.0, theme::TOOL_H))).on_hover_text(XY_HOVER).clicked();
+                    png = theme::tool(ui, "save png").on_hover_text("Save a picture of the charts as drawn to the recordings folder").clicked();
+                    csv = theme::tool(ui, "save csv").on_hover_text("Save every channel's samples in view, as they came (never smoothed), to a CSV file in the recordings folder").clicked();
+                },
+            );
+        });
+        self.marker_text = label;
+        if let Some(s) = window {
+            self.window_s = s;
+            self.mark_settings_dirty();
+            // Paused, the charts keep the person's view; a length chosen now is shown at
+            // once, ending where the view ends (the charts did not change on the cell,
+            // and the person looked for the change).
+            if self.paused_at.is_some() {
+                if let Some((_, end)) = self.view_ms {
+                    self.paused_at = Some(end - 1);
+                }
+                self.pause_fresh = true;
+            }
+        }
+        if pause {
+            self.toggle_pause();
+        }
+        if cursors {
+            self.cursors_on = !self.cursors_on;
+        }
+        if clear_cursors {
+            self.cursor_a = None;
+            self.cursor_b = None;
+        }
+        if marker {
+            self.add_marker();
+        }
+        if clear_markers {
+            self.markers.clear();
+        }
+        if xy {
+            self.toggle_xy();
+        }
+        if png {
+            self.request_png(crate::export::Picture::Charts);
+        }
+        if csv {
+            self.export_live_csv();
+        }
+    }
+}
+
+/// What a chart's title row asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitleAct {
+    None,
+    ZoomIn,
+    ZoomOut,
+    ResetScale,
+    Expand,
+    Collapse,
+}
+
+/// A chart's title row: its channels' colours and name, its unit, what is done to it
+/// (smoothed, zoomed, frozen), the newest marker in view, and, while the pointer is
+/// over the chart, small buttons at its right (G48).
+fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bool, hovered: bool, marker: Option<&str>) -> TitleAct {
+    let p = theme::pal(ui);
+    let Some(first) = members.first() else { return TitleAct::None };
+    let mut act = TitleAct::None;
+    let smooth: Vec<u32> = members.iter().map(|m| m.smooth_ms).filter(|&s| s > 0).collect();
+    let smoothed = smooth.first().map(|&s| {
+        if smooth.iter().all(|&x| x == s) && smooth.len() == members.len() { format!("smoothed {}", SMOOTHING.iter().find(|(ms, _)| *ms == s).map_or_else(|| format!("{s} ms"), |(_, t)| t.to_string())) } else { "partly smoothed".into() }
+    });
+    // The buttons and the marker at the right first: the title truncates before them.
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let size = egui::vec2(32.0, 28.0);
+        if hovered || zoomed || expanded {
+            ui.scope(|ui| {
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = p.chip;
+                if expanded {
+                    if theme::icon_button(ui, theme::Icon::Collapse, "Back to all the charts", size).clicked() {
+                        act = TitleAct::Collapse;
+                    }
+                } else if theme::icon_button(ui, theme::Icon::Expand, "Fill the middle with this chart", size).clicked() {
+                    act = TitleAct::Expand;
+                }
+                if theme::icon_button(ui, theme::Icon::Plus, "Zoom in the vertical scale", size).clicked() {
+                    act = TitleAct::ZoomIn;
+                }
+                if theme::icon_button(ui, theme::Icon::Minus, "Zoom out the vertical scale", size).clicked() {
+                    act = TitleAct::ZoomOut;
+                }
+                if zoomed && ui.add(egui::Button::new(theme::b("reset scale").size(15.0)).min_size(egui::vec2(0.0, 28.0))).clicked() {
+                    act = TitleAct::ResetScale;
+                }
+            });
+        }
+        if let Some(m) = marker {
+            ui.add_space(4.0);
+            ui.label(theme::b(m).color(p.hold)).on_hover_text("The newest marker in view");
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for m in members.iter().take(6) {
+                theme::square(ui, m.color, 12.0);
+            }
+            // Room kept for the unit and the tags after the title.
+            let tag_w = |t: &str| egui::WidgetText::from(theme::b(t).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small).size().x + 20.0;
+            let mut reserve = egui::WidgetText::from(first.lane.1.as_str()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x + 8.0;
+            reserve += smoothed.as_deref().map_or(0.0, tag_w) + if zoomed { tag_w("scale zoomed") } else { 0.0 } + if members.iter().any(|m| m.frozen) { tag_w("FROZEN") } else { 0.0 };
+            let title = if members.len() == 1 { first.name.clone() } else { format!("{} (+{} overlaid)", first.name, members.len() - 1) };
+            let room = (ui.available_width() - reserve).max(60.0);
+            ui.allocate_ui_with_layout(egui::vec2(room, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(theme::b(title)).truncate());
+            });
+            ui.label(RichText::new(&first.lane.1).color(p.ink3));
+            if let Some(text) = &smoothed {
+                theme::badge(ui, text, p.ink2, "Smoothed on the screen only (the channel's options). Recordings and saved files keep every sample.");
+            }
+            if zoomed {
+                theme::badge(ui, "scale zoomed", p.hold, "Ctrl + wheel or the buttons set this scale; 'reset scale' or a double-click gives the chart's own back.");
+            }
+            if members.iter().any(|m| m.frozen) {
+                theme::badge(ui, "FROZEN", p.hold, "Holds the last RAPID path position; does not move while EGM drives the robot.");
+            }
+        });
+    });
+    act
 }
 
 /// The vertical range for data spanning `lo..hi`: an 8% margin; for a constant (or
@@ -542,6 +1002,22 @@ pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
         return (c - half, c + half);
     }
     (lo - span * 0.08, hi + span * 0.08)
+}
+
+/// `v` rounded outward (up, or down) to two significant figures: a fixed scale's
+/// starting ends, from the range a chart showed ("-237.9 to 237.98" becomes "-240 to
+/// 240").
+pub fn nice(v: f64, up: bool) -> f64 {
+    if !v.is_finite() || v == 0.0 {
+        return if v.is_finite() { 0.0 } else { v };
+    }
+    let exp = v.abs().log10().floor() as i32;
+    let step = 10f64.powi(exp - 1);
+    let k = v / step;
+    let r = if up { k.ceil() } else { k.floor() } * step;
+    // Through its decimal digits: not "0.013000000000000001".
+    let digits = (1 - exp).max(0) as usize;
+    format!("{r:.digits$}").parse().unwrap_or(r)
 }
 
 /// The smallest vertical span a chart autoscales to, per display unit: small enough
@@ -634,6 +1110,116 @@ mod tests {
         let near = HoverPosition::NearDataPoint { plot_name: "4002 · Torque", position: egui_plot::PlotPoint::new(3.95, 1.0), index: 0 };
         let text = hover_label(&near, &tl, "Nm", &marks, 0.1).unwrap();
         assert!(text.starts_with("controller: 10010") && text.contains("\n4002 · Torque\n"), "{text}");
+    }
+
+    /// A ring of samples every 4 ms from `t0`, as a VC sends them.
+    fn ring(t0: i64, values: &[f64]) -> Ring {
+        let mut r = Ring::new(4.0);
+        for (i, &v) in values.iter().enumerate() {
+            r.push(t0 + i as i64 * 4, v);
+        }
+        r
+    }
+
+    /// Every point a trace draws, in order: (t, first) and (t, last) of each column.
+    fn points(segs: &[Vec<Column>]) -> Vec<(i64, f64)> {
+        segs.iter().flatten().flat_map(|c| [(c.t, c.first_v), (c.t, c.last_v)]).collect()
+    }
+
+    #[test]
+    fn smoothing_is_a_trailing_mean_that_never_reaches_across_a_gap() {
+        // 0 and 10 in turn, every 4 ms: 100 ms of it averages to 5.
+        let swing: Vec<f64> = (0..200).map(|i| if i % 2 == 0 { 0.0 } else { 10.0 }).collect();
+        let r = ring(0, &swing);
+        let segs = smoothed(&r, 200, 800, 10_000, 100, |_, v| v);
+        let pts = points(&segs);
+        assert!(!pts.is_empty());
+        assert!(pts.iter().all(|&(_, v)| (v - 5.0).abs() <= 0.21), "the swing is not smoothed: {:?}", &pts[..4]);
+        // Trailing: from 100 ms after a step from 0 to 10, a 100 ms mean has forgotten the
+        // 0s (the stretch drawn starts before the step, so its first means hold them).
+        let mut step = vec![0.0; 250];
+        step.extend(vec![10.0; 100]);
+        let r2 = ring(0, &step);
+        let pts = points(&smoothed(&r2, 900, 1400, 10_000, 100, |_, v| v));
+        assert!(pts.iter().any(|&(t, v)| t < 1000 && v == 0.0), "before the step: {:?}", &pts[..2]);
+        let late: Vec<&(i64, f64)> = pts.iter().filter(|&&(t, _)| t >= 1100).collect();
+        assert!(!late.is_empty() && late.iter().all(|&&(_, v)| v == 10.0), "the mean still holds samples from before its window: {:?}", &late[..late.len().min(3)]);
+        // Off, a trace keeps the raw swing (the samples themselves are never changed).
+        let raw = points(&r.decimate_at(200, 800, 10_000, |_, v| v));
+        assert!(raw.iter().any(|&(_, v)| v == 0.0) && raw.iter().any(|&(_, v)| v == 10.0));
+        // A gap of a second: two segments, the second starting afresh from its own
+        // first sample rather than averaging in the samples before the gap.
+        let mut r = ring(0, &[0.0; 50]);
+        for i in 0..50 {
+            r.push(1200 + i * 4, 10.0);
+        }
+        let segs = smoothed(&r, 0, 1400, 10_000, 500, |_, v| v);
+        assert_eq!(segs.len(), 2, "averaged across the gap");
+        assert_eq!(segs[1][0].first_v, 10.0, "the first sample after the gap carries the one before it");
+        // The transform sees every sample from a window before the stretch, in order.
+        let mut seen = Vec::new();
+        let r = ring(0, &swing);
+        let _ = smoothed(&r, 400, 600, 100, 100, |t, v| {
+            seen.push(t);
+            v
+        });
+        assert!(seen.first().is_some_and(|&t| t <= 300) && seen.windows(2).all(|w| w[0] < w[1]), "{:?}", &seen[..3]);
+    }
+
+    #[test]
+    fn a_scale_is_fit_with_a_floor_fixed_or_around_zero() {
+        // Fit: what is in view with its margin, never tighter than the floor, the unit's own
+        // unless one was chosen.
+        assert_eq!(Scale::default().range(10.0, 20.0, 1.0), (9.2, 20.8));
+        let (a, b) = Scale::Fit { floor: None }.range(45.0 - 0.0001, 45.0 + 0.0001, 0.01);
+        assert!(b - a >= 0.01, "the unit's floor: {}", b - a);
+        let (a, b) = Scale::Fit { floor: Some(4.0) }.range(45.0 - 0.0001, 45.0 + 0.0001, 0.01);
+        assert!(b - a >= 4.0 && a < 45.0 && b > 45.0, "a chosen floor: {a} to {b}");
+        assert_eq!(Scale::Fit { floor: None }.range(f64::INFINITY, f64::NEG_INFINITY, 1.0), (-1.0, 1.0), "nothing in view");
+        // Fixed and around zero ignore the data.
+        assert_eq!(Scale::Fixed { lo: -240.0, hi: 240.0 }.range(0.0, 1000.0, 1.0), (-240.0, 240.0));
+        assert_eq!(Scale::Centred { half: 50.0 }.range(10.0, 20.0, 1.0), (-50.0, 50.0));
+        // What a hand edit can spoil.
+        assert!(Scale::Fixed { lo: 1.0, hi: 2.0 }.is_valid() && Scale::Centred { half: 0.5 }.is_valid() && Scale::Fit { floor: Some(0.0) }.is_valid());
+        for bad in [Scale::Fixed { lo: 2.0, hi: 2.0 }, Scale::Fixed { lo: 3.0, hi: 2.0 }, Scale::Fixed { lo: f64::NAN, hi: 2.0 }, Scale::Centred { half: 0.0 }, Scale::Centred { half: f64::INFINITY }, Scale::Fit { floor: Some(-1.0) }] {
+            assert!(!bad.is_valid(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_time_axis_ticks_back_from_now_and_on_whole_seconds_paused() {
+        // A 10 s window 650 px wide: egui_plot's base step spans its grid's 8 px.
+        let input = |lo: f64, hi: f64| egui_plot::GridInput { bounds: (lo, hi), base_step_size: (hi - lo) / 650.0 * f64::from(GRID_PX) };
+        let px = |step: f64| step * 650.0 / 10.0;
+        let marks = time_marks(input(100.37, 110.37), 110.37);
+        let labelled: Vec<f64> = marks.iter().filter(|m| px(m.step_size) >= TIME_LABEL_PX).map(|m| m.value).collect();
+        assert!(labelled.len() >= 4, "{labelled:?}");
+        // Whole steps back from the live edge: "now", "-2 s", ...
+        let step = marks.iter().map(|m| m.step_size).fold(0.0, f64::max);
+        assert!(labelled.iter().all(|v| ((110.37 - v) / step).fract().abs() < 1e-9 || ((110.37 - v) / step).fract().abs() > 1.0 - 1e-9), "{labelled:?} by {step}");
+        assert!(labelled.iter().any(|v| (v - 110.37).abs() < 1e-9), "the live edge has its tick");
+        let tl = Timeline::default();
+        let now = egui_plot::GridMark { value: 110.37, step_size: step };
+        assert_eq!(time_label(now, Some(110.37), &tl), "now");
+        assert_eq!(time_label(egui_plot::GridMark { value: 110.37 - 2.0 * step, step_size: step }, Some(110.37), &tl), format!("-{} s", view::fmt_short(2.0 * step)));
+        // Finer ticks between, one mark to a place, the coarser kept.
+        assert!(marks.windows(2).all(|w| w[1].value - w[0].value > 1e-6), "two marks in one place");
+        assert!(marks.iter().any(|m| m.step_size < step), "no finer grid");
+        // Paused, anchored on a whole second: every labelled tick on one.
+        let marks = time_marks(input(100.37, 110.37), 100.0);
+        assert!(marks.iter().filter(|m| px(m.step_size) >= TIME_LABEL_PX).all(|m| (m.value - m.value.round()).abs() < 1e-9), "{marks:?}");
+        // Nothing to tick: nothing.
+        assert!(time_marks(input(5.0, 5.0), 5.0).is_empty());
+    }
+
+    #[test]
+    fn a_fixed_scale_starts_from_round_ends_outside_what_was_shown() {
+        assert_eq!((nice(-237.9, false), nice(237.98, true)), (-240.0, 240.0));
+        assert_eq!((nice(346.57, false), nice(357.3, true)), (340.0, 360.0));
+        assert_eq!((nice(0.0123, false), nice(0.0123, true)), (0.012, 0.013));
+        assert_eq!(nice(500.0, true), 500.0, "already round");
+        assert_eq!(nice(0.0, true), 0.0);
+        assert!(nice(f64::NAN, true).is_nan());
     }
 
     #[test]

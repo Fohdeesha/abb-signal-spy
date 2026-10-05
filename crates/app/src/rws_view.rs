@@ -112,11 +112,12 @@ impl ControllerEvent {
         let wall = UNIX_EPOCH.checked_add(Duration::from_millis(u64::try_from(self.utc_ms).ok()?))?;
         Some(EventEntry { utc: spy_core::util::wall_iso(wall), kind: "controller-event".into(), text: format!("{} ({})", self.text(), rws::severity_word(self.severity)), controller_ms: None })
     }
-    pub fn color(&self) -> egui::Color32 {
+    /// Its line's colour on a chart: red for an error, amber for a warning.
+    pub fn color(&self, p: &theme::Pal) -> egui::Color32 {
         match self.severity {
-            3 => theme::BAD,
-            2 => theme::WARN,
-            _ => theme::IDLE,
+            3 => p.red,
+            2 => p.hold,
+            _ => p.ink2,
         }
     }
 }
@@ -506,27 +507,27 @@ impl SpyApp {
             match &self.rws {
                 None => {
                     let Some(target) = st.target.clone().filter(|_| st.phase.is_connected()) else {
-                        ui.colored_label(theme::WARN, "Connect to the controller first: RWS is checked against it.");
+                        ui.colored_label(theme::pal(ui).hold, "Connect to the controller first: RWS is checked against it.");
                         return;
                     };
                     egui::Grid::new("rws-login").num_columns(2).show(ui, |ui| {
-                        ui.label("Controller");
+                        ui.label("controller");
                         ui.label(RichText::new(&target.host).monospace());
                         ui.end_row();
                         ui.label("RWS port");
                         ui.add(egui::DragValue::new(&mut self.settings.rws_port).range(1..=65535)).on_hover_text("80 on a real IRC5; a virtual controller's may differ");
                         ui.end_row();
-                        ui.label("User");
+                        ui.label("user");
                         fields::line(ui, &mut self.rws_form.user, "RWS user", |t| t);
                         ui.end_row();
-                        ui.label("Password");
+                        ui.label("password");
                         let r = fields::line(ui, &mut self.rws_form.password, "RWS password", |t| t.password(true));
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             login = true;
                         }
                         ui.end_row();
                     });
-                    if ui.button(RichText::new("Log in").strong()).clicked() {
+                    if ui.button(RichText::new("log in").strong()).clicked() {
                         login = true;
                     }
                 }
@@ -535,35 +536,35 @@ impl SpyApp {
                         if !st.phase.is_connected() {
                             // The link stays through a reconnect to the same address;
                             // every login checks it is still the same controller.
-                            ui.colored_label(theme::WARN, "InfoStream is reconnecting. RWS carries on with the same controller (checked by its system id at every login).");
+                            ui.colored_label(theme::pal(ui).hold, "InfoStream is reconnecting. RWS carries on with the same controller (checked by its system id at every login).");
                         }
                         egui::Grid::new("rws-info").num_columns(2).show(ui, |ui| {
-                            ui.label("Controller");
+                            ui.label("controller");
                             ui.label(l.identity.as_ref().map_or_else(|| "(this RobotWare does not give its name)".to_string(), |i| format!("{} ({})", i.name, i.kind)));
                             ui.end_row();
-                            ui.label("Robot system");
+                            ui.label("robot system");
                             ui.label(&s.name);
                             ui.end_row();
                             ui.label("RobotWare");
                             ui.label(&s.rw_version);
                             ui.end_row();
-                            ui.label("System id");
+                            ui.label("system id");
                             ui.label(RichText::new(format!("{} (the same as InfoStream's)", s.system_id)).small());
                             ui.end_row();
-                            ui.label("Its clock");
+                            ui.label("its clock");
                             ui.label(format!("{} from UTC (its local time; event times shown to the second)", offset_text(l.offset_ms)));
                             ui.end_row();
                         });
                         let mut on = self.settings.rws_events;
-                        if ui.checkbox(&mut on, "Event log on the charts and in recordings (a look every 5 s)").changed() {
+                        if ui.checkbox(&mut on, "event log on the charts and in recordings (a look every 5 s)").changed() {
                             self.settings.rws_events = on;
                             l.events_on.store(on, Ordering::SeqCst);
                             dirty = true;
                         }
                         if let Some(t) = &l.trouble {
-                            ui.colored_label(theme::WARN, format!("Last look failed: {t}"));
+                            ui.colored_label(theme::pal(ui).hold, format!("Last look failed: {t}"));
                         }
-                        if ui.button("Log out").clicked() {
+                        if ui.button("log out").clicked() {
                             logout = true;
                         }
                     }

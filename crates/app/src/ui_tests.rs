@@ -66,7 +66,7 @@ fn phase(a: &SpyApp) -> Phase {
 fn connect(h: &mut Harness<'static, SpyApp>, fake: &FakeController) {
     h.state_mut().host_input = "127.0.0.1".into();
     h.state_mut().port_input = fake.port().to_string();
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
 }
 
 /// Add a signal through the add-channel dialog, as a person would.
@@ -77,6 +77,62 @@ fn add_via_dialog(h: &mut Harness<'static, SpyApp>, signal: u32, button: &str) {
     let _ = h.run_ok();
 }
 
+/// A node's name for assistive tools.
+fn name_of(n: &egui_kittest::kittest::AccessKitNode<'_>) -> String {
+    n.label().unwrap_or_default()
+}
+
+/// An entry of the menu bar's `menu`, picked as a person picks it. A menu a check box
+/// left open is closed as the next click elsewhere would.
+fn menu(h: &mut Harness<'static, SpyApp>, menu: &str, entry: &str) {
+    // The menu comes first where its word is also a label ("controller").
+    h.get_all_by_label(menu).next().unwrap_or_else(|| panic!("no menu {menu}")).click();
+    let _ = h.run_ok();
+    h.get_by_label(entry).click();
+    let _ = h.run_ok();
+    h.key_press(egui::Key::Escape);
+    let _ = h.run_ok();
+}
+
+/// A button scrolled into view first, as a person scrolls to it: a channel's row can
+/// sit below the list's fold.
+fn press(h: &mut Harness<'static, SpyApp>, label: &str) {
+    h.get_by_label(label).scroll_to_me();
+    let _ = h.run_ok();
+    h.get_by_label(label).click();
+}
+
+/// The record button while recording: "stop" and the time.
+fn stop_recording(h: &Harness<'static, SpyApp>) {
+    h.get_by(|n| {
+        let l = name_of(n);
+        l.starts_with("stop ") && !l.contains("slow log")
+    })
+    .click();
+}
+
+/// The channels' rows, in order (each opens its options).
+fn rows<'a>(h: &'a Harness<'static, SpyApp>) -> Vec<egui_kittest::Node<'a>> {
+    h.query_all_by(|n| name_of(n).starts_with("Options for ")).collect()
+}
+
+/// A channel's options (its row clicked), one of them pressed, and back to the list.
+fn options(h: &mut Harness<'static, SpyApp>, row: usize, entry: &str) {
+    // Scrolled to first: a row can be out of sight in a long list.
+    rows(h).into_iter().nth(row).unwrap_or_else(|| panic!("no row {row}")).scroll_to_me();
+    let _ = h.run_ok();
+    rows(h).into_iter().nth(row).unwrap_or_else(|| panic!("no row {row}")).click();
+    let _ = h.run_ok();
+    h.get_by_label(entry).scroll_to_me();
+    let _ = h.run_ok();
+    h.get_by_label(entry).click();
+    let _ = h.run_ok();
+    if h.state().options_for.is_some() {
+        h.get_by_label("all channels").click();
+        let _ = h.run_ok();
+    }
+}
+
 #[test]
 fn connect_add_a_channel_and_read_it_live() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
@@ -85,21 +141,21 @@ fn connect_add_a_channel_and_read_it_live() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
 
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert_eq!(h.state().chans.len(), 1);
     assert!(h.state().add.is_none(), "the dialog closes after adding");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     // The card says LIVE and shows the value (the fake's 4002 on ROB_1 axis 1 is 101).
-    assert!(h.query_by_label("LIVE").is_some());
+    assert!(h.query_by_label("live").is_some());
     assert!(h.query_by_label("101.000").is_some(), "the 150 ms mean is shown");
 
     // A second add of the same channel is refused, not duplicated.
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert_eq!(h.state().chans.len(), 1);
 
     // "All six axes" adds six channels overlaid in one chart.
     h.state_mut().add = None;
-    add_via_dialog(&mut h, 4000, "Add all six axes");
+    add_via_dialog(&mut h, 4000, "add all six axes");
     assert_eq!(h.state().chans.len(), 7);
     let lanes: std::collections::BTreeSet<u32> = h.state().chans[1..].iter().map(|c| c.lane).collect();
     assert_eq!(lanes.len(), 1, "the six share one chart");
@@ -110,7 +166,7 @@ fn connect_add_a_channel_and_read_it_live() {
     h.state_mut().open_add(4003);
     let _ = h.run_ok();
     assert!(h.query_by_label_contains("5 of 12 channels free").is_some());
-    h.get_by_label("Add all six axes").click();
+    h.get_by_label("add all six axes").click();
     let _ = h.run_ok();
     assert_eq!(h.state().chans.len(), 7, "six more would make 13");
     h.state_mut().add = None;
@@ -132,7 +188,7 @@ fn a_starved_session_says_what_to_do_where_it_is_seen() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 8000, |a| a.session.status().advice.is_some()), "{:?}", phase(h.state()));
     let _ = h.run_ok();
     assert!(h.query_all_by_label_contains("Disconnect and Connect again").next().is_some(), "the advice is not on screen");
@@ -150,20 +206,20 @@ fn the_other_clients_question_is_asked_and_answered() {
     assert!(h.query_by_label("Other programs are connected to this controller").is_some());
     // Named in the question, and in the session line behind it.
     assert!(h.query_all_by_label_contains("192.0.2.27").count() >= 2, "the other client is named");
-    h.get_by_label("Cancel").click();
+    h.get_by_label("cancel").click();
     assert!(wait(&mut h, 3000, |a| matches!(phase(a), Phase::Stopped { .. })));
     assert!(fake.seen().is_empty(), "declining sends nothing");
 
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::AwaitingApproval));
-    h.get_by_label("Take InfoStream").click();
+    h.get_by_label("take InfoStream").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
 }
 
 #[test]
 fn a_real_controllers_flexpendant_alone_asks_nothing() {
-    // Every real IRC5 lists its FlexPendant on its internal network: named, not asked
-    // about (decided 2026-09-26).
+    // Every real IRC5 lists its FlexPendant on its internal network: not asked about
+    // (decided 2026-09-26), and never mentioned, since it is always there (G48).
     let b = Behaviour { extra_clients: vec!["192.168.126.10".into()], ..Behaviour::default() };
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("pendant");
@@ -171,7 +227,15 @@ fn a_real_controllers_flexpendant_alone_asks_nothing() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
     assert!(h.query_by_label("Other programs are connected to this controller").is_none());
-    assert!(h.query_all_by_label_contains("192.168.126.10 [FlexPendant]").count() >= 1, "the pendant is named as such");
+    let _ = h.run_ok();
+    assert_eq!(h.query_all_by_label_contains("192.168.126.10").count(), 0, "the pendant is named");
+    assert_eq!(h.query_all_by_label_contains("FlexPendant").count(), 0, "the pendant is mentioned");
+    assert!(h.query_by_label("none").is_some(), "other programs: none");
+    // Nor in the connection details, bar the client list exactly as the controller sent it.
+    h.state_mut().show_diag = true;
+    let _ = h.run_ok();
+    assert_eq!(h.query_all_by_label_contains("FlexPendant").count(), 0, "the pendant is mentioned in the details");
+    assert_eq!(h.query_all_by_label("none").count(), 2, "other programs: none, in the strip and the details");
 }
 
 #[test]
@@ -181,22 +245,22 @@ fn record_save_last_and_slow_log_write_their_folders() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
 
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     std::thread::sleep(Duration::from_millis(800));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
 
-    h.get_by_label("Slow log").click();
+    h.get_by_label("slow log").click();
     assert!(wait(&mut h, 2000, |a| a.slow.is_some()));
     std::thread::sleep(Duration::from_millis(1500));
-    h.get_by_label_contains("■ Slow log").click();
+    h.get_by_label_contains("stop slow log").click();
     assert!(wait(&mut h, 3000, |a| a.slow.is_none()));
 
-    h.get_by_label("Save last").click();
+    h.get_by_label_contains("save last").click();
     assert!(wait(&mut h, 5000, |a| a.snapshot_job.is_none() && a.last_folder.is_some()));
 
     let rec = dir.join("recordings");
@@ -232,14 +296,14 @@ fn pause_cursors_and_markers() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4000, "Add");
+    add_via_dialog(&mut h, 4000, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
 
     h.key_press(egui::Key::Space);
     let _ = h.run_ok();
     assert!(h.state().paused_at.is_some(), "Space pauses");
-    assert!(h.query_by_label_contains("PAUSED").is_some());
-    h.get_by_label("▶ Live").click();
+    assert!(h.query_by_label("paused").is_some());
+    h.get_by_label("back to live").click();
     let _ = h.run_ok();
     assert!(h.state().paused_at.is_none());
 
@@ -247,17 +311,27 @@ fn pause_cursors_and_markers() {
     let _ = h.run_ok();
     assert_eq!(h.state().markers.len(), 1, "M drops a marker");
 
-    h.get_by_label("Cursors").click();
+    h.get_by_label("cursors").click();
     let _ = h.run_ok();
     h.state_mut().cursor_a = Some(0.1);
     h.state_mut().cursor_b = Some(0.3);
     let _ = h.run_ok();
-    assert!(h.query_by_label("B − A").is_some(), "the cursor table shows");
-    assert!(h.query_by_label_contains("Δt 0.200 s").is_some());
-    // A marker and the cursors are lines on the chart, not entries in its legend (on
-    // the cell, a review's events covered half of every chart that way).
+    assert!(h.query_all_by_label("B − A").count() == 1, "the row reads the cursors");
+    assert!(h.query_by_label_contains("A and B 0.200 s apart").is_some(), "how far apart they are");
+    // A marker and the cursors are lines on the chart, not entries in a legend (on the
+    // cell, a review's events covered half of every chart that way); a chart of one
+    // channel is named by its title, and has no legend.
+    assert!(legend(&h).is_empty(), "{:?}", legend(&h));
+    assert!(h.query_all_by_label_contains("4000 · Position").next().is_some(), "the chart's title");
+    // Two in one chart have a legend: of the two channels, and nothing else.
+    let j2 = spy_core::store::ChannelKey { signal: 4000, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(2).unwrap() };
+    assert!(h.state_mut().add_channels(vec![j2], false));
+    let lane = h.state().chans[0].lane;
+    h.state_mut().chans[1].lane = lane;
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 20)));
+    let _ = h.run_ok();
     let entries = legend(&h);
-    assert!(entries.iter().any(|l| l.contains("Position")), "the channel's own entry: {entries:?}");
+    assert_eq!(entries.iter().filter(|l| l.starts_with("4000 · ")).count(), 2, "{entries:?}");
     assert!(!entries.iter().any(|l| l.contains("marker") || l.contains("cursor")), "{entries:?}");
     // Their text is on the hover instead: over the marker's line (paused, so that the
     // chart holds still under the pointer), it is named.
@@ -283,7 +357,7 @@ fn a_still_resolvers_dither_does_not_fill_its_chart_live_or_reviewed() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 100)));
     let _ = h.run_ok();
     let span = |h: &Harness<'static, SpyApp>| {
@@ -291,10 +365,10 @@ fn a_still_resolvers_dither_does_not_fill_its_chart_live_or_reviewed() {
         b.max()[1] - b.min()[1]
     };
     assert!(span(&h) >= 0.05, "live: a chart {} deg high for 0.022 deg of dither", span(&h));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     std::thread::sleep(Duration::from_millis(600));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     h.state_mut().open_recording(folder);
@@ -313,12 +387,12 @@ fn the_xy_windows_save_png_with_nothing_plotted_says_so() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4001, "Add");
+    add_via_dialog(&mut h, 4001, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
-    h.get_by_label("XY").click();
+    h.get_by_label("xy plot").click();
     let _ = h.run_ok();
     assert!(h.query_all_by_label_contains("Chart at least two channels").next().is_some());
-    h.get_all_by_label("Save PNG").last().unwrap().click();
+    h.get_all_by_label("save png").last().unwrap().click();
     let _ = h.run_ok();
     let said: Vec<&String> = h.state().toasts.iter().map(|t| &t.text).collect();
     assert!(said.iter().any(|t| t.contains("Nothing is plotted")) && !said.iter().any(|t| t.contains("not open")), "{said:?}");
@@ -333,17 +407,17 @@ fn a_window_length_chosen_while_paused_is_shown() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4000, "Add");
+    add_via_dialog(&mut h, 4000, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
     h.key_press(egui::Key::Space);
     let _ = h.run_ok();
     let _ = h.run_ok();
     let (a0, b0) = h.state().view_ms.unwrap();
     assert!((b0 - a0 - 10_000).abs() < 50, "paused on the 10 s window: {a0} to {b0}");
-    // Chosen through the Window list: 30 s, ending where the view ended.
-    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("10 s")).click();
+    // Chosen through the window's list: 30 s, ending where the view ended.
+    h.get_by_label("10 s").click();
     let _ = h.run_ok();
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "30 s").click();
+    h.get_by_label("30 s").click();
     let _ = h.run_ok();
     let _ = h.run_ok();
     assert_eq!(h.state().window_s, 30.0);
@@ -363,9 +437,9 @@ fn a_window_length_chosen_while_paused_is_shown() {
     let _ = h.run_ok();
     let (_, b2) = h.state().view_ms.unwrap();
     assert!(b2 < b1 - 2000, "the drag did not scroll back: {b2} against {b1}");
-    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("30 s")).click();
+    h.get_by_label("30 s").click();
     let _ = h.run_ok();
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "1 min").click();
+    h.get_by_label("1 min").click();
     let _ = h.run_ok();
     let _ = h.run_ok();
     let (a3, b3) = h.state().view_ms.unwrap();
@@ -380,9 +454,9 @@ fn the_phone_view_serves_what_the_window_shows() {
     h.state_mut().settings.phone_port = 0; // any free port
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5027, "Add");
+    add_via_dialog(&mut h, 5027, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
-    h.get_by_label("Phone view").click();
+    menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_some()));
     let port = h.state().phone.as_ref().unwrap().port();
     std::thread::sleep(Duration::from_millis(300));
@@ -396,7 +470,7 @@ fn the_phone_view_serves_what_the_window_shows() {
         out
     };
     assert!(body.contains("DC-link voltage") && body.contains("356.700") && body.contains("\"stale\":false"), "{body}");
-    h.get_by_label("Phone view").click();
+    menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_none()));
 }
 
@@ -407,14 +481,15 @@ fn reset_infostream_asks_first() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    // "Controller" is both the menu and the label on the address bar; the menu comes first.
-    h.get_all_by_label("Controller").next().unwrap().click();
+    // "controller" is the menu, the address bar's label and a strip's cell; the menu
+    // comes first.
+    h.get_all_by_label("controller").next().unwrap().click();
     let _ = h.run_ok();
-    h.get_by_label("Reset InfoStream...").click();
+    h.get_by_label("reset InfoStream...").click();
     let _ = h.run_ok();
     assert!(h.query_by_label("Reset InfoStream?").is_some(), "it asks");
     assert!(!fake.seen_props().iter().any(|p| p == "StreamUndefineAll"), "nothing sent before the answer");
-    h.get_by_label("Reset InfoStream").click();
+    h.get_by_label("reset InfoStream").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 2000, |_| fake.seen_props().iter().any(|p| p == "StreamUndefineAll")));
 }
@@ -427,18 +502,18 @@ fn connecting_to_another_controller_finishes_the_recording() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &first);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     h.key_press(egui::Key::M);
     let _ = h.run_ok();
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
     assert!(h.state().recorder.is_some(), "a disconnect alone does not end the recording");
 
     h.state_mut().port_input = second.port().to_string();
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     let _ = h.run_ok();
     assert!(h.state().recorder.is_none(), "another controller must not continue the same recording");
     assert!(h.state().markers.is_empty(), "markers on the old clock are dropped");
@@ -463,9 +538,9 @@ fn a_restarted_virtual_controller_is_followed_and_the_recording_carries_on() {
     let mut h = harness_with(&dir, Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
     connect(&mut h, &old);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     let old_port = old.port();
     h.state_mut().settings.controllers.push(crate::settings::SavedController { name: "RobotStudio".into(), host: "127.0.0.1".into(), port: old_port });
@@ -486,9 +561,9 @@ fn a_restarted_virtual_controller_is_followed_and_the_recording_carries_on() {
     assert_eq!(a.toasts.iter().filter(|t| t.text.contains(&format!("on port {}", new.port()))).count(), 1, "the person is told, once");
 
     // Connect again as it stands: the same controller, so nothing is finished.
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     assert!(h.state().recorder.is_some(), "the address followed, so Connect is not to another controller");
     let dir_rec = h.state_mut().recorder.take().unwrap().stop().dir;
@@ -511,13 +586,13 @@ fn statistics_since_reset_start_afresh_on_another_controller() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &first);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.chans[0].stats.n > 50));
     assert_eq!(h.state().chans[0].stats.max, 101.0);
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
     h.state_mut().port_input = second.port().to_string();
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| a.chans[0].stats.n > 50 && a.chans[0].stats.max == 555.0), "stats: {:?}", h.state().chans[0].stats);
     assert_eq!(h.state().chans[0].stats.min, 555.0, "nothing of the first controller's left in them");
 }
@@ -531,14 +606,14 @@ fn a_recording_closes_itself_on_a_different_controller_behind_the_address() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
     fake.with(|b| b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| a.recorder.is_none()), "the recording carried on");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("Recording closed") && t.text.contains("different one")), "the person is told");
     let rec = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
@@ -553,11 +628,11 @@ fn connect_works_again_after_the_worker_hit_an_internal_error() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     h.state().session.crash_for_test();
     assert!(wait(&mut h, 5000, |a| matches!(phase(a), Phase::Stopped { .. })), "{:?}", phase(h.state()));
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming && a.session.status().channels.first().is_some_and(|c| c.samples > 20)), "Connect did nothing after the internal error: {:?}", phase(h.state()));
 }
 
@@ -581,33 +656,33 @@ fn a_recording_opens_for_review_and_is_never_shown_as_live() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     std::thread::sleep(Duration::from_millis(800));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
 
     // File, Open a recording: the recordings folder's recordings are listed.
     h.state_mut().show_recordings = true;
     let _ = h.run_ok();
     assert!(h.query_by_label("every sample").is_some(), "the recording is listed");
-    h.get_all_by_label("Open").next().expect("an Open button per recording").click();
+    h.get_all_by_label("open").next().expect("an open button per recording").click();
     assert!(wait(&mut h, 5000, |a| a.review.is_some()), "the recording did not open");
     let _ = h.run_ok();
     assert!(h.query_by_label("REVIEWING").is_some(), "the banner says what is shown");
-    assert!(h.query_all_by_label_contains("Not live.").next().is_some());
-    assert!(h.query_by_label("LIVE").is_none(), "no status word of the live cards while reviewing");
+    assert!(h.query_by_label("not live").is_some());
+    assert!(h.query_by_label("live").is_none(), "no status word of the live cards while reviewing");
     let r = h.state().review.as_ref().unwrap().review.clone();
     assert!(r.wall_clock && r.channel("4002/ROB_1/J1").is_some_and(|c| c.v.len() > 100 && c.v.iter().all(|&v| v == 101.0)));
     assert!(h.query_all_by_label_contains("samples in view").next().is_some(), "statistics of the stretch in view");
     assert_eq!(phase(h.state()), Phase::Streaming, "the live session carries on underneath");
 
-    h.get_by_label("Close the recording").click();
+    h.get_by_label("close the recording").click();
     let _ = h.run_ok();
     assert!(h.state().review.is_none());
-    assert!(wait(&mut h, 2000, |a| a.review.is_none()) && h.query_by_label("LIVE").is_some(), "back to live");
+    assert!(wait(&mut h, 2000, |a| a.review.is_none()) && h.query_by_label("live").is_some(), "back to live");
 }
 
 fn files_ending(dir: &std::path::Path, suffix: &str) -> Vec<PathBuf> {
@@ -648,10 +723,10 @@ fn what_is_in_view_saves_as_csv_and_png() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
-    add_via_dialog(&mut h, 6010, "Add");
+    add_via_dialog(&mut h, 4002, "add");
+    add_via_dialog(&mut h, 6010, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 100) && a.view_ms.is_some()));
-    h.get_by_label("Save CSV").click();
+    h.get_by_label("save csv").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let rec = dir.join("recordings");
@@ -669,17 +744,18 @@ fn what_is_in_view_saves_as_csv_and_png() {
     let t: Vec<f64> = rows.iter().map(|r| r.split(',').nth(1).unwrap().parse().unwrap()).collect();
     assert!(t.windows(2).all(|w| w[0] <= w[1]), "rows in time order");
 
-    // The picture: the screenshot the window asks for arrives as an event.
-    h.get_by_label("Save PNG").click();
-    let _ = h.run_ok();
-    assert_eq!(h.state().png_pending, Some(crate::export::Picture::Charts), "a screenshot was asked for");
-    let image = std::sync::Arc::new(egui::ColorImage::filled([1400, 900], egui::Color32::DARK_GRAY));
-    h.event(egui::Event::Screenshot { viewport_id: egui::ViewportId::ROOT, user_data: egui::UserData::default(), image });
-    let _ = h.run_ok();
+    // The picture: the window drawn (off screen, as the test window is) and cut to the
+    // charts' sheet.
+    h.get_by_label("save png").click();
+    assert!(wait(&mut h, 10_000, |_| !files_ending(&rec, " charts.png").is_empty()), "no picture saved");
     assert_eq!(h.state().png_pending, None);
     let pngs = files_ending(&rec, " charts.png");
     assert_eq!(pngs.len(), 1, "{pngs:?}");
-    assert!(std::fs::read(&pngs[0]).unwrap().starts_with(b"\x89PNG"));
+    let png = std::fs::read(&pngs[0]).unwrap();
+    assert!(png.starts_with(b"\x89PNG"));
+    let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as f32;
+    let r = h.state().charts_rect.unwrap();
+    assert!((size(16) - r.width()).abs() <= 2.0 && (size(20) - r.height()).abs() <= 2.0, "{} x {} for charts of {r:?}", size(16), size(20));
 }
 
 #[test]
@@ -692,20 +768,20 @@ fn a_reviewed_stretch_saves_as_csv() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
-    add_via_dialog(&mut h, 6010, "Add");
-    add_via_dialog(&mut h, 9872, "Add");
+    add_via_dialog(&mut h, 4002, "add");
+    add_via_dialog(&mut h, 6010, "add");
+    add_via_dialog(&mut h, 9872, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 3 && a.session.status().channels.iter().all(|c| c.samples > 5)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     std::thread::sleep(Duration::from_millis(600));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     h.state_mut().open_recording(folder);
     assert!(wait(&mut h, 5000, |a| a.review.is_some()));
     let _ = h.run_ok();
-    h.get_by_label("Save CSV").click();
+    h.get_by_label("save csv").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let csvs = files_ending(&dir.join("recordings"), " view.csv");
@@ -757,7 +833,7 @@ fn a_reviewed_slow_log_gives_its_intervals_extremes_and_saves_them() {
     let r = h.state().review.as_ref().unwrap().review.clone();
     let s = crate::review_view::review_stats(&h.state().catalogue, r.channel("4002/ROB_1/J1").unwrap(), r.start, r.end + 1);
     assert_eq!((s.min, s.max), (300.0, 357.1), "the dip the slow log caught, contradicted by its statistics");
-    h.get_by_label("Save CSV").click();
+    h.get_by_label("save csv").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let text = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
@@ -774,7 +850,7 @@ fn a_reviewed_recordings_saves_carry_its_own_label() {
     h.state_mut().open_recording(folder);
     assert!(wait(&mut h, 5000, |a| a.review.is_some()));
     let _ = h.run_ok();
-    h.get_by_label("Save CSV").click();
+    h.get_by_label("save csv").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let saved = files_ending(&dir.join("recordings"), " view.csv");
@@ -798,9 +874,9 @@ fn keys_while_reviewing_leave_the_live_session_alone() {
     h.key_press(egui::Key::Space);
     let _ = h.run_ok();
     assert!(h.state().paused_at.is_none(), "the hidden live charts paused");
-    h.get_by_label("Close the recording").click();
+    h.get_by_label("close the recording").click();
     let _ = h.run_ok();
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     assert!(spy_core::recording::read_meta(&live).unwrap().markers.is_empty(), "a marker put into the live recording from the review");
 }
@@ -826,8 +902,8 @@ fn a_set_partly_there_already_still_ends_in_one_chart() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
-    add_via_dialog(&mut h, 6000, "Add");
+    add_via_dialog(&mut h, 4002, "add");
+    add_via_dialog(&mut h, 6000, "add");
     let keys: Vec<spy_core::store::ChannelKey> = (1..=6).map(|a| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(a).unwrap() }).collect();
     // J2 there too, in a chart of its own.
     assert!(h.state_mut().add_channels(vec![keys[1].clone()], false));
@@ -861,11 +937,11 @@ fn streaming_with_nothing_arriving_does_not_read_as_streaming() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 8000, |a| a.session.status().advice.is_some()), "no advice with nothing arriving");
     let _ = h.run_ok();
-    assert!(h.query_by_label("NOT RECEIVING").is_some(), "the status word");
-    assert!(h.query_by_label("STREAMING").is_none(), "STREAMING shown while nothing arrives");
+    assert!(h.query_by_label("not receiving").is_some(), "the status word");
+    assert!(h.query_by_label("streaming").is_none(), "streaming shown while nothing arrives");
     drop(other);
 }
 
@@ -879,23 +955,23 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
     let ids = |a: &SpyApp| a.chans.iter().map(|c| c.key.id()).collect::<Vec<_>>();
 
     // The first set, the DC links, on both robots, in one chart.
-    h.get_by_label("Channel sets...").click();
+    h.get_by_label("add a set").click();
     let _ = h.run_ok();
     assert!(h.query_by_label_contains("no physical measurements").is_some(), "a virtual controller has no DC link, and the dialog says so");
-    h.get_by_label("Add").click();
+    h.get_by_label("add").click();
     let _ = h.run_ok();
     assert!(h.state().sets.is_none(), "the dialog closes");
     assert_eq!(ids(h.state()), ["5027/ROB_1/J1", "5027/ROB_2/J1"]);
     assert_eq!(h.state().lanes(&[true; 2]).len(), 1);
 
     // One robot's torques: the second robot's.
-    h.get_by_label("Channel sets...").click();
+    h.get_by_label("add a set").click();
     let _ = h.run_ok();
     h.get_by_label("Torques").click();
     let _ = h.run_ok();
     h.state_mut().sets.as_mut().unwrap().unit = "ROB_2".into();
     let _ = h.run_ok();
-    h.get_by_label("Add").click();
+    h.get_by_label("add").click();
     let _ = h.run_ok();
     assert_eq!(ids(h.state())[2..], ["4002/ROB_2/J1", "4002/ROB_2/J2", "4002/ROB_2/J3", "4002/ROB_2/J4", "4002/ROB_2/J5", "4002/ROB_2/J6"]);
     assert_eq!(h.state().lanes(&[true; 8]).len(), 2);
@@ -903,44 +979,36 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
     assert!(h.query_by_label("203.000").is_some(), "ROB_2 J3's torque (the fake's 203) is read");
 
     // Six resolver angles do not fit in the four free: Add does nothing, Replace does.
-    h.get_by_label("Channel sets...").click();
+    h.get_by_label("add a set").click();
     let _ = h.run_ok();
     h.get_by_label("Resolver angles").click();
     let _ = h.run_ok();
-    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Add")).is_disabled(), "greyed out, its hover saying why");
-    h.get_by_label("Add").click();
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("add")).is_disabled(), "greyed out, its hover saying why");
+    h.get_by_label("add").click();
     let _ = h.run_ok();
     assert_eq!(h.state().chans.len(), 8, "a set that does not fit is not half added");
     assert!(h.state().sets.is_some());
-    h.get_by_label("Replace all 8 channels").click();
+    h.get_by_label("replace all 8 channels").click();
     let _ = h.run_ok();
     assert_eq!(ids(h.state()), (1..=6).map(|a| format!("5138/ROB_1/J{a}")).collect::<Vec<_>>());
     assert_eq!(h.state().lanes(&[true; 6]).len(), 6, "a chart each");
     assert!(wait(&mut h, 5000, |a| { let s = a.session.status(); s.channels.len() == 6 && s.channels.iter().all(|c| c.key.signal == 5138) }), "the session follows");
 
     // Already there: nothing to add.
-    h.get_by_label("Channel sets...").click();
+    h.get_by_label("add a set").click();
     let _ = h.run_ok();
     h.get_by_label("Resolver angles").click();
     let _ = h.run_ok();
-    h.get_by_label("Add").click();
+    h.get_by_label("add").click();
     let _ = h.run_ok();
     assert_eq!(h.state().chans.len(), 6);
-    h.get_by_label("Cancel").click();
+    h.get_by_label("cancel").click();
     let _ = h.run_ok();
     assert!(h.state().sets.is_none());
 
     // A replacement refused leaves the channels as they were.
     assert!(!h.state_mut().replace_channels(Vec::new(), false));
     assert_eq!(h.state().chans.len(), 6);
-}
-
-/// The first card's menu, then one of its entries.
-fn card_menu(h: &mut Harness<'static, SpyApp>, card: usize, entry: &str) {
-    h.get_all_by_label("⋯").nth(card).unwrap_or_else(|| panic!("no card {card}")).click();
-    let _ = h.run_ok();
-    h.get_by_label(entry).click();
-    let _ = h.run_ok();
 }
 
 fn derived_health(h: &Harness<'static, SpyApp>, i: usize) -> view::Health {
@@ -958,9 +1026,9 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    card_menu(&mut h, 0, "Turn to a target...");
+    options(&mut h, 0, "Turn to a target...");
     assert_eq!(h.state().derived.len(), 1);
     assert_eq!(derived_health(&h, 0), view::Health::Waiting, "no target yet");
     assert!(h.query_by_label("ON TARGET").is_none());
@@ -968,7 +1036,7 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
     let set = |h: &mut Harness<'static, SpyApp>, t: &str| {
         h.state_mut().derived[0].target_text = t.into();
         let _ = h.run_ok();
-        h.get_by_label("Set").click();
+        press(h, "set");
         let _ = h.run_ok();
     };
     set(&mut h, "57.3");
@@ -994,7 +1062,7 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
     let _ = h.run_ok();
     assert!(h.query_by_label("ON TARGET").is_some());
     h.state_mut().settings.phone_port = 0;
-    h.get_by_label("Phone view").click();
+    menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_some()));
     let phone = |h: &mut Harness<'static, SpyApp>| {
         std::thread::sleep(Duration::from_millis(300));
@@ -1015,7 +1083,7 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
     assert!(h.query_by_label("+0.004").is_some(), "the number is shown instead, dimmed");
     let row = phone(&mut h);
     assert!(row["value"] == "+0.004" && row["stale"] == true, "{row}");
-    h.get_by_label("Phone view").click();
+    menu(&mut h, "view", "phone view");
 }
 
 #[test]
@@ -1032,8 +1100,8 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5020, "Add");
-    card_menu(&mut h, 0, "PWM duty sum of this axis");
+    add_via_dialog(&mut h, 5020, "add");
+    options(&mut h, 0, "PWM duty sum of this axis");
     let ids: Vec<String> = h.state().chans.iter().map(|c| c.key.id()).collect();
     assert_eq!(ids, ["5020/ROB_1/J1", "5021/ROB_1/J1", "5022/ROB_1/J1"], "the other two legs came with it");
     assert!(wait(&mut h, 5000, |a| a.derived[0].live.lock().len() > 20));
@@ -1044,7 +1112,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     assert!(h.state().lanes(&[true; 3]).contains(&d_lane), "the sum has a chart of its own");
     // Saved with what is in view, under an id that says what it is computed from.
     assert!(wait(&mut h, 2000, |a| a.view_ms.is_some()));
-    h.get_by_label("Save CSV").click();
+    h.get_by_label("save csv").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let csv = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
@@ -1055,28 +1123,28 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     }
 
     // The DC link's sag: no plateau from too short a history, or an unsteady one.
-    add_via_dialog(&mut h, 5027, "Add");
-    card_menu(&mut h, 3, "Sag below a plateau");
+    add_via_dialog(&mut h, 5027, "add");
+    options(&mut h, 3, "Sag below a plateau");
     assert_eq!(h.state().derived.len(), 2);
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     let _ = h.run_ok();
     assert!(!h.state().derived[1].live.def().is_set(), "set from a fraction of a second");
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 350.0 } else { 360.0 }), sample_ms: 4.032 }));
     std::thread::sleep(Duration::from_millis(2300));
     let _ = h.run_ok();
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     let _ = h.run_ok();
     assert!(!h.state().derived[1].live.def().is_set(), "set from a DC link swinging 10 V");
-    assert!(h.state().toasts.iter().any(|t| t.text.contains("not steady")), "and says why");
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("not steady")), "and says why: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 356.5), sample_ms: 4.032 }));
     std::thread::sleep(Duration::from_millis(2300));
     let _ = h.run_ok();
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     let _ = h.run_ok();
     assert_eq!(h.state().derived[1].live.def(), &spy_core::derived::Derived::Sag { link: h.state().chans[3].key.clone(), plateau_v: Some(356.5) });
 
     // A dip of 10 V, recorded; the review computes the sag again from the recording.
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 346.5), sample_ms: 4.032 }));
     assert!(wait(&mut h, 3000, |a| a.derived[1].live.lock().last().is_some_and(|(_, v)| v == 10.0)));
@@ -1089,7 +1157,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     let _ = h.run_ok();
     assert!(h.query_by_label("0.28% above").is_some(), "a link over its plateau not read as above it");
     std::thread::sleep(Duration::from_millis(300));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     let meta = spy_core::recording::read_meta(&folder).unwrap();
@@ -1103,7 +1171,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     assert!(sum.v.len() > 50 && sum.v.iter().all(|v| (v - 1.5).abs() < 1e-6));
 
     // An input removed takes its derived channel with it.
-    card_menu(&mut h, 1, "Remove");
+    options(&mut h, 1, "remove");
     assert_eq!(h.state().derived.len(), 1);
     assert_eq!(h.state().derived[0].live.def().kind_name(), "DC-link sag");
 }
@@ -1113,8 +1181,8 @@ fn derived_channels_come_back_without_their_plateau() {
     let dir = temp_dir("derived-persist");
     {
         let mut h = harness(&dir, AskPolicy::Remote);
-        add_via_dialog(&mut h, 5138, "Add");
-        add_via_dialog(&mut h, 5027, "Add");
+        add_via_dialog(&mut h, 5138, "add");
+        add_via_dialog(&mut h, 5027, "add");
         let k = h.state().chans[0].key.clone();
         let l = h.state().chans[1].key.clone();
         assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k.clone(), target_deg: None }));
@@ -1140,22 +1208,22 @@ fn a_commutator_offset_target_is_the_controllers_it_came_from() {
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
     let dir = temp_dir("rws-target-owner");
     let (fake, rws, mut h) = with_rws(b, &dir);
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    h.get_by_label("Commutator offset").click();
+    press(&mut h, "commutator offset");
     assert!(wait(&mut h, 3000, |a| a.derived[0].live.def().is_set()));
     // Not kept in the settings: it is this controller's, like a plateau.
     h.state_mut().save_settings();
     let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
     assert!(saved["derived"][0]["def"]["target_deg"].is_null(), "a controller's commutator offset saved as a target: {}", saved["derived"]);
     // Another controller behind the address: the target goes, and the person is told.
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
     fake.with(|b| b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     assert!(wait(&mut h, 3000, |a| !a.derived[0].live.def().is_set()), "another controller's commutator offset kept as the target");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("commutator offset")), "not said");
@@ -1165,14 +1233,14 @@ fn a_commutator_offset_target_is_the_controllers_it_came_from() {
     rws.with(|r| r.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    h.get_by_label("Commutator offset").click();
+    press(&mut h, "commutator offset");
     assert!(wait(&mut h, 3000, |a| a.derived[0].live.def().is_set()));
     h.state_mut().derived[0].target_text = "12".into();
     h.state_mut().set_target(0);
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
     fake.with(|b| b.system_id = "{0000000C-0000-4000-8000-00000000000C}".into());
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     let _ = h.run_ok();
     assert!(h.state().derived[0].live.def().is_set(), "a typed target dropped");
@@ -1187,11 +1255,11 @@ fn a_plateau_of_no_voltage_is_refused() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5027, "Add");
-    card_menu(&mut h, 0, "Sag below a plateau");
+    add_via_dialog(&mut h, 5027, "add");
+    options(&mut h, 0, "Sag below a plateau");
     std::thread::sleep(Duration::from_millis(2300));
     let _ = h.run_ok();
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     let _ = h.run_ok();
     assert!(!h.state().derived[0].live.def().is_set(), "a plateau of 0 V: every sag after it is the whole link");
     // Refused by the floor itself: the 20 s trend check would refuse this young link
@@ -1202,7 +1270,7 @@ fn a_plateau_of_no_voltage_is_refused() {
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 }));
     std::thread::sleep(Duration::from_millis(2300));
     let _ = h.run_ok();
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     let _ = h.run_ok();
     assert!(!h.state().derived[0].live.def().is_set(), "a motors-off plateau (16 V) taken: every sag after arming reads -360 V");
     assert!(floor(&h, "reads 16") && h.state().toasts.iter().any(|t| t.text.contains("reads 16") && t.text.contains("Arm the robot")), "not refused by the floor, or not told to arm the robot: {:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
@@ -1240,11 +1308,11 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5027, "Add");
-    card_menu(&mut h, 0, "Sag below a plateau");
+    add_via_dialog(&mut h, 5027, "add");
+    options(&mut h, 0, "Sag below a plateau");
     let set = |h: &mut Harness<'static, SpyApp>| {
         let _ = h.run_ok();
-        h.get_by_label("Set the plateau").click();
+        press(h, "set the plateau");
         let _ = h.run_ok();
         h.state().derived[0].live.def().is_set()
     };
@@ -1289,16 +1357,16 @@ fn a_derived_setting_changed_while_recording_is_in_the_recording() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     let k = h.state().chans[0].key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     h.state_mut().derived[0].target_text = "12".into();
-    h.get_by_label("Set").click();
+    press(&mut h, "set");
     let _ = h.run_ok();
     std::thread::sleep(Duration::from_millis(300));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     let meta = spy_core::recording::read_meta(&folder).unwrap();
@@ -1316,17 +1384,17 @@ fn a_plateau_goes_when_another_controller_streams_and_is_said_once() {
     h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5027, "Add");
-    card_menu(&mut h, 0, "Sag below a plateau");
+    add_via_dialog(&mut h, 5027, "add");
+    options(&mut h, 0, "Sag below a plateau");
     std::thread::sleep(Duration::from_millis(4500));
     let _ = h.run_ok();
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     assert!(wait(&mut h, 2000, |a| a.derived[0].live.def().is_set()), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
     // Another controller behind the address: its link is not measured against this one's.
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
     fake.with(|b| b.system_id = "{0000000B-0000-4000-8000-00000000000B}".into());
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     assert!(wait(&mut h, 3000, |a| !a.derived[0].live.def().is_set()), "the other controller's plateau kept");
     let said: Vec<String> = h.state().log.since(0).iter().filter(|e| e.text.contains("was cleared")).map(|e| format!("{:?} {}", e.level, e.text)).collect();
@@ -1343,15 +1411,15 @@ fn the_deepest_sag_counts_from_its_plateau_on() {
     h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5027, "Add");
-    card_menu(&mut h, 0, "Sag below a plateau");
+    add_via_dialog(&mut h, 5027, "add");
+    options(&mut h, 0, "Sag below a plateau");
     // Motors off (16 V) for a while, then on and steady for longer than the plateau's
     // comparison reaches back.
     std::thread::sleep(Duration::from_millis(800));
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 356.0), sample_ms: 4.032 }));
     std::thread::sleep(Duration::from_millis(4300));
     let _ = h.run_ok();
-    h.get_by_label("Set the plateau").click();
+    press(&mut h, "set the plateau");
     assert!(wait(&mut h, 2000, |a| a.derived[0].live.def().is_set() && a.derived[0].stats.n > 20));
     let deepest = h.state().derived[0].stats.max;
     assert!(deepest < 1.0, "deepest {deepest} V: the motors-off history before the plateau counted");
@@ -1379,7 +1447,7 @@ fn log_in(h: &mut Harness<'static, SpyApp>, password: &str) {
     h.state_mut().show_rws = true;
     let _ = h.run_ok();
     h.state_mut().rws_form.password = password.into();
-    h.get_by_label("Log in").click();
+    h.get_by_label("log in").click();
     let _ = h.run_ok();
 }
 
@@ -1389,19 +1457,27 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
     let dir = temp_dir("rws");
     let (_fake, rws, mut h) = with_rws(b, &dir);
-    add_via_dialog(&mut h, 4002, "Add");
-    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    add_via_dialog(&mut h, 4002, "add");
+    // Two torques in one chart, which so has a legend (one channel's chart has none).
+    let j2 = spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(2).unwrap() };
+    assert!(h.state_mut().add_channels(vec![j2], false));
+    let lane = h.state().chans[0].lane;
+    h.state_mut().chans[1].lane = lane;
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 20)));
     // An event from before the recording, which the first look after logging in reads:
     // well before it, past the slack whole-second stamps need (2 s) and their placing
     // error (a second).
     rws.push_event(10000, 1, "Before the recording");
     std::thread::sleep(Duration::from_millis(3300));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready() && a.controller_events.iter().any(|e| e.code == 10000)), "not logged in");
-    assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some(), "the session line names the controller");
     assert!(h.query_by_label_contains("-4 h 00 min from UTC (its local time").is_some(), "its clock, from UTC");
+    h.state_mut().show_diag = true;
+    let _ = h.run_ok();
+    assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some(), "the connection's details name the controller");
+    h.state_mut().show_diag = false;
 
     // Recorded, and on the charts at the time it happened.
     std::thread::sleep(Duration::from_millis(1100));
@@ -1413,8 +1489,8 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     let on = h.state().events_on_timeline(&tl);
     let (t, e) = on.iter().find(|(_, e)| e.code == 10010).unwrap();
     assert!((newest - t).abs() < 2500, "placed {} ms from now", newest - t);
-    assert_eq!(e.color(), crate::theme::IDLE);
-    assert!(on.iter().any(|(_, e)| e.code == 20205 && e.color() == crate::theme::BAD));
+    assert_eq!(e.color(&crate::theme::DARK), crate::theme::DARK.ink2);
+    assert!(on.iter().any(|(_, e)| e.code == 20205 && e.color(&crate::theme::DARK) == crate::theme::DARK.red));
     // Drawn as lines, not piled into every chart's legend: looked at once the charts
     // show them (an event's second can place it just past the newest sample), and
     // recorded past them.
@@ -1422,9 +1498,11 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     assert!(wait(&mut h, 5000, |a| a.view_ms.is_some_and(|(from, to)| from <= t_event && t_event <= to)), "the event never came into view");
     let _ = h.run_ok();
     let entries = legend(&h);
-    assert!(entries.iter().any(|l| l.contains("Torque")) && !entries.iter().any(|l| l.contains("Motors OFF") || l.contains("Auto stop")), "{entries:?}");
+    assert_eq!(entries.iter().filter(|l| l.starts_with("4002 · ")).count(), 2, "{entries:?}");
+    assert!(!entries.iter().any(|l| l.contains("Motors OFF") || l.contains("Auto stop")), "{entries:?}");
+    assert!(h.query_all_by_label_contains("4002 · Torque").next().is_some(), "the chart's title");
     std::thread::sleep(Duration::from_millis(1000));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     let meta = spy_core::recording::read_meta(&folder).unwrap();
@@ -1442,7 +1520,8 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     assert!(rs.review.marks.iter().any(|m| m.kind == "controller-event" && in_view(m)), "no event in the review's view: {:?}", rs.review.marks);
     let off = rs.review.marks.iter().find(|m| m.text.contains("Motors OFF")).map(|m| (m.t - rs.review.start) as f64 / 1000.0).unwrap();
     let entries = legend(&h);
-    assert!(entries.iter().any(|l| l.contains("Torque")) && !entries.iter().any(|l| l.contains("Motors OFF") || l.contains("Auto stop") || l.contains("controller-event")), "{entries:?}");
+    assert_eq!(entries.iter().filter(|l| l.starts_with("4002 · ")).count(), 2, "{entries:?}");
+    assert!(!entries.iter().any(|l| l.contains("Motors OFF") || l.contains("Auto stop") || l.contains("controller-event")), "{entries:?}");
     // A review's cursors are lines too.
     if let Some(rs) = h.state_mut().review.as_mut() {
         rs.cursors_on = true;
@@ -1451,6 +1530,7 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     }
     let _ = h.run_ok();
     let entries = legend(&h);
+    assert_eq!(entries.iter().filter(|l| l.starts_with("4002 · ")).count(), 2, "{entries:?}");
     assert!(!entries.iter().any(|l| l.contains("cursor")), "{entries:?}");
     // (The RWS window, open since the login, would sit between the pointer and the chart.)
     h.state_mut().show_rws = false;
@@ -1458,13 +1538,13 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     hover_chart(&mut h, 0, off);
     let shown = h.state().hover_text.lock().unwrap().clone();
     assert!(shown.contains("controller-event: 10010 Motors OFF state"), "the event's line not named on hover in a review: {shown:?}");
-    h.get_by_label("Close the recording").click();
+    h.get_by_label("close the recording").click();
     assert!(wait(&mut h, 3000, |a| a.review.is_none()));
     h.state_mut().show_rws = true;
     let _ = h.run_ok();
 
     // Switched off: no more looks.
-    h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
+    h.get_by_label("event log on the charts and in recordings (a look every 5 s)").click();
     let _ = h.run_ok();
     assert!(!h.state().settings.rws_events);
     let asked = rws.requests().len();
@@ -1475,11 +1555,11 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     assert_eq!(rws.requests().len(), asked, "nothing asked while off");
 
     // A turn's target from the motor's commutator offset.
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
     let _ = h.run_ok();
-    h.get_by_label("Commutator offset").click();
+    press(&mut h, "commutator offset");
     assert!(wait(&mut h, 3000, |a| a.derived[0].live.def().is_set()));
     let spy_core::derived::Derived::Turn { target_deg: Some(t), .. } = h.state().derived[0].live.def().clone() else { panic!() };
     assert!((t - 1.5707999f64.to_degrees()).abs() < 1e-3, "{t}");
@@ -1491,7 +1571,7 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
     let saved = std::fs::read_to_string(&h.state().settings_path).unwrap();
     assert!(!saved.contains("robotics") && !saved.contains("Default User"), "the login reached the settings file");
     assert!(saved.contains(&format!("\"rws_port\": {}", rws.port())));
-    h.get_by_label("Log out").click();
+    h.get_by_label("log out").click();
     let _ = h.run_ok();
     assert!(h.state().rws.is_none());
     assert!(h.state().rws_form.password.is_empty(), "the password is not kept past the session");
@@ -1513,7 +1593,7 @@ fn rws_is_refused_for_another_controller_or_a_wrong_login_and_ends_with_the_conn
     rws.with(|b| b.system_id = fake.with(|f| f.system_id.clone()));
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "RWS outlived the connection");
 }
 
@@ -1538,7 +1618,7 @@ fn a_commutator_offset_from_another_controller_is_not_taken_and_rws_stops() {
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
     let _dir = temp_dir("rws-other-calib");
     let (_fake, rws, mut h) = with_rws(b, &_dir);
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
     // Looks far apart: the clock is read every twelfth, well after this test ends, so
@@ -1547,10 +1627,10 @@ fn a_commutator_offset_from_another_controller_is_not_taken_and_rws_stops() {
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     // The event log off: the commutator offset is the only thing read.
-    h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
+    h.get_by_label("event log on the charts and in recordings (a look every 5 s)").click();
     let _ = h.run_ok();
     rws.replace_controller("{22222222-2222-4222-8222-222222222222}");
-    h.get_by_label("Commutator offset").click();
+    press(&mut h, "commutator offset");
     assert!(wait(&mut h, 5000, |a| a.rws.is_none()), "RWS carried on with another controller");
     assert!(h.state().toasts.iter().any(|t| t.text.contains("different controller")), "said why");
     assert!(!h.state().derived[0].live.def().is_set(), "another controller's offset taken as the target");
@@ -1582,9 +1662,9 @@ fn only_recording(dir: &std::path::Path) -> PathBuf {
 
 /// REC with one channel streaming.
 fn start_recording(h: &mut Harness<'static, SpyApp>) {
-    add_via_dialog(h, 4002, "Add");
+    add_via_dialog(h, 4002, "add");
     assert!(wait(h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(h, 2000, |a| a.recorder.is_some()));
 }
 
@@ -1598,14 +1678,14 @@ fn a_login_again_during_a_recording_files_no_event_twice_and_reads_back_what_it_
     rws.push_event(10010, 1, "first");
     assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 10010)));
     // Out and in again with two events meanwhile: the first comes back in the newest page.
-    h.get_by_label("Log out").click();
+    h.get_by_label("log out").click();
     let _ = h.run_ok();
     rws.push_event(20000, 1, "meanwhile");
     rws.push_event(20001, 1, "meanwhile");
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 20001)));
     // Again, with more than a page meanwhile: all of them, not just the newest page.
-    h.get_by_label("Log out").click();
+    h.get_by_label("log out").click();
     let _ = h.run_ok();
     for i in 0..12 {
         rws.push_event(30000 + i, 1, "meanwhile");
@@ -1617,7 +1697,7 @@ fn a_login_again_during_a_recording_files_no_event_twice_and_reads_back_what_it_
     let codes: Vec<u32> = h.state().controller_events.iter().map(|e| e.code).collect();
     let want: Vec<u32> = [10010, 20000, 20001].into_iter().chain(30000..30012).collect();
     assert_eq!(codes, want, "each event once, none missed");
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let kept = kept_events(&only_recording(&dir));
     for code in &want {
@@ -1681,7 +1761,7 @@ fn with_the_event_log_off_a_refused_login_still_ends_rws() {
     let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
+    h.get_by_label("event log on the charts and in recordings (a look every 5 s)").click();
     let _ = h.run_ok();
     // The password changed on the controller, and the session timed out.
     rws.with(|b| b.password = "changed".into());
@@ -1715,7 +1795,7 @@ fn the_rws_window_shows_the_login_while_infostream_reconnects() {
     fake.stop();
     assert!(wait(&mut h, 5000, |a| matches!(phase(a), Phase::Reconnecting { .. })));
     assert!(h.state().rws.is_some(), "kept while InfoStream reconnects to the same address");
-    assert!(h.query_by_label("Log out").is_some(), "the window hides a login still in use");
+    assert!(h.query_by_label("log out").is_some(), "the window hides a login still in use");
     assert!(h.query_by_label_contains("Connect to the controller first").is_none());
 }
 
@@ -1726,6 +1806,8 @@ fn rws_does_without_the_controllers_identity() {
     let (_fake, _rws, mut h) = with_rws_as(Behaviour::default(), rb, &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()), "a display name made RWS unusable");
+    h.state_mut().show_diag = true;
+    let _ = h.run_ok();
     assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some());
 }
 
@@ -1735,7 +1817,7 @@ fn the_rws_password_goes_when_the_connection_ends() {
     let (_fake, _rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    h.get_by_label("Disconnect").click();
+    h.get_by_label("disconnect").click();
     assert!(wait(&mut h, 5000, |a| a.rws.is_none()));
     assert!(h.state().rws_form.password.is_empty(), "the password outlived the session");
 }
@@ -1771,7 +1853,7 @@ fn controller_events_that_arrive_after_stop_reach_the_recording() {
     std::thread::sleep(Duration::from_millis(300));
     rws.push_event(50204, 3, "Motion supervision");
     std::thread::sleep(Duration::from_millis(200));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let folder = only_recording(&dir);
     assert!(wait(&mut h, 1500, |_| kept_events(&folder).iter().any(|t| t.starts_with("50204 "))), "the trip's controller event missed its recording: {:?}", kept_events(&folder));
@@ -1781,13 +1863,13 @@ fn controller_events_that_arrive_after_stop_reach_the_recording() {
 fn save_last_keeps_the_controller_events_of_its_stretch() {
     let _dir = temp_dir("rws-save-last");
     let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     rws.push_event(20205, 3, "Auto stop open");
     assert!(wait(&mut h, 5000, |a| a.controller_events.iter().any(|e| e.code == 20205)));
-    h.get_by_label("Save last").click();
+    h.get_by_label_contains("save last").click();
     assert!(wait(&mut h, 5000, |a| a.snapshot_job.is_none() && a.last_folder.is_some()));
     let folder = h.state().last_folder.clone().unwrap();
     assert!(wait(&mut h, 1500, |_| kept_events(&folder).iter().any(|t| t.starts_with("20205 "))), "{:?}", kept_events(&folder));
@@ -1854,13 +1936,13 @@ fn a_padded_speed_and_a_wrapping_angle_read_true_on_the_card_and_the_phone() {
     h.state_mut().settings.phone_port = 0;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 6010, "Add");
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 6010, "add");
+    add_via_dialog(&mut h, 5138, "add");
     assert_eq!(h.state().chans.len(), 2);
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 100)));
     // 0.5 rad/s is 28.6479 deg/s.
     assert!(h.query_by_label("28.6479").is_some(), "the card does not show the speed the signal reports");
-    h.get_by_label("Phone view").click();
+    menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_some()));
     std::thread::sleep(Duration::from_millis(300));
     let _ = h.run_ok();
@@ -1870,7 +1952,7 @@ fn a_padded_speed_and_a_wrapping_angle_read_true_on_the_card_and_the_phone() {
     assert!((value(0) - 28.6479).abs() < 1e-3, "{body}");
     let angle = value(1);
     assert!(!(0.5..=359.5).contains(&angle), "the resolver angle read {angle} deg: averaged across the wrap");
-    h.get_by_label("Phone view").click();
+    menu(&mut h, "view", "phone view");
 }
 
 #[test]
@@ -1883,19 +1965,25 @@ fn one_chart_never_mixes_two_units() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 6000, "Add the block 6000-6005");
+    add_via_dialog(&mut h, 6000, "add the block 6000-6005");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 10)));
     let all = vec![true; 6];
     assert_eq!(h.state().lanes(&all).len(), 1);
-    // The first card's unit button, as a person clicks it.
-    assert_eq!(h.get_all_by_label("deg").count(), 6, "a unit button per card");
-    h.get_all_by_label("deg").next().unwrap().click();
+    // The first channel's options, its unit chosen as a person does.
+    rows(&h)[0].click();
+    let _ = h.run_ok();
+    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("degrees")).click();
+    let _ = h.run_ok();
+    h.get_by_label("radians").click();
+    let _ = h.run_ok();
+    h.get_by_label("all channels").click();
     let _ = h.run_ok();
     let toggled: Vec<bool> = h.state().chans.iter().map(|c| c.radians).collect();
     assert_eq!(toggled, vec![true, false, false, false, false, false], "the click switched J1 to radians");
     let lanes = h.state().lanes(&all);
     assert_eq!(lanes.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), vec!["rad", "deg"], "{lanes:?}");
-    assert!(h.query_by_label("[rad]").is_some() && h.query_by_label("[deg]").is_some(), "each chart names its own unit");
+    // Each chart names its own unit beside its title, as each row does beside its value.
+    assert_eq!((h.query_all_by_label("rad").count(), h.query_all_by_label("deg").count()), (2, 6), "each chart names its own unit");
 }
 
 #[test]
@@ -1971,14 +2059,14 @@ fn a_minimised_window_keeps_the_phone_the_turn_and_the_title_current() {
     h.state_mut().settings.phone_port = 0;
     connect(&mut h, &old);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 5138, "Add");
+    add_via_dialog(&mut h, 5138, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    card_menu(&mut h, 0, "Turn to a target...");
+    options(&mut h, 0, "Turn to a target...");
     h.state_mut().derived[0].target_text = "57.3".into();
     let _ = h.run_ok();
-    h.get_by_label("Set").click();
-    h.get_by_label("Phone view").click();
-    h.get_by_label("● REC").click();
+    press(&mut h, "set");
+    menu(&mut h, "view", "phone view");
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 3000, |a| a.phone.is_some() && a.recorder.is_some()));
     let turn = |a: &SpyApp| {
         let (age, json) = phone_snapshot(a);
@@ -2024,11 +2112,11 @@ fn a_minimised_window_keeps_the_phone_the_turn_and_the_title_current() {
 fn a_recording_that_closes_while_minimised_is_said_when_the_window_is_shown() {
     let dir = temp_dir("minimised-rec");
     let (fake, rws, mut h) = with_rws(Behaviour::default(), &dir);
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
 
     // Minimised through a long run: the controller's events are filed as they come.
@@ -2106,10 +2194,10 @@ fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     for n in [4001, 4002, 318, 1298, 6010] {
-        add_via_dialog(&mut h, n, "Add");
+        add_via_dialog(&mut h, n, "add");
     }
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 5 && a.session.status().channels.iter().all(|c| c.samples > 40)));
-    h.get_by_label("XY").click();
+    h.get_by_label("xy plot").click();
     // The first two charted, until the person chooses: torque against speed, a pair
     // on every tick, every one on the line.
     assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(k, p)| k.y == "4002/ROB_1/J1" && p.points.len() > 200)));
@@ -2200,14 +2288,11 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     for n in [4001, 4002, 318, 1298, 6010] {
-        add_via_dialog(&mut h, n, "Add");
+        add_via_dialog(&mut h, n, "add");
     }
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 5 && a.session.status().channels.iter().all(|c| c.samples > 100)));
-    // From the channel's own menu, as a person does.
-    h.get_all_by_label("⋯").nth(1).unwrap().click();
-    let _ = h.run_ok();
-    h.get_by_label("Compare with the other channels").click();
-    let _ = h.run_ok();
+    // From the channel's own options, as a person does.
+    options(&mut h, 1, "compare...");
     fn result(a: &SpyApp) -> Option<&crate::compare::Compared> {
         a.compare.as_ref().and_then(|c| c.result.as_ref())
     }
@@ -2234,7 +2319,7 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     }
     assert!(h.query_all_by_label("2.00000 × this + 3.00000 Nm").count() == 2, "the line is not shown");
     // One click: the pair in the XY plot, the channel compared on Y.
-    h.get_all_by_label("Show in XY").next().unwrap().click();
+    h.get_all_by_label("show in xy plot").next().unwrap().click();
     let _ = h.run_ok();
     let first = ids[0].clone();
     let xy = h.state().xy.as_ref().expect("the XY plot did not open");
@@ -2246,7 +2331,7 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     h.state_mut().xy = None;
     h.state_mut().selected = Some(1298);
     let _ = h.run_ok();
-    h.get_by_label("Compare with the charted channels").click();
+    h.get_by_label("compare with the charted channels").click();
     let _ = h.run_ok();
     assert!(wait(&mut h, 3000, |a| result(a).is_some_and(|r| r.subject == "1298/ROB_1/J1" && r.rows.len() == 4)));
     // Once, not every frame: the stretch moves on live, the comparison stays until asked.
@@ -2254,22 +2339,22 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     std::thread::sleep(Duration::from_millis(400));
     let _ = h.run_ok();
     assert_eq!(result(h.state()).unwrap().to, to, "compared again unasked");
-    h.get_by_label("Compare again").click();
+    h.get_by_label("compare again").click();
     assert!(wait(&mut h, 3000, |a| result(a).is_some_and(|r| r.to > to)), "Compare again did not compare the stretch now in view");
     // Not for a signal that is not charted.
     h.state_mut().selected = Some(4003);
     let _ = h.run_ok();
-    assert!(h.query_by_label("Compare with the charted channels").is_none());
+    assert!(h.query_by_label("compare with the charted channels").is_none());
     // Nor with nothing else charted.
     h.state_mut().compare = None;
     h.state_mut().chans.retain(|c| c.key.signal == 1298);
     h.state_mut().sync_channels();
     h.state_mut().selected = Some(1298);
     let _ = h.run_ok();
-    assert!(h.query_by_label("Compare with the charted channels").is_none(), "offered with nothing to compare with");
-    h.get_all_by_label("⋯").next().unwrap().click();
+    assert!(h.query_by_label("compare with the charted channels").is_none(), "offered with nothing to compare with");
+    rows(&h)[0].click();
     let _ = h.run_ok();
-    assert!(h.query_by_label("Compare with the other channels").is_none(), "offered with nothing to compare with");
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("compare...")).is_disabled(), "offered with nothing to compare with");
 }
 
 #[test]
@@ -2283,7 +2368,7 @@ fn disconnect_pressed_through_accessibility_stays_disconnected() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     let total = fake.connections_total();
-    h.get_by_label("Disconnect").click_accesskit();
+    h.get_by_label("disconnect").click_accesskit();
     let _ = h.run_ok();
     assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle), "{:?}", phase(h.state()));
     // Long enough for any connect to show.
@@ -2292,7 +2377,7 @@ fn disconnect_pressed_through_accessibility_stays_disconnected() {
     assert_eq!(phase(h.state()), Phase::Idle, "connected again after Disconnect");
     assert_eq!(fake.connections_total(), total, "a connection was made after Disconnect");
     // And the other way: Connect pressed so is one connect, not a connect and a disconnect.
-    h.get_by_label("Connect").click_accesskit();
+    h.get_by_label("connect").click_accesskit();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
     std::thread::sleep(Duration::from_millis(800));
@@ -2306,7 +2391,7 @@ fn disconnect_pressed_through_accessibility_stays_disconnected() {
     });
     std::thread::sleep(Duration::from_millis(500));
     let total = fake.connections_total();
-    h.get_by_label("Disconnect").click_accesskit();
+    h.get_by_label("disconnect").click_accesskit();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Idle), "{:?}", phase(h.state()));
     std::thread::sleep(Duration::from_millis(800));
@@ -2337,7 +2422,7 @@ fn an_address_filled_in_through_accessibility_is_connected_to() {
     let _ = h.run_ok();
     assert_eq!((h.state().host_input.as_str(), h.state().port_input.clone()), ("127.0.0.1", fake.port().to_string()));
     assert_eq!(h.state().search, "DC-link");
-    h.get_by_label("Connect").click_accesskit();
+    h.get_by_label("connect").click_accesskit();
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
     // Greyed out while connected: a tool cannot change the address under the session.
@@ -2349,8 +2434,8 @@ fn an_address_filled_in_through_accessibility_is_connected_to() {
 #[test]
 fn every_channel_is_named_with_its_number_where_channels_are_told_apart() {
     // Several signals share a catalogue name: at the cell (2026-10-04) five cards and four
-    // Compare rows read "Load-derived quantity, two groups ROB_1 J1" alike. The cards and
-    // the chart menu's overlay choices name each with its number, as the legends do.
+    // Compare rows read "Load-derived quantity, two groups ROB_1 J1" alike. The rows and
+    // the options' chart choices name each with its number, as the legends do.
     let dir = temp_dir("numbered");
     let mut h = harness(&dir, AskPolicy::Remote);
     let key = |axis| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(axis).unwrap() };
@@ -2361,11 +2446,13 @@ fn every_channel_is_named_with_its_number_where_channels_are_told_apart() {
     for name in [&j1, &j2] {
         // A label's text is its node's value (the legends' entries are checkboxes).
         let cards = h.query_all_by(|n| n.role() == egui::accesskit::Role::Label && n.value().as_deref() == Some(name.as_str())).count();
-        assert_eq!(cards, 1, "no card named {name}");
+        assert!(cards >= 1, "no row named {name}");
     }
-    h.get_all_by_label("⋯").next().unwrap().click();
+    rows(&h)[0].click();
     let _ = h.run_ok();
-    assert!(h.query_by_label(&format!("Overlay on: {j2}")).is_some(), "the overlay choice does not name {j2}");
+    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("its own chart")).click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label(&format!("with {j2}")).is_some(), "the chart choice does not name {j2}");
 }
 
 /// Click into a text field (by its label) and type, as a person does.
@@ -2385,14 +2472,14 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     h.state_mut().selected = Some(1403);
     let _ = h.run_ok();
     assert!(h.query_by_label("None yet.").is_some());
-    h.get_by_label("Add your notes...").click();
+    h.get_by_label("add your notes...").click();
     let _ = h.run_ok();
     // Typed, as a person does.
     type_into(&mut h, Role::TextInput, "Name", "wrist configuration vector");
     type_into(&mut h, Role::MultilineTextInput, "Evidence", "follows joint 5 at rest");
     h.get_by_label("probable").click();
     let _ = h.run_ok();
-    h.get_by_label("Save").click();
+    h.get_by_label("save").click();
     let _ = h.run_ok();
     assert!(h.state().note_edit.is_none(), "the editor stays open after saving");
     assert_eq!(log_texts(&h).iter().filter(|t| t.contains("Your notes on 1403 are saved")).count(), 1, "said once: {:?}", log_texts(&h));
@@ -2404,10 +2491,10 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     assert!(h.query_by_label("wrist configuration vector").is_some(), "the name is not shown");
     assert!(h.query_by_label("Evidence: follows joint 5 at rest").is_some(), "the evidence is not shown");
     // The list draws the rows in view: looked for, as a person would.
-    assert!(h.query_by_label("✎ notes").is_none());
+    assert_eq!(h.query_all_by_label_contains("(notes)").count(), 0);
     h.state_mut().search = "1403".into();
     let _ = h.run_ok();
-    assert!(h.query_by_label("✎ notes").is_some(), "the list does not mark it");
+    assert_eq!(h.query_all_by_label_contains("(notes)").count(), 1, "the list does not mark it");
 
     // Next time: the same notes.
     drop(h);
@@ -2417,20 +2504,20 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     let _ = h.run_ok();
     assert!(h.query_by_label("wrist configuration vector").is_some(), "the notes did not come back");
     // The editor holds them; Cancel keeps nothing typed; Delete removes them.
-    h.get_by_label("Edit your notes...").click();
+    h.get_by_label("edit your notes...").click();
     let _ = h.run_ok();
     assert!(h.query_by_label("Your notes on signal 1403").is_some(), "an unnamed signal's title");
     assert_eq!(h.get_by_role_and_label(Role::TextInput, "Name").value().as_deref(), Some("wrist configuration vector"));
     type_into(&mut h, Role::TextInput, "Name", " (maybe)");
     assert!(h.state().note_edit.as_ref().is_some_and(|e| e.draft.name.contains("(maybe)")), "the typing did not reach the editor");
-    h.get_by_label("Cancel").click();
+    h.get_by_label("cancel").click();
     let _ = h.run_ok();
     assert!(h.state().note_edit.is_none());
     assert_eq!(h.state().notes.get(1403).unwrap().name, "wrist configuration vector", "Cancel kept what was typed");
     assert!(!std::fs::read_to_string(&file).unwrap().contains("(maybe)"));
-    h.get_by_label("Edit your notes...").click();
+    h.get_by_label("edit your notes...").click();
     let _ = h.run_ok();
-    h.get_by_label("Delete these notes").click();
+    h.get_by_label("delete these notes").click();
     let _ = h.run_ok();
     assert!(h.state().notes.get(1403).is_none());
     assert_eq!(log_texts(&h).iter().filter(|t| t.contains("Your notes on 1403 are deleted")).count(), 1, "said once: {:?}", log_texts(&h));
@@ -2438,21 +2525,16 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     // A number the catalogue does not have takes notes too.
     h.state_mut().selected = Some(99_999);
     let _ = h.run_ok();
-    assert!(h.query_by_label("Add your notes...").is_some());
+    assert!(h.query_by_label("add your notes...").is_some());
 }
 
 #[test]
 fn your_notes_export_in_the_catalogues_columns_and_never_with_an_address() {
     let dir = temp_dir("notes-export");
     let (_fake, _rws, mut h) = with_rws(Behaviour::default(), &dir);
-    let export = |h: &mut Harness<'static, SpyApp>| {
-        h.get_by_label("Catalogue").click();
-        let _ = h.run_ok();
-        h.get_by_label("Export your notes...").click();
-        let _ = h.run_ok();
-    };
+    let export = |h: &mut Harness<'static, SpyApp>| menu(h, "catalogue", "export your notes...");
     let exported = |dir: &std::path::Path| -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> = std::fs::read_dir(dir.join("recordings")).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with("signal-notes.tsv")).collect()).unwrap_or_default();
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir.join("recordings")).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| { let n = p.to_string_lossy(); n.contains(" signal-notes") && n.ends_with(".tsv") }).collect()).unwrap_or_default();
         v.sort();
         v
     };
@@ -2478,10 +2560,13 @@ fn your_notes_export_in_the_catalogues_columns_and_never_with_an_address() {
     // Logged in to RWS: its RobotWare version, and still nothing else of the controller.
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()), "not logged in");
+    // The new file, not the newest name: in the same second the second export is
+    // "... signal-notes (2).tsv", which sorts before the first.
+    let before = exported(&dir);
     export(&mut h);
-    let files = exported(&dir);
-    assert_eq!(files.len(), 2, "{files:?}");
-    let text = std::fs::read_to_string(&files[1]).unwrap();
+    let files: Vec<PathBuf> = exported(&dir).into_iter().filter(|p| !before.contains(p)).collect();
+    assert_eq!((files.len(), before.len()), (1, 1), "{files:?}");
+    let text = std::fs::read_to_string(&files[0]).unwrap();
     assert!(text.contains("# RobotWare 6.16.2027 (read from the controller's RWS)."), "{text}");
     let system_id = spy_core::fake::SYSTEM_ID.trim_matches(|c| c == '{' || c == '}');
     for private in ["127.0.0.1", system_id, "IRB2600"] {
@@ -2496,19 +2581,19 @@ fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    add_via_dialog(&mut h, 4001, "Add");
-    add_via_dialog(&mut h, 4002, "Add");
+    add_via_dialog(&mut h, 4001, "add");
+    add_via_dialog(&mut h, 4002, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 20)));
-    h.get_by_label("● REC").click();
+    h.get_by_label("record").click();
     assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
     std::thread::sleep(Duration::from_millis(1500));
-    h.get_by_label_contains("■ STOP").click();
+    stop_recording(&h);
     assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
     let rec = std::fs::read_dir(dir.join("recordings")).unwrap().next().unwrap().unwrap().path();
     h.state_mut().open_recording(rec);
     assert!(wait(&mut h, 5000, |a| a.review.is_some()));
 
-    h.get_by_label("XY").click();
+    h.get_by_label("xy plot").click();
     let recorded = h.state().review.as_ref().unwrap().review.channel("4001/ROB_1/J1").unwrap().v.len();
     assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(_, p)| p.points.len() + 2 >= recorded)), "the whole recording is in view: {recorded} samples");
     assert!(h.query_by_label("XY plot · reviewing, not live").is_some(), "the plot does not say it is not live");
@@ -2527,13 +2612,10 @@ fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     }
     assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(_, p)| p.points.len() < all * 6 / 10 && p.points.len() > all * 4 / 10)), "the plot is not of the stretch in view");
 
-    // Its picture: the plot's part of the window.
-    h.get_all_by_label("Save PNG").last().unwrap().click();
-    let _ = h.run_ok();
-    assert_eq!(h.state().png_pending, Some(crate::export::Picture::Xy), "the plot's Save PNG asked for the charts");
-    let image = std::sync::Arc::new(egui::ColorImage::filled([1400, 900], egui::Color32::DARK_GRAY));
-    h.event(egui::Event::Screenshot { viewport_id: egui::ViewportId::ROOT, user_data: egui::UserData::default(), image });
-    let _ = h.run_ok();
+    // Its picture: the plot's part of the window (drawn off screen, as the test window is).
+    h.get_all_by_label("save png").last().unwrap().click();
+    assert!(wait(&mut h, 10_000, |_| !files_ending(&dir.join("recordings"), " xy.png").is_empty()), "the plot's Save PNG saved no plot");
+    assert!(files_ending(&dir.join("recordings"), " charts.png").is_empty(), "the plot's Save PNG saved the charts");
     let pngs = files_ending(&dir.join("recordings"), " xy.png");
     assert_eq!(pngs.len(), 1, "{pngs:?}");
     let png = std::fs::read(&pngs[0]).unwrap();
@@ -2553,7 +2635,7 @@ fn channels_come_back_next_time() {
     let dir = temp_dir("persist");
     {
         let mut h = harness(&dir, AskPolicy::Remote);
-        add_via_dialog(&mut h, 6000, "Add the block 6000-6005");
+        add_via_dialog(&mut h, 6000, "add the block 6000-6005");
         assert_eq!(h.state().chans.len(), 6);
         h.state_mut().host_input = "127.0.0.1".into();
         h.state_mut().port_input = fake.port().to_string();
@@ -2564,6 +2646,375 @@ fn channels_come_back_next_time() {
     let mut h = harness(&dir, AskPolicy::Remote);
     assert_eq!(h.state().chans.len(), 6, "the channel set is restored");
     assert_eq!(h.state().port_input, fake.port().to_string(), "the last controller is filled in");
-    h.get_by_label("Connect").click();
+    h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 5)));
+}
+
+/// A double-click at `pos`, both clicks in one frame: the test window's clock moves a
+/// quarter second a frame, too slow for two clicks to count as one double-click.
+fn double_click(h: &mut Harness<'static, SpyApp>, pos: egui::Pos2) {
+    h.hover_at(pos);
+    let _ = h.run_ok();
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.step();
+    let _ = h.run_ok();
+}
+
+/// A wheel turned over where the pointer is, a notch at a time, with `modifiers`; the
+/// frames run until egui has spread it out.
+fn wheel(h: &mut Harness<'static, SpyApp>, notches: f32, modifiers: egui::Modifiers) {
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, notches), phase: egui::TouchPhase::Move, modifiers });
+    for _ in 0..30 {
+        h.step();
+    }
+}
+
+#[test]
+fn smoothing_changes_the_screen_never_the_saved_samples() {
+    // G47: a channel smoothed draws and reads smoothed; recordings and every saved file
+    // keep the samples as they came. Here 0 and 10 in turn: 100 ms of it averages to 5.
+    let mut b = Behaviour::default();
+    b.signals.insert(4002, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 0.0 } else { 10.0 }), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("smoothing");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 400)));
+    // A one-second window: the start of the data, where an average has fewer samples to
+    // take, out of view.
+    h.state_mut().window_s = 1.0;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let lane = (h.state().chans[0].lane, "Nm".to_string());
+    let span = |h: &Harness<'static, SpyApp>| h.state().lane_ranges.get(&lane).map_or(0.0, |(a, b)| b - a);
+    assert!(span(&h) > 10.0, "raw, the chart spans the swing: {}", span(&h));
+    // Chosen in its options, as a person does.
+    rows(&h)[0].click();
+    let _ = h.run_ok();
+    h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("off")).click();
+    let _ = h.run_ok();
+    h.get_by_label("100 ms").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans[0].smooth_ms, 100);
+    h.get_by_label("all channels").click();
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(span(&h) < 3.0, "smoothed, the swing averages out: {}", span(&h));
+    assert!(h.query_by_label("smoothed 100 ms").is_some(), "the chart says it is smoothed");
+    // Recorded, and saved from the screen: as they came.
+    h.get_by_label("record").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(500));
+    stop_recording(&h);
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+    let folder = only_recording(&dir);
+    let loaded = spy_core::recording::read(&folder).unwrap();
+    let v = &loaded.data["4002/ROB_1/J1"];
+    assert!(v.len() > 50 && v.iter().all(|&(_, x)| x == 0.0 || x == 10.0), "the recording is smoothed: {:?}", &v[..4]);
+    h.get_by_label("save csv").click();
+    assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
+    let csv = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
+    let saved = saved_rows(&csv, "4002/ROB_1/J1", "Nm");
+    assert!(saved.len() > 50 && saved.iter().all(|&x| x == 0.0 || x == 10.0), "the CSV is smoothed: {:?}", &saved[..4]);
+    // Kept for next time.
+    h.state_mut().save_settings();
+    assert!(std::fs::read_to_string(&h.state().settings_path).unwrap().contains("\"smooth_ms\": 100"));
+}
+
+#[test]
+fn a_scale_chosen_in_the_options_holds_the_chart() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("scale");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    // 4002 J1 reads 101 throughout.
+    add_via_dialog(&mut h, 4002, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
+    let bounds = |h: &Harness<'static, SpyApp>| {
+        let b = h.state().lane_transforms[0].bounds();
+        (b.min()[1], b.max()[1])
+    };
+    // A flat 101: a band of 5% either side, the chart's own way with a constant.
+    let (a, b) = bounds(&h);
+    assert!(a < 101.0 && b > 101.0 && b - a < 12.0, "fit: around 101 ({a} to {b})");
+    rows(&h)[0].click();
+    let _ = h.run_ok();
+    // Around zero: a number typed (as a tool fills it in) chooses it.
+    set_value(&h, "Half the scale in Nm", "500");
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans[0].scale, crate::charts::Scale::Centred { half: 500.0 });
+    assert_eq!(bounds(&h), (-500.0, 500.0), "the chart holds it");
+    // Fixed, from its boxes.
+    set_value(&h, "Bottom of the scale in Nm", "90");
+    let _ = h.run_ok();
+    set_value(&h, "Top of the scale in Nm", "120");
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans[0].scale, crate::charts::Scale::Fixed { lo: 90.0, hi: 120.0 });
+    assert_eq!(bounds(&h), (90.0, 120.0));
+    // A bottom above the top is not taken.
+    set_value(&h, "Bottom of the scale in Nm", "130");
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans[0].scale, crate::charts::Scale::Fixed { lo: 90.0, hi: 120.0 }, "an upside-down scale was taken");
+    // Back to fitting, its radio clicked.
+    h.get_by_label("fit, at least").click();
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans[0].scale, crate::charts::Scale::default());
+    let (a, b) = bounds(&h);
+    assert!(a < 101.0 && b > 101.0 && b - a < 12.0, "fit again: {a} to {b}");
+}
+
+#[test]
+fn the_wheel_zooms_a_live_chart_and_ctrl_wheel_its_vertical_scale() {
+    // G47: zoom works live too. The wheel changes the window; Ctrl + wheel holds a vertical
+    // scale until "reset scale" or a double-click; a drag pauses.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("live-zoom");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4000, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
+    let _ = h.run_ok();
+    let c = h.state().lane_transforms[0].frame().center();
+    h.hover_at(c);
+    let _ = h.run_ok();
+    assert_eq!(h.state().window_s, 10.0);
+    wheel(&mut h, 1.0, egui::Modifiers::NONE);
+    assert_eq!(h.state().window_s, 5.0, "a notch away from you: a shorter window");
+    wheel(&mut h, -2.0, egui::Modifiers::NONE);
+    assert_eq!(h.state().window_s, 30.0, "two notches back: 10 s, then 30 s");
+    assert!(h.state().paused_at.is_none(), "the wheel does not pause");
+    // Ctrl + wheel: the vertical scale, held and said.
+    let lane = (h.state().chans[0].lane, "deg".to_string());
+    let before = h.state().lane_ranges[&lane];
+    wheel(&mut h, 2.0, egui::Modifiers::CTRL);
+    let zoomed = h.state().lane_zoom.get(&lane).copied().expect("Ctrl + wheel held no scale");
+    assert!(zoomed.1 - zoomed.0 < before.1 - before.0, "zoomed in: {zoomed:?} from {before:?}");
+    assert_eq!(h.state().window_s, 30.0, "Ctrl + wheel left the window alone");
+    let _ = h.run_ok();
+    assert!(h.query_by_label("scale zoomed").is_some(), "the chart says so");
+    h.get_by_label("reset scale").click();
+    let _ = h.run_ok();
+    assert!(h.state().lane_zoom.is_empty(), "reset scale");
+    // A double-click gives the chart's own back too.
+    h.hover_at(c);
+    let _ = h.run_ok();
+    wheel(&mut h, 2.0, egui::Modifiers::CTRL);
+    assert!(!h.state().lane_zoom.is_empty());
+    double_click(&mut h, c);
+    assert!(h.state().lane_zoom.is_empty(), "a double-click did not give the chart's scale back");
+    // A drag pauses, where it was dragged to.
+    h.drag_at(c);
+    let _ = h.run_ok();
+    h.hover_at(c + egui::vec2(150.0, 0.0));
+    let _ = h.run_ok();
+    h.drop_at(c + egui::vec2(150.0, 0.0));
+    let _ = h.run_ok();
+    assert!(h.state().paused_at.is_some(), "a drag on a live chart did not pause it");
+}
+
+#[test]
+fn one_chart_fills_the_middle_and_all_come_back() {
+    // G48: hovering a chart shows small buttons at its top right, one an expand arrow.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("expand");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    add_via_dialog(&mut h, 5027, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+    let _ = h.run_ok();
+    assert_eq!(h.state().lane_transforms.len(), 2);
+    let small = h.state().lane_transforms[1].frame().height();
+    // (The pointer is left where the add dialog was, over a chart.)
+    h.hover_at(egui::pos2(5.0, 5.0));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Fill the middle with this chart").is_none(), "the buttons show only under the pointer");
+    h.hover_at(h.state().lane_transforms[1].frame().center());
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    h.get_by_label("Fill the middle with this chart").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().expanded, Some((h.state().chans[1].lane, "V".to_string())));
+    assert_eq!(h.state().lane_transforms.len(), 1, "one chart drawn");
+    assert!(h.state().lane_transforms[0].frame().height() > small * 1.5, "it fills the middle");
+    assert!(h.query_by_label("showing 1 of 2 charts").is_some());
+    h.get_by_label("show all charts").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().expanded, None);
+    assert_eq!(h.state().lane_transforms.len(), 2);
+    // A chart that goes (its channel removed) leaves the middle to the rest.
+    h.state_mut().expanded = Some((h.state().chans[1].lane, "V".to_string()));
+    h.state_mut().chans.truncate(1);
+    h.state_mut().sync_channels();
+    let _ = h.run_ok();
+    assert_eq!(h.state().expanded, None);
+}
+
+#[test]
+fn the_dashboard_shows_big_numbers_and_never_a_stale_one_as_now() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("dashboard");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    add_via_dialog(&mut h, 5027, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+    h.get_by_label("live dashboard").click();
+    let _ = h.run_ok();
+    assert!(h.state().dashboard);
+    assert!(h.query_by_label("live dashboard").is_some(), "its heading");
+    assert!(h.query_by_label("101.000").is_some() && h.query_by_label("356.700").is_some(), "the numbers");
+    // Bigger, and remembered.
+    h.get_by_label("bigger").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().settings.dash_size, 80.0);
+    // The torque stops: its tile says the number is old. (The DC link would read "not on
+    // VC" here: a virtual controller has no physical measurement.)
+    fake.with(|b| {
+        b.mute.insert(4002);
+    });
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().any(|c| c.stale)));
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains("this is not the value now").next().is_some(), "a stale tile read as current");
+    assert!(h.query_by_label("stale").is_some());
+    h.get_by_label("back to the charts").click();
+    let _ = h.run_ok();
+    assert!(!h.state().dashboard);
+}
+
+#[test]
+fn the_signal_list_folds_away_and_is_remembered() {
+    let dir = temp_dir("fold");
+    {
+        let mut h = harness(&dir, AskPolicy::Remote);
+        h.get_by_label("Fold the signal list").click();
+        let _ = h.run_ok();
+        assert!(h.state().settings.signals_folded);
+        assert!(h.query_by_label("Search the signals").is_none(), "folded, the list is gone");
+        assert!(h.query_by_label("add signals").is_some(), "and the way back is there");
+        h.state_mut().save_settings();
+    }
+    let mut h = harness(&dir, AskPolicy::Remote);
+    assert!(h.state().settings.signals_folded, "folded next time too");
+    let _ = h.run_ok();
+    h.get_by_label("add signals").click();
+    let _ = h.run_ok();
+    assert!(!h.state().settings.signals_folded);
+    assert!(h.query_by_label("Search the signals").is_some());
+}
+
+#[test]
+fn reviewing_says_step_by_step_how_to_place_the_cursors() {
+    // G48: the person reviewing a recording is told how to add cursors.
+    let dir = temp_dir("review-steps");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let folder = recording_on_disk(&dir, "one", "full", "", &full_csv());
+    h.state_mut().open_recording(folder);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    // Its row is numbered as a live one is: the chart's title and the row.
+    let name = {
+        let a = h.state();
+        crate::review_view::short_of(&a.catalogue, &a.review.as_ref().unwrap().review.channels[0])
+    };
+    assert!(name.starts_with("4002 · "), "{name}");
+    let named = h.query_all_by(|n| n.role() == egui::accesskit::Role::Label && n.value().as_deref() == Some(name.as_str())).count();
+    assert_eq!(named, 2, "the title and the row, both named {name}");
+    h.get_by_label("cursors").click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("click a chart to place A").is_some());
+    assert!(h.query_all_by_label_contains("click a chart for cursor A, right-click for B").next().is_some(), "the footer says it too");
+    let tr = h.state().lane_transforms[0];
+    let at = |x: f64| tr.position_from_point(&egui_plot::PlotPoint::new(x, (tr.bounds().min()[1] + tr.bounds().max()[1]) / 2.0));
+    h.hover_at(at(0.2));
+    let _ = h.run_ok();
+    h.event(egui::Event::PointerButton { pos: at(0.2), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: at(0.2), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    let _ = h.run_ok();
+    assert!(h.state().review.as_ref().unwrap().cursor_a.is_some_and(|a| (a - 0.2).abs() < 0.05), "a click placed A");
+    assert!(h.query_by_label("now right-click a chart to place B").is_some(), "the next step");
+    h.hover_at(at(0.6));
+    let _ = h.run_ok();
+    h.event(egui::Event::PointerButton { pos: at(0.6), button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: at(0.6), button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+    let _ = h.run_ok();
+    assert!(h.state().review.as_ref().unwrap().cursor_b.is_some_and(|b| (b - 0.6).abs() < 0.05), "a right-click placed B");
+    assert!(h.query_all_by_label_contains("s after A").next().is_some(), "both placed: how far apart");
+    // Each row reads them: at A, at B, and the stretch between.
+    assert!(h.query_by_label("between A and B").is_some());
+}
+
+#[test]
+fn the_strip_says_the_state_in_words_and_names_other_programs() {
+    let b = Behaviour { extra_clients: vec!["192.0.2.27".into(), "192.168.126.10".into()], ..Behaviour::default() };
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("strip");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("not connected").is_some());
+    assert!(h.query_by_label("off").is_some(), "recording: off");
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("streaming").is_some());
+    assert!(h.query_by_label(&format!("VC 127.0.0.1 : {}", fake.port())).is_some(), "the controller, a virtual one on this PC");
+    assert!(h.query_by_label("192.0.2.27").is_some(), "the other program is named");
+    assert_eq!(h.query_all_by_label_contains("192.168.126.10").count(), 0, "the pendant is not");
+    add_via_dialog(&mut h, 4002, "add");
+    h.get_by_label("record").click();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains(" KB").next().is_some() || h.query_all_by_label_contains(" MB").next().is_some(), "recording: its time and size");
+    stop_recording(&h);
+    assert!(wait(&mut h, 3000, |a| a.recorder.is_none()));
+}
+
+#[test]
+fn escape_closes_a_signals_details() {
+    let dir = temp_dir("escape");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().selected = Some(4002);
+    let _ = h.run_ok();
+    assert!(h.query_by_label("Close (Esc)").is_some(), "the details are open");
+    h.key_press(egui::Key::Escape);
+    let _ = h.run_ok();
+    assert_eq!(h.state().selected, None);
+    assert!(h.query_by_label("Close (Esc)").is_none());
+    // Not while a dialog is over them: Escape is the dialog's then.
+    h.state_mut().selected = Some(4002);
+    h.state_mut().open_add(4002);
+    let _ = h.run_ok();
+    h.key_press(egui::Key::Escape);
+    let _ = h.run_ok();
+    assert_eq!(h.state().selected, Some(4002), "the details closed under the dialog");
+}
+
+#[test]
+fn the_light_theme_is_a_click_away_and_recolours_the_channels() {
+    let dir = temp_dir("theme");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let key = |axis| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(axis).unwrap() };
+    assert!(h.state_mut().add_channels(vec![key(1), key(2)], false));
+    let _ = h.run_ok();
+    assert!(h.state().settings.dark, "dark by default (G48)");
+    assert_eq!(h.state().chans[1].color, crate::theme::channel_color(1, true));
+    menu(&mut h, "view", "dark");
+    assert!(!h.state().settings.dark);
+    assert_eq!(h.ctx.theme(), egui::Theme::Light, "the window is not light");
+    assert_eq!(h.state().chans[1].color, crate::theme::channel_color(1, false), "a channel kept its dark colour on the light chart");
+    menu(&mut h, "view", "dark");
+    assert!(h.state().settings.dark && h.ctx.theme() == egui::Theme::Dark);
+    assert_eq!(h.state().chans[1].color, crate::theme::channel_color(1, true));
 }

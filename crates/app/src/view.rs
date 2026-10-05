@@ -75,15 +75,26 @@ fn read_window(ring: &Ring, r: Reading, from: i64, to: i64) -> Vec<f64> {
     }
 }
 
-/// The value a card shows, in the native unit: the mean of the last 150 ms.
+/// The value a channel's row shows, in the native unit: the mean of the last 150 ms.
 /// Padding undone for a zero-filled signal; the mean on the circle for a wrapping
 /// angle, or its newest sample when it turns too fast to average.
 pub fn readout(ring: &Ring, r: Reading) -> Option<f64> {
+    readout_ms(ring, r, READOUT_MS)
+}
+
+/// How long a row's value averages: 150 ms, or the channel's smoothing if longer
+/// (G48: one smoothing for its line and its value, never under 150 ms so it reads).
+pub fn readout_window(smooth_ms: u32) -> i64 {
+    READOUT_MS.max(i64::from(smooth_ms))
+}
+
+/// [`readout`] over the last `window_ms`.
+pub fn readout_ms(ring: &Ring, r: Reading, window_ms: i64) -> Option<f64> {
     let (last_t, newest) = ring.last()?;
     if r == Reading::Turn {
         return newest.is_finite().then_some(newest);
     }
-    let v: Vec<f64> = read_window(ring, r, last_t - READOUT_MS, last_t + 1).into_iter().filter(|x| x.is_finite()).collect();
+    let v: Vec<f64> = read_window(ring, r, last_t - window_ms, last_t + 1).into_iter().filter(|x| x.is_finite()).collect();
     if v.is_empty() {
         return None;
     }
@@ -160,6 +171,17 @@ pub fn fmt(v: f64) -> String {
     let decimals = (5 - a.log10().floor() as i32).clamp(0, 7) as usize;
     let s = format!("{v:.decimals$}");
     if s.trim_start_matches('-').chars().all(|c| c == '0' || c == '.') { "0".into() } else { s }
+}
+
+/// A number as short as it reads, for axis ticks and small boxes: "500", "0.01",
+/// "-2.5"; never "-0".
+pub fn fmt_short(v: f64) -> String {
+    if !v.is_finite() {
+        return String::new();
+    }
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.to_string() }
 }
 
 /// Channel name for people: the catalogue's name, plus what selects it.
@@ -290,6 +312,31 @@ mod tests {
         assert_eq!(fmt(3.4e38), "3.4000e38");
         assert_eq!(fmt(f64::NAN), "NaN");
         assert_eq!(fmt(123456.0), "123456");
+    }
+
+    #[test]
+    fn short_numbers() {
+        assert_eq!(fmt_short(500.0), "500");
+        assert_eq!(fmt_short(0.01), "0.01");
+        assert_eq!(fmt_short(-356.5), "-356.5");
+        assert_eq!(fmt_short(-0.0000001), "0", "never -0");
+        assert_eq!(fmt_short(f64::NAN), "");
+    }
+
+    #[test]
+    fn a_smoothed_value_averages_its_smoothing_or_150_ms() {
+        // G48: one smoothing for a channel's line and its value, the value never under
+        // 150 ms so it can be read.
+        assert_eq!(readout_window(0), 150);
+        assert_eq!(readout_window(50), 150);
+        assert_eq!(readout_window(500), 500);
+        // A step 300 ms back: the last 150 ms do not see it, the last 500 ms do.
+        let mut v = vec![0.0; 100];
+        v.extend(vec![10.0; 75]);
+        let r = ring(&v);
+        assert_eq!(readout_ms(&r, Reading::Plain, readout_window(0)), Some(10.0));
+        let half = readout_ms(&r, Reading::Plain, readout_window(500)).unwrap();
+        assert!(half > 2.0 && half < 8.0, "{half}");
     }
 
     #[test]

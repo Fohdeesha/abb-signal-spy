@@ -54,6 +54,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 signal-spy-core = { path = "../core", features = ["fake"] }
-# Drives the real window code with simulated input: no real mouse, no desktop.
-egui_kittest = { version = "0.36", features = ["eframe"] }
+# Drives the real window code with simulated input: no real mouse, no desktop. With
+# wgpu, it also draws the window off screen for src/shots.rs.
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 

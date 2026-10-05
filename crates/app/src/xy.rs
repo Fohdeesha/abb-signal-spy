@@ -230,7 +230,7 @@ impl SpyApp {
                 if ui.button("⇄").on_hover_text("Swap X and Y").clicked() {
                     std::mem::swap(&mut xy.x, &mut xy.y);
                 }
-                if ui.button("Save PNG").on_hover_text("Save a picture of this window to the recordings folder: the channels, the pairs, r and the line, and the plot with its axes").clicked() {
+                if ui.button("save png").on_hover_text("Save a picture of this window to the recordings folder: the channels, the pairs, r and the line, and the plot with its axes").clicked() {
                     png = true;
                 }
                 if xy.zoomed {
@@ -263,7 +263,7 @@ impl SpyApp {
                 if let Some(h) = c.health()
                     && (!streaming || h != Health::Live)
                 {
-                    ui.colored_label(theme::WARN, format!("{} is {}: the plot shows the last pairs received.", c.title, if streaming { h.word() } else { "not streaming" }));
+                    ui.colored_label(theme::pal(ui).hold, format!("{} is {}: the plot shows the last pairs received.", c.title, if streaming { h.word() } else { "not streaming" }));
                 }
             }
             ui.label(pairs_text(p, cx, cy, (k.to - k.from) as f64 / 1000.0));
@@ -272,6 +272,7 @@ impl SpyApp {
             let (xu, yu) = (cx.units.clone(), cy.units.clone());
             // egui_plot fits its bounds to the whole stretch (the items drawn never reach
             // past it) until the person drags or zooms; a double-click fits them again.
+            let pal = theme::pal(ui);
             let resp = Plot::new("xy-plot")
                 .x_axis_label(format!("{}  [{}]", cx.title, cx.units))
                 .y_axis_label(format!("{}  [{}]", cy.title, cy.units))
@@ -305,11 +306,11 @@ impl SpyApp {
                     let pts = thin(&p.points, vx, vy, size.x as usize, size.y as usize);
                     pu.points(Points::new("pairs", PlotPoints::from(pts)).radius(1.5).color(POINT));
                     if let Some(line) = p.fit.and_then(|f| line_in(f, vx, vy)) {
-                        pu.line(Line::new("least-squares line", PlotPoints::from(line.to_vec())).color(theme::IDLE).style(egui_plot::LineStyle::dashed_loose()));
+                        pu.line(Line::new("least-squares line", PlotPoints::from(line.to_vec())).color(pal.ink2).style(egui_plot::LineStyle::dashed_loose()));
                     }
                     // Where it is now.
                     if !reviewing && let Some(&(_, x, y)) = p.points.last() {
-                        pu.points(Points::new("newest", PlotPoints::from(vec![[x, y]])).radius(4.5).color(theme::WARN));
+                        pu.points(Points::new("newest", PlotPoints::from(vec![[x, y]])).radius(4.5).color(pal.hold));
                     }
                     (!whole, (vx, vy))
                 });

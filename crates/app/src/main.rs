@@ -10,6 +10,7 @@ mod browser;
 mod channels;
 mod charts;
 mod compare;
+mod dashboard;
 mod derived_view;
 mod export;
 mod fields;
@@ -27,6 +28,8 @@ mod theme;
 mod view;
 mod xy;
 
+#[cfg(test)]
+mod shots;
 #[cfg(test)]
 mod ui_tests;
 

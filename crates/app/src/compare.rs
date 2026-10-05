@@ -6,7 +6,7 @@
 //! torques), looking for the one it is a straight line of. One click puts a pair in the
 //! XY plot, to look at before believing a number.
 //!
-//! Computed once when asked (and again on "Compare again"), not every frame: a live
+//! Computed once when asked (and again on "compare again"), not every frame: a live
 //! ten-minute view pairs a hundred thousand samples per channel.
 
 use std::time::SystemTime;
@@ -171,7 +171,7 @@ impl SpyApp {
         let mut plot: Option<(String, String)> = None;
         egui::Window::new("Compare").id(egui::Id::new("compare-window")).open(&mut open).default_size([640.0, 420.0]).resizable(true).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Channel").strong());
+                ui.label(RichText::new("channel").strong());
                 let text = cands.iter().find(|(id, _)| *id == st.subject).map_or_else(|| "choose a channel".to_string(), |(_, t)| t.clone());
                 egui::ComboBox::from_id_salt("compare-subject").selected_text(text).width(220.0).show_ui(ui, |ui| {
                     for (id, title) in &cands {
@@ -181,7 +181,7 @@ impl SpyApp {
                         }
                     }
                 });
-                if ui.button("Compare again").on_hover_text("Pair it again with every other charted channel, over the stretch the charts show now").clicked() {
+                if ui.button("compare again").on_hover_text("Pair it again with every other charted channel, over the stretch the charts show now").clicked() {
                     st.pending = true;
                 }
             });
@@ -216,7 +216,7 @@ impl SpyApp {
                         let stale = r.health.is_some_and(|h| h != Health::Live);
                         let mut name = RichText::new(&r.title);
                         if stale {
-                            name = name.color(theme::WARN);
+                            name = name.color(theme::pal(ui).hold);
                         }
                         let name = ui.label(name);
                         if let Some(h) = r.health.filter(|_| stale) {
@@ -235,7 +235,7 @@ impl SpyApp {
                                 ui.label("");
                             }
                         }
-                        if ui.add_enabled(r.pairs > 0, egui::Button::new("Show in XY")).on_hover_text(format!("Plot {} (Y) against {} (X)", res.subject_title, r.title)).clicked() {
+                        if ui.add_enabled(r.pairs > 0, egui::Button::new("show in xy plot")).on_hover_text(format!("Plot {} (Y) against {} (X)", res.subject_title, r.title)).clicked() {
                             plot = Some((r.id.clone(), res.subject.clone()));
                         }
                         ui.end_row();

@@ -303,10 +303,10 @@ impl SpyApp {
         ui.separator();
         let note = self.notes.get(n).cloned();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Your notes").strong()).on_hover_text(format!(
-                "Kept on this PC, beside the settings ({FILE}). Catalogue menu, \"Export your notes...\": a file in the catalogue's own columns, to send to whoever keeps the catalogue."
+            ui.label(crate::theme::b("your notes")).on_hover_text(format!(
+                "Kept on this PC, beside the settings ({FILE}). Catalogue menu, \"export your notes...\": a file in the catalogue's own columns, to send to whoever keeps the catalogue."
             ));
-            let text = if note.is_some() { "Edit your notes..." } else { "Add your notes..." };
+            let text = if note.is_some() { "edit your notes..." } else { "add your notes..." };
             if ui.button(text).on_hover_text("What you found out about this signal: a name if you have one, what it seems to be, the evidence, what is ruled out, what is still open and the test that would settle it").clicked() {
                 self.note_edit = Some(Edit { signal: n, draft: note.clone().unwrap_or_default() });
             }
@@ -322,7 +322,7 @@ impl SpyApp {
             ui.label(RichText::new(note.confidence.label()).color(crate::browser::confidence_color(match note.confidence {
                 Leaning::Open => spy_core::catalogue::Confidence::Open,
                 Leaning::Probable => spy_core::catalogue::Confidence::Probable,
-            })));
+            }, theme::pal(ui))));
             if !note.units.is_empty() {
                 ui.label(format!("[{}]", note.units));
             }
@@ -368,7 +368,7 @@ impl SpyApp {
                 line(ui, "Description", "what it seems to be", &mut d.description);
                 line(ui, "Units", "e.g. rad, Nm, A", &mut d.units);
                 line(ui, "Category", "e.g. motor, drive, unknown", &mut d.category);
-                ui.label("Confidence");
+                ui.label("confidence");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut d.confidence, Leaning::Open, "open").on_hover_text("It responds, but what it is remains open");
                     ui.radio_value(&mut d.confidence, Leaning::Probable, "probable").on_hover_text("It fits, and no alternative survives, but it is not forced");
@@ -386,13 +386,13 @@ impl SpyApp {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Save").strong())).clicked() {
+                if ui.add(egui::Button::new(RichText::new("save").strong())).clicked() {
                     save = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("cancel").clicked() {
                     close = true;
                 }
-                if existed && ui.button("Delete these notes").clicked() {
+                if existed && ui.button("delete these notes").clicked() {
                     delete = true;
                 }
             });
@@ -461,7 +461,7 @@ impl SpyApp {
     pub(crate) fn export_notes_button(&mut self, ui: &mut egui::Ui) {
         let any = !self.notes.map.is_empty();
         if ui
-            .add_enabled(any, egui::Button::new("Export your notes..."))
+            .add_enabled(any, egui::Button::new("export your notes..."))
             .on_hover_text("Your notes on signals, as a file in the catalogue's own columns (in the recordings folder), to send to whoever keeps the catalogue. It names this program's version, the date and the RobotWare version (when logged in to RWS), nothing else about the controller.")
             .on_disabled_hover_text("No notes yet: add yours in a signal's details.")
             .clicked()
@@ -473,10 +473,6 @@ impl SpyApp {
 }
 
 /// A small mark for the catalogue list: the person has notes on it.
-pub fn note_mark(ui: &mut egui::Ui) {
-    ui.label(RichText::new("✎ notes").small().color(theme::OK)).on_hover_text("You have notes on it");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
