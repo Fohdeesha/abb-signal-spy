@@ -1,13 +1,7 @@
-//! Saved settings. Nothing ships preset: no controller address, no signal set (rule
-//! 11). Every field has a default, so a settings file from an older version, or one
-//! a person trimmed by hand, still loads; a file that does not parse at all is set
-//! aside (renamed) and reported, never silently lost.
-
 use std::path::{Path, PathBuf};
 
 use spy_core::session::Target;
 
-/// The live dashboard's number sizes, px, smallest first.
 pub const DASH_SIZES: [f32; 5] = [40.0, 52.0, 64.0, 80.0, 100.0];
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -28,15 +22,12 @@ pub struct SavedChannel {
     pub hold_nonzero: bool,
     #[serde(default)]
     pub lane: u32,
-    /// Display only (G47): its line and value smoothed over this many ms, 0 for off.
     #[serde(default)]
     pub smooth_ms: u32,
-    /// Its chart's vertical scale.
     #[serde(default)]
     pub scale: crate::charts::Scale,
 }
 
-/// A derived channel (its plateau, if a sag, is never kept).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SavedDerived {
     pub def: spy_core::derived::Derived,
@@ -52,7 +43,6 @@ pub struct Settings {
     pub recent: Vec<Target>,
     pub last_target: Option<Target>,
     pub dark: bool,
-    /// Chart window, seconds (10 s by default).
     pub window_s: f64,
     pub channels: Vec<SavedChannel>,
     pub record_dir: Option<PathBuf>,
@@ -60,8 +50,6 @@ pub struct Settings {
     pub snapshot_s: f64,
     pub phone_port: u16,
     pub catalogue_file: Option<PathBuf>,
-    /// The signal list shows the identified signals (named), the not yet identified ones
-    /// (open) and the inert ones as these say.
     pub show_named: bool,
     pub show_open: bool,
     pub show_inert: bool,
@@ -69,12 +57,9 @@ pub struct Settings {
     pub units: Vec<String>,
     pub ui_scale: f32,
     pub derived: Vec<SavedDerived>,
-    /// RWS's port (no login is ever kept), and whether its event log is looked at.
     pub rws_port: u16,
     pub rws_events: bool,
-    /// The signal list folded to a strip.
     pub signals_folded: bool,
-    /// The live dashboard's number size, px.
     pub dash_size: f32,
 }
 
@@ -109,12 +94,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Load, or defaults. The second value is a note for the person when something
-    /// was wrong with the file: what was set aside, and why.
-    ///
-    /// Field by field: a hand edit that spoils one value (an axis of 300, a word
-    /// where a number goes) costs that value, not the saved controllers and channels
-    /// with it. Only a file that is not a JSON object at all is set aside whole.
     pub fn load(path: &Path) -> (Settings, Option<String>) {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -165,7 +144,6 @@ impl Settings {
         (s, note)
     }
 
-    /// Clamp anything a hand edit could have put out of range.
     fn sanitize(&mut self, notes: &mut Vec<String>) {
         if !(self.window_s.is_finite() && (1.0..=600.0).contains(&self.window_s)) {
             self.window_s = 10.0;
@@ -210,7 +188,6 @@ impl Settings {
     }
 }
 
-/// One field of the file, or its default with a note saying why.
 fn field<T: serde::de::DeserializeOwned>(obj: &serde_json::Map<String, serde_json::Value>, name: &str, default: T, notes: &mut Vec<String>) -> T {
     match obj.get(name) {
         None => default,
@@ -221,9 +198,6 @@ fn field<T: serde::de::DeserializeOwned>(obj: &serde_json::Map<String, serde_jso
     }
 }
 
-/// The channels, entry by entry: one that does not describe a channel (a bad unit or
-/// axis, a missing signal) or repeats an earlier one is left out and named; the cut
-/// to twelve comes after, so it never falls on a duplicate's place.
 fn channels(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<String>) -> Vec<SavedChannel> {
     let Some(v) = obj.get("channels") else { return Vec::new() };
     let Some(list) = v.as_array() else {
@@ -252,9 +226,6 @@ fn channels(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<St
     out
 }
 
-/// The derived channels, entry by entry, as the channels are read. A plateau in the
-/// file (put there by hand) is dropped: it belongs to the controller it was measured
-/// on, at the time.
 fn derived(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<String>) -> Vec<SavedDerived> {
     let Some(v) = obj.get("derived") else { return Vec::new() };
     let Some(list) = v.as_array() else {
@@ -291,7 +262,6 @@ fn derived(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<Str
 }
 
 impl Settings {
-    /// Write atomically: a crash while saving leaves the previous file intact.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
         let tmp = path.with_extension("json.tmp");
@@ -323,7 +293,6 @@ mod tests {
         assert_eq!(s.window_s, 10.0, "out-of-range values are clamped");
         assert_eq!(s.units, vec!["ROB_1".to_string()]);
         assert!(s.controllers.is_empty(), "nothing ships preset");
-        // A byte-order mark, as Notepad and PowerShell 5 write it, is accepted.
         std::fs::write(&p, "\u{FEFF}{\"dark\": false}").unwrap();
         let (s, note) = Settings::load(&p);
         assert!(note.is_none(), "{note:?}");
@@ -380,7 +349,6 @@ mod tests {
 
     #[test]
     fn duplicates_go_before_the_cut_to_twelve() {
-        // A, A, then eleven more: twelve distinct channels, the second A named.
         let mut list = vec![r#"{"signal": 4002, "unit": "ROB_1", "axis": 1}"#.to_string(); 2];
         for a in 1..=6 {
             list.push(format!(r#"{{"signal": 4000, "unit": "ROB_1", "axis": {a}}}"#));
@@ -392,7 +360,6 @@ mod tests {
         assert_eq!(s.channels.len(), 12, "{:?}", s.channels);
         assert_eq!((s.channels[11].unit.as_str(), s.channels[11].axis), ("ROB_2", 5), "the last one was cut for the duplicate's place");
         assert!(note.unwrap().contains("channel 2 (signal 4002 ROB_1 axis 1 a second time)"));
-        // Thirteen distinct: the cut is said too.
         list.remove(0);
         list.push(r#"{"signal": 5027, "unit": "ROB_1", "axis": 1}"#.into());
         assert_eq!(list.len(), 13);
@@ -403,8 +370,6 @@ mod tests {
 
     #[test]
     fn every_setting_survives_a_save_and_a_load() {
-        // Guards the field-by-field loader: a setting it forgot would come back as
-        // its default.
         let s = Settings {
             version: 3,
             controllers: vec![SavedController { name: "cell".into(), host: "192.0.2.77".into(), port: 5515 }],

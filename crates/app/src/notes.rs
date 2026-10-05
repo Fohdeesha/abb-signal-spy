@@ -1,14 +1,3 @@
-//! Your own notes on signals (the open-signal explorer): per signal
-//! number, the fields of the research files the catalogue is built from (their
-//! "knowledge schema"), kept on this PC beside the settings and shown in the catalogue's
-//! details beneath the catalogue's own. Exported as a TSV in that schema, to be merged
-//! into those files, or sent back by someone who found something out.
-//!
-//! An export names the program's version, the date and, when logged in to the
-//! controller's RWS, its RobotWare version, and nothing else about the controller.
-//! A note that holds an address, a system id or a path on a PC is not exported:
-//! the file is meant to be shared, and the catalogue refuses such text anyway.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -23,18 +12,13 @@ use crate::theme;
 pub const FILE: &str = "signal-notes.json";
 const FORMAT: &str = "abb-signal-spy-notes";
 const VERSION: u32 = 1;
-/// The research files' columns, in their order.
 pub const COLUMNS: [&str; 12] = ["signal", "name", "description", "units", "category", "indexing", "scope", "confidence", "evidence", "ruled_out", "open_question", "next_test"];
 
-/// How far a note's own identification goes: the catalogue's two lowest grades. A
-/// stronger one is the catalogue keeper's to give, after checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Leaning {
-    /// Responds, but what it is remains open.
     #[default]
     Open,
-    /// Fits, and no alternative survives, but not forced.
     Probable,
 }
 
@@ -50,7 +34,6 @@ impl Leaning {
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Note {
-    /// A name, if one is guessed.
     pub name: String,
     pub description: String,
     pub units: String,
@@ -60,12 +43,10 @@ pub struct Note {
     pub ruled_out: String,
     pub open_question: String,
     pub next_test: String,
-    /// When it was last saved, this PC's local time (`2026-09-29_14-03-07`).
     pub saved: String,
 }
 
 impl Note {
-    /// The written fields, by column.
     pub fn texts(&self) -> [(&'static str, &str); 8] {
         [
             ("name", &self.name),
@@ -79,25 +60,18 @@ impl Note {
         ]
     }
 
-    /// Nothing written in it (a leaning alone says nothing).
     pub fn is_empty(&self) -> bool {
         self.texts().iter().all(|(_, t)| t.trim().is_empty())
     }
 }
 
-/// The notes, and the file they live in.
 pub struct Notes {
     pub map: BTreeMap<u32, Note>,
     path: PathBuf,
-    /// The file is there but could not be read, and could not be set aside: saving
-    /// would overwrite what is in it, so saving is refused and says why.
     locked: Option<String>,
 }
 
 impl Notes {
-    /// Load, or none. The second value is a note for the person when something was
-    /// wrong with the file. A file that is not a notes file at all is set aside
-    /// (renamed), never overwritten; one bad note costs that note, not the others.
     pub fn load(path: &Path) -> (Notes, Option<String>) {
         let mut notes = Notes { map: BTreeMap::new(), path: path.to_path_buf(), locked: None };
         let text = match std::fs::read_to_string(path) {
@@ -116,7 +90,6 @@ impl Notes {
                     Err(e) => e.to_string(),
                     Ok(_) => "it is not a notes file".into(),
                 };
-                // A name of its own: a rename onto an earlier one would replace it.
                 let stamp = spy_core::util::local_stamp(std::time::SystemTime::now());
                 let aside = (1..1000)
                     .map(|i| path.with_extension(if i == 1 { format!("json.bad-{stamp}") } else { format!("json.bad-{stamp}-{i}") }))
@@ -150,7 +123,6 @@ impl Notes {
         self.map.get(&n)
     }
 
-    /// Keep `note` for `n` (an empty one removes it) and save; unchanged on failure.
     pub fn put(&mut self, n: u32, note: Note) -> Result<(), String> {
         let mut map = self.map.clone();
         if note.is_empty() {
@@ -163,7 +135,6 @@ impl Notes {
         Ok(())
     }
 
-    /// Written atomically: a crash while saving leaves the previous file whole.
     fn write(&self, map: &BTreeMap<u32, Note>) -> Result<(), String> {
         if let Some(why) = &self.locked {
             return Err(why.clone());
@@ -177,22 +148,16 @@ impl Notes {
     }
 }
 
-/// What an export says about where it comes from.
 pub struct Origin<'a> {
     pub app_version: &'a str,
-    /// Local date and time, as a person reads it.
     pub date: &'a str,
     pub robotware: Option<&'a str>,
 }
 
-/// A field as one TSV cell: tabs, line breaks and other control characters become
-/// spaces, runs of spaces one, ends trimmed.
 fn cell(s: &str) -> String {
     s.split(|c: char| c.is_control() || c.is_whitespace()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-/// The notes as a TSV in the research files' schema: comment lines saying what it is
-/// and where it comes from, the column line, then one row per signal, in number order.
 pub fn tsv(map: &BTreeMap<u32, Note>, o: &Origin) -> String {
     let mut out = String::new();
     out.push_str("# Notes on ABB test signals, written in ABB Signal Spy, in the columns of its catalogue's research files.\n");
@@ -224,8 +189,6 @@ pub fn tsv(map: &BTreeMap<u32, Note>, o: &Origin) -> String {
     out
 }
 
-/// Where a note holds what identifies a controller or a PC, which a shared file must
-/// not carry: an IPv4 address, a system id, a path on a PC. (signal, column, the text.)
 pub fn private_text(map: &BTreeMap<u32, Note>) -> Vec<(u32, &'static str, String)> {
     let mut found = Vec::new();
     for (&n, note) in map {
@@ -248,7 +211,6 @@ fn find_private(s: &str) -> Option<String> {
         if !before.is_some_and(|c| c.is_ascii_hexdigit()) && guid_at(b, i) {
             return Some(s[i..i + 36].to_string());
         }
-        // A drive's path (C:\...) or a share's (\\server\...).
         let path = (b[i].is_ascii_alphabetic() && b.get(i + 1) == Some(&b':') && matches!(b.get(i + 2), Some(b'\\') | Some(b'/')) && !before.is_some_and(|c| c.is_ascii_alphanumeric()))
             || (b[i] == b'\\' && b.get(i + 1) == Some(&b'\\') && b.get(i + 2).is_some_and(|c| c.is_ascii_alphanumeric()));
         if path {
@@ -259,8 +221,6 @@ fn find_private(s: &str) -> Option<String> {
     None
 }
 
-/// The length of an IPv4 address starting at `i` (four numbers of up to 255, dotted,
-/// not followed by another digit or dotted number).
 fn ipv4_at(b: &[u8], i: usize) -> Option<usize> {
     let mut j = i;
     for part in 0..4 {
@@ -283,21 +243,18 @@ fn ipv4_at(b: &[u8], i: usize) -> Option<usize> {
     (!more).then_some(j - i)
 }
 
-/// A system id (a GUID: 8-4-4-4-12 hexadecimal digits) starting at `i`.
 fn guid_at(b: &[u8], i: usize) -> bool {
     let Some(g) = b.get(i..i + 36) else { return false };
     let dash = |k: usize| matches!(k, 8 | 13 | 18 | 23);
     g.iter().enumerate().all(|(k, &c)| if dash(k) { c == b'-' } else { c.is_ascii_hexdigit() }) && !b.get(i + 36).is_some_and(|c| c.is_ascii_hexdigit())
 }
 
-/// The editor's state: which signal, and the note as typed so far.
 pub struct Edit {
     pub signal: u32,
     pub draft: Note,
 }
 
 impl SpyApp {
-    /// The details' section for the person's own notes on signal `n`.
     pub(crate) fn notes_section(&mut self, ui: &mut egui::Ui, n: u32) {
         ui.add_space(6.0);
         ui.separator();
@@ -343,7 +300,6 @@ impl SpyApp {
         }
     }
 
-    /// The notes editor, while open.
     pub fn notes_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut e) = self.note_edit.take() else { return };
         let title = match self.catalogue.get(e.signal) {
@@ -406,11 +362,9 @@ impl SpyApp {
             let empty = note.is_empty();
             match self.notes.put(n, note) {
                 Ok(()) => {
-                    // The toast logs it too.
                     self.toast(Level::Info, if delete || empty { format!("Your notes on {n} are deleted.") } else { format!("Your notes on {n} are saved.") });
                     close = true;
                 }
-                // Kept open, the text as typed: nothing is lost to a failed save.
                 Err(why) => self.toast(Level::Error, format!("Your notes on {n} were not saved: {why}")),
             }
         }
@@ -419,7 +373,6 @@ impl SpyApp {
         }
     }
 
-    /// Write every note to a TSV in the recordings folder.
     pub fn export_notes(&mut self) {
         if self.notes.map.values().all(Note::is_empty) {
             self.toast(Level::Warn, "No notes to export yet: add yours in a signal's details.");
@@ -450,14 +403,12 @@ impl SpyApp {
         match written {
             Ok(path) => {
                 let n = self.notes.map.values().filter(|x| !x.is_empty()).count();
-                // The toast logs it too.
                 self.toast(Level::Info, format!("Exported your notes on {n} signal(s) to {}.", path.display()));
             }
             Err(e) => self.toast(Level::Error, format!("Your notes were not exported: {e}")),
         }
     }
 
-    /// The export's entry, for the Catalogue menu.
     pub(crate) fn export_notes_button(&mut self, ui: &mut egui::Ui) {
         let any = !self.notes.map.is_empty();
         if ui
@@ -472,13 +423,11 @@ impl SpyApp {
     }
 }
 
-/// A small mark for the catalogue list: the person has notes on it.
 #[cfg(test)]
 mod tests {
     use super::*;
     use spy_core::testdir::TestDir;
 
-    /// The notes file in a folder of its own, which goes when the test ends.
     fn temp(tag: &str) -> (TestDir, PathBuf) {
         let d = TestDir::new(&format!("notes-{tag}"));
         let p = d.join(FILE);
@@ -501,7 +450,6 @@ mod tests {
         assert!(msg.is_none(), "{msg:?}");
         assert_eq!(back.get(6914), Some(&full), "every field kept");
         assert_eq!(back.map.len(), 2);
-        // Emptied, a note goes; the leaning alone is not a note.
         notes.put(5015, Note { confidence: Leaning::Probable, ..Note::default() }).unwrap();
         assert_eq!(Notes::load(&p).0.map.keys().copied().collect::<Vec<_>>(), vec![6914]);
     }
@@ -514,7 +462,6 @@ mod tests {
         assert_eq!(notes.map.keys().copied().collect::<Vec<_>>(), vec![1403]);
         let msg = msg.expect("the person is told");
         assert!(msg.contains("\"abc\"") && msg.contains("\"0\"") && msg.contains("\"5007\""), "{msg}");
-        // Not a notes file at all: kept aside, and a save afterwards starts afresh.
         std::fs::write(&p, "{ not json").unwrap();
         let (mut notes, msg) = Notes::load(&p);
         assert!(msg.unwrap().contains("kept as"));
@@ -524,8 +471,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(aside[0].path()).unwrap(), "{ not json");
         notes.put(1, note("a", "")).unwrap();
         assert!(p.exists());
-        // Another program's file, even valid JSON, is not taken for notes; set aside in
-        // the same second as the first, it does not replace that one.
         std::fs::write(&p, r#"{"format":"abb-signal-spy-catalogue","signals":[]}"#).unwrap();
         assert!(Notes::load(&p).1.unwrap().contains("not a notes file"));
         let kept: Vec<String> = std::fs::read_dir(p.parent().unwrap()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".bad-")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
@@ -536,7 +481,6 @@ mod tests {
     #[test]
     fn a_file_that_cannot_be_read_is_never_overwritten() {
         let (_dir, p) = temp("locked");
-        // A folder where the file should be: unreadable, and not renamable into place.
         std::fs::create_dir_all(&p).unwrap();
         let (mut notes, msg) = Notes::load(&p);
         assert!(msg.unwrap().contains("could not be read"));

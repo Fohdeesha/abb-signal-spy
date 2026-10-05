@@ -1,25 +1,11 @@
-//! A note for when memory runs out. When an allocation is refused, Rust stops the
-//! program at once, without the panic hook (so no crash.txt) and without a line in the
-//! log: on the cell (2026-09-29) the window
-//! simply vanished, the PC at its commit limit. The global allocator here passes every
-//! request to the system's and, when one is refused, writes a note to crash.txt and a
-//! line to signal-spy.log first.
-//!
-//! Nothing on that path allocates: the files' paths are prepared at startup, the text
-//! is put together on the stack, and the files are written with Win32 directly. A
-//! refusal does not always stop the program (some code asks for memory it can do
-//! without), so the note says what happened, not that the program stopped.
-
 use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-/// The system's allocator, noting a refusal first.
 pub struct NoteOnRefusal<A: GlobalAlloc>(pub A);
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for NoteOnRefusal<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's contract, passed on unchanged.
         let p = unsafe { self.0.alloc(layout) };
         if p.is_null() {
             note(layout.size());
@@ -28,7 +14,6 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for NoteOnRefusal<A> {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: as above.
         let p = unsafe { self.0.alloc_zeroed(layout) };
         if p.is_null() {
             note(layout.size());
@@ -37,12 +22,10 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for NoteOnRefusal<A> {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: as above.
         unsafe { self.0.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: as above.
         let p = unsafe { self.0.realloc(ptr, layout, new_size) };
         if p.is_null() {
             note(new_size);
@@ -51,14 +34,10 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for NoteOnRefusal<A> {
     }
 }
 
-/// crash.txt and signal-spy.log in the data folder, as NUL-terminated wide strings.
 static PATHS: OnceLock<(Vec<u16>, Vec<u16>)> = OnceLock::new();
-/// One note per run: refusals come in bursts when memory runs out.
 static NOTED: AtomicBool = AtomicBool::new(false);
-/// How many requests were refused (a test reads it).
 static REFUSALS: AtomicUsize = AtomicUsize::new(0);
 
-/// Where the note goes; called at startup, while allocating is still possible.
 pub fn prepare(dir: &std::path::Path) {
     let _ = PATHS.set((wide(&dir.join("crash.txt")), wide(&dir.join("signal-spy.log"))));
 }
@@ -75,7 +54,6 @@ fn wide(p: &std::path::Path) -> Vec<u16> {
     }
 }
 
-/// A fixed buffer written into without allocating.
 pub struct Text {
     buf: [u8; 640],
     len: usize,
@@ -93,7 +71,6 @@ impl Text {
         self
     }
 
-    /// A number, with at least `width` digits.
     pub fn num(&mut self, mut v: u64, width: usize) -> &mut Text {
         let mut digits = [0u8; 20];
         let mut n = 0;
@@ -104,7 +81,6 @@ impl Text {
         }
         for i in (0..n).rev() {
             let d = [digits[i]];
-            // Always ASCII.
             self.push(std::str::from_utf8(&d).unwrap_or("?"));
         }
         self
@@ -121,7 +97,6 @@ impl Default for Text {
     }
 }
 
-/// UTC as the log writes it, `2026-09-29T04:31:27.123Z`.
 pub struct Utc {
     pub year: u16,
     pub month: u16,
@@ -137,7 +112,6 @@ fn stamp(t: &mut Text, u: &Utc) {
     t.num(u.hour.into(), 2).push(":").num(u.minute.into(), 2).push(":").num(u.second.into(), 2).push(".").num(u.ms.into(), 3).push("Z");
 }
 
-/// The note in crash.txt.
 pub fn crash_note(t: &mut Text, size: usize, at: &Utc) {
     t.push("ABB Signal Spy ").push(env!("CARGO_PKG_VERSION")).push(": at ");
     stamp(t, at);
@@ -148,7 +122,6 @@ pub fn crash_note(t: &mut Text, size: usize, at: &Utc) {
     t.push("program instead: please report it.)\r\n");
 }
 
-/// The line in signal-spy.log.
 pub fn log_line(t: &mut Text, size: usize, at: &Utc) {
     stamp(t, at);
     t.push(" ERROR Windows refused ").num(size as u64, 1).push(" bytes of memory (the PC's memory used up?). If the program stopped now, this is why; details in crash.txt.\n");
@@ -172,7 +145,6 @@ fn note(size: usize) {
 #[cfg(windows)]
 fn now() -> Utc {
     use windows_sys::Win32::System::SystemInformation::GetSystemTime;
-    // SAFETY: GetSystemTime fills the structure it is given.
     let s = unsafe {
         let mut s = std::mem::zeroed();
         GetSystemTime(&mut s);
@@ -186,14 +158,11 @@ fn now() -> Utc {
     Utc { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, ms: 0 }
 }
 
-/// Write `bytes` to the file at `path` (NUL-terminated, wide): replacing it, or at its
-/// end. Failures are ignored: there is nothing left to tell them to.
 #[cfg(windows)]
 fn write(path: &[u16], bytes: &[u8], append: bool) {
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, WriteFile, CREATE_ALWAYS, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS};
     let (access, disposition) = if append { (FILE_APPEND_DATA, OPEN_ALWAYS) } else { (GENERIC_WRITE, CREATE_ALWAYS) };
-    // SAFETY: `path` is NUL-terminated; the handle is checked and closed.
     unsafe {
         let h = CreateFileW(path.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), disposition, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut());
         if h == INVALID_HANDLE_VALUE {
@@ -229,7 +198,6 @@ mod tests {
         assert!(s.starts_with("2026-09-29T04:31:27.005Z ERROR Windows refused 0 bytes") && s.ends_with("crash.txt.\n"), "{s}");
     }
 
-    /// An allocator that refuses everything.
     struct Refuses;
 
     unsafe impl GlobalAlloc for Refuses {
@@ -244,16 +212,12 @@ mod tests {
         let a = NoteOnRefusal(Refuses);
         let l = Layout::from_size_align(64, 8).unwrap();
         let before = REFUSALS.load(Ordering::SeqCst);
-        // SAFETY: nothing is done with the (null) results; `realloc`'s pointer is never
-        // read by an allocator that refuses everything.
         unsafe {
             assert!(a.alloc(l).is_null());
             assert!(a.alloc_zeroed(l).is_null());
             let mut x = 0u64;
             assert!(a.realloc(std::ptr::addr_of_mut!(x).cast(), l, 128).is_null());
         }
-        // Other tests' requests go to the system's allocator, not this one, so the count
-        // is this test's alone.
         assert_eq!(REFUSALS.load(Ordering::SeqCst) - before, 3, "a refused request went unnoted");
     }
 

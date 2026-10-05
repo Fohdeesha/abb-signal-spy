@@ -1,15 +1,7 @@
-//! Where things live on disk.
-//!
-//! Settings and the log go in `%LOCALAPPDATA%\ABB Signal Spy`, or beside the `.exe`
-//! when a `settings.json` is already there (a portable copy on a USB stick keeps its
-//! settings with it). Recordings default to `Documents\TestSignals`.
-
 use std::path::{Path, PathBuf};
 
 pub const APP_DIR: &str = "ABB Signal Spy";
 
-/// The folder for settings and the log, created if needed. `ABB_SIGNAL_SPY_DATA`
-/// overrides it (a second, separate set of settings, or a test run).
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("ABB_SIGNAL_SPY_DATA").filter(|d| !d.is_empty()) {
         let dir = PathBuf::from(d);
@@ -25,20 +17,16 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
-/// The `.exe`'s folder, if a settings file is already there.
 pub fn portable_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?.to_path_buf();
     dir.join("settings.json").is_file().then_some(dir)
 }
 
-/// `Documents\TestSignals`.
 pub fn default_record_dir() -> PathBuf {
     documents().join("TestSignals")
 }
 
-// From ole32.dll, which has it on every Windows: windows-sys names combase.dll, which
-// Windows 7 does not have, and an exe importing it does not start there.
 #[cfg(windows)]
 #[link(name = "ole32")]
 unsafe extern "system" {
@@ -48,8 +36,6 @@ unsafe extern "system" {
 #[cfg(windows)]
 fn documents() -> PathBuf {
     use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
-    // The known-folder call follows a Documents folder redirected elsewhere (to
-    // OneDrive, or a network share), which %USERPROFILE%\Documents does not.
     unsafe {
         let mut p: windows_sys::core::PWSTR = std::ptr::null_mut();
         let hr = SHGetKnownFolderPath(&FOLDERID_Documents, 0, std::ptr::null_mut(), &mut p);
@@ -79,7 +65,6 @@ fn fallback_documents() -> PathBuf {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|h| Path::new(&h).join("Documents")).unwrap_or_else(std::env::temp_dir)
 }
 
-/// Open a folder in Explorer.
 pub fn open_folder(dir: &Path) {
     #[cfg(windows)]
     {

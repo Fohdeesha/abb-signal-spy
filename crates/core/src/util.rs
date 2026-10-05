@@ -1,9 +1,5 @@
-//! Small helpers with no better home.
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// UTC wall time as ISO 8601 with milliseconds, without pulling in a date crate:
-/// days-from-civil arithmetic (Howard Hinnant's algorithm, public domain).
 pub fn wall_iso(t: SystemTime) -> String {
     let (secs, millis) = match t.duration_since(UNIX_EPOCH) {
         Ok(d) => (d.as_secs() as i64, d.subsec_millis()),
@@ -19,8 +15,6 @@ pub fn wall_iso(t: SystemTime) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}Z", sod / 3600, (sod / 60) % 60, sod % 60)
 }
 
-/// The inverse of [`wall_iso`]: `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, UTC only (what a
-/// recording's description holds). `None` for anything else.
 pub fn parse_iso(s: &str) -> Option<SystemTime> {
     let b = s.as_bytes();
     if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' || *b.last()? != b'Z' {
@@ -41,7 +35,6 @@ pub fn parse_iso(s: &str) -> Option<SystemTime> {
         return None;
     }
     let days = days_from_civil(y, mo as u32, d as u32);
-    // The day must exist (no 31 February).
     if civil_from_days(days) != (y, mo as u32, d as u32) {
         return None;
     }
@@ -60,32 +53,23 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Text without a leading UTF-8 byte-order mark. Notepad and PowerShell 5 write one,
-/// and a JSON parser refuses it; a person who hand-edits a settings or catalogue
-/// file must not have it rejected for that.
 pub fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{FEFF}').unwrap_or(s)
 }
 
-/// UTC date and time in file-name form: `2026-09-25_14-03-07`.
 pub fn wall_stamp(t: SystemTime) -> String {
     let iso = wall_iso(t);
     format!("{}_{}", &iso[0..10], iso[11..19].replace(':', "-"))
 }
 
-/// Local date and time of `t` as (year, month, day, hour, minute, second,
-/// millisecond), daylight saving as it was on that date; `None` where the platform
-/// gives no local time.
 pub fn local_parts(t: SystemTime) -> Option<(u16, u16, u16, u16, u16, u16, u16)> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
         use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
         let d = t.duration_since(UNIX_EPOCH).ok()?;
-        // FILETIME: 100 ns ticks since 1601.
         let ticks = d.as_nanos() / 100 + 116_444_736_000_000_000;
         let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
-        // SAFETY: two documented conversions writing into zeroed out-parameters.
         unsafe {
             let mut utc: SYSTEMTIME = std::mem::zeroed();
             let mut local: SYSTEMTIME = std::mem::zeroed();
@@ -102,8 +86,6 @@ pub fn local_parts(t: SystemTime) -> Option<(u16, u16, u16, u16, u16, u16, u16)>
     }
 }
 
-/// Local date and time for folder and file names, `2026-09-26_04-47-20`: the clock a
-/// person looks for a recording by. Where local time is unknown, UTC marked `Z`.
 pub fn local_stamp(t: SystemTime) -> String {
     match local_parts(t) {
         Some((y, mo, d, h, mi, s, _)) => format!("{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{s:02}"),

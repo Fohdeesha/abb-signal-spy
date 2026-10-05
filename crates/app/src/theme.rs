@@ -1,66 +1,41 @@
-//! The look (G47-G49): takt4's Weltformat dark, flat square sheets on a near-black page,
-//! one red, lowercase labels, numbers in a mono face; a light theme beside it. Made to
-//! be read on an old field laptop's small screen: body text 16 px and nothing under
-//! 14 px, every text colour at 7:1 or better on what it sits on, controls 36-40 px tall.
-//!
-//! The typefaces are Atkinson Hyperlegible Next and Mono (SIL Open Font License 1.1,
-//! `fonts/`), built into the program, so a laptop without them shows the same window.
-//! Arrows, squares and the like are drawn, not typed: neither face has them.
-
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Margin, Rect, RichText, Sense, Shadow, Stroke, TextStyle, Vec2, pos2, vec2};
 
-/// One theme's colours.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pal {
-    /// Behind the sheets.
     pub page: Color32,
-    /// Every section is a sheet of this, flat and square, 8 px apart.
     pub sheet: Color32,
-    /// Hairlines between rows.
     pub line: Color32,
     pub ink: Color32,
-    /// Labels and readings that are not the main thing.
     pub ink2: Color32,
-    /// The dimmest text there is: hints and units in lists (still 7:1).
     pub ink3: Color32,
-    /// Section numbers, recording, errors: the one red.
     pub red: Color32,
     pub link: Color32,
     pub live: Color32,
-    /// Stale, waiting, paused: anything that is not current.
     pub hold: Color32,
     pub field: Color32,
     pub field_edge: Color32,
     pub field_edge_hover: Color32,
-    /// A control that cannot be used: this face and a dashed edge.
     pub off_face: Color32,
     pub off_edge: Color32,
     pub face_hover: Color32,
     pub face_pressed: Color32,
-    /// The one control in a row to reach for (Connect), and a chosen chip.
     pub primary: Color32,
     pub primary_hover: Color32,
     pub primary_pressed: Color32,
     pub on_primary: Color32,
-    /// The record button while recording.
     pub panic: Color32,
     pub panic_hover: Color32,
     pub panic_pressed: Color32,
     pub on_panic: Color32,
-    /// Behind a chart.
     pub plot: Color32,
     pub grid: Color32,
     pub grid_zero: Color32,
-    /// The small buttons over a chart.
     pub chip: Color32,
-    /// A channel that is not current: its row's face and edge.
     pub stale_face: Color32,
     pub stale_edge: Color32,
-    /// A picked row in a list, and selected text.
     pub picked: Color32,
 }
 
-/// takt4's Weltformat dark (its `swissdark` tokens), the default (G48).
 pub const DARK: Pal = Pal {
     page: Color32::from_rgb(0x0e, 0x0e, 0x0e),
     sheet: Color32::from_rgb(0x1b, 0x1b, 0x1a),
@@ -96,8 +71,6 @@ pub const DARK: Pal = Pal {
     picked: Color32::from_rgb(0x2c, 0x2c, 0x2a),
 };
 
-/// The same sheet in daylight: paper on a grey page, the ink and the red darkened to
-/// keep their contrast.
 pub const LIGHT: Pal = Pal {
     page: Color32::from_rgb(0xd6, 0xd5, 0xcf),
     sheet: Color32::from_rgb(0xf7, 0xf6, 0xf2),
@@ -137,12 +110,10 @@ pub fn pal_of(dark: bool) -> &'static Pal {
     if dark { &DARK } else { &LIGHT }
 }
 
-/// The colours of the theme `ui` is drawn in.
 pub fn pal(ui: &egui::Ui) -> &'static Pal {
     pal_of(ui.visuals().dark_mode)
 }
 
-/// Twelve channel colours for each theme, told apart on its charts' background.
 const CHANNELS_DARK: [Color32; 12] = [
     Color32::from_rgb(0x6a, 0xa7, 0xff),
     Color32::from_rgb(0xff, 0x9f, 0x43),
@@ -178,34 +149,25 @@ pub fn channel_color(i: usize, dark: bool) -> Color32 {
     p[i % p.len()]
 }
 
-// ------------------------------------------------------------------ type
-
 const NEXT: &[u8] = include_bytes!("../fonts/AtkinsonHyperlegibleNext-Variable.ttf");
 const MONO: &[u8] = include_bytes!("../fonts/AtkinsonHyperlegibleMono-Variable.ttf");
 
-/// Labels, buttons and readings that matter.
 pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-/// Section headings.
 pub fn heavy() -> FontFamily {
     FontFamily::Name("heavy".into())
 }
 
-/// Values.
 pub fn mono_bold() -> FontFamily {
     FontFamily::Name("mono-bold".into())
 }
 
-/// One face of a variable font at one weight.
 fn face(bytes: &'static [u8], weight: f32) -> egui::FontData {
     egui::FontData::from_static(bytes).tweak(egui::FontTweak { coords: egui::epaint::text::VariationCoords::new([("wght", weight)]), ..Default::default() })
 }
 
-/// The two faces at their four weights, then Windows' own symbol and UI fonts for
-/// anything they lack (an unusual character in a controller's or a unit's name), then
-/// egui's. A missing Windows font is skipped: the program looks plainer, not broken.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let egui_fallbacks: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -229,19 +191,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Text in the bold face.
 pub fn b(text: impl Into<String>) -> RichText {
     RichText::new(text).family(bold())
 }
 
-/// A number in the mono face, bold, at `size`.
 pub fn num(text: impl Into<String>, size: f32) -> RichText {
     RichText::new(text).font(FontId::new(size, mono_bold()))
 }
 
-// ------------------------------------------------------------------ style
-
-/// The heights of things.
 pub const TOOL_H: f32 = 36.0;
 pub const SMALL_H: f32 = 30.0;
 
@@ -259,7 +216,6 @@ fn style(dark: bool) -> egui::Style {
         drag_value_text_style: TextStyle::Body,
         ..Default::default()
     };
-    // A label that selects its text takes the click a row or a chart title waits for.
     s.interaction.selectable_labels = false;
     let sp = &mut s.spacing;
     sp.item_spacing = vec2(8.0, 6.0);
@@ -325,28 +281,21 @@ pub fn apply(ctx: &egui::Context, dark: bool, scale: f32) {
     ctx.set_zoom_factor(scale);
 }
 
-// ------------------------------------------------------------------ drawn marks
-
-/// The marks the window draws instead of typing them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Down,
     Right,
     Left,
-    /// Fold a panel away to the left.
     FoldLeft,
     FoldRight,
-    /// Fill the middle with one chart.
     Expand,
     Collapse,
     Plus,
     Minus,
     Close,
-    /// The live dashboard.
     Grid,
 }
 
-/// Paint `icon` in `rect`, centred, about 14 px.
 pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let st = Stroke::new(2.0, color);
@@ -380,8 +329,6 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
     painter.extend(shapes);
 }
 
-/// A square button carrying only `icon`, named `name` for a tooltip and for assistive
-/// tools (and the tests).
 pub fn icon_button(ui: &mut egui::Ui, icon: Icon, name: &str, size: Vec2) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(size, Sense::click());
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
@@ -393,34 +340,27 @@ pub fn icon_button(ui: &mut egui::Ui, icon: Icon, name: &str, size: Vec2) -> egu
     r.on_hover_text(name)
 }
 
-/// A filled square, the window's dot: a channel's colour, a state's.
 pub fn square(ui: &mut egui::Ui, color: Color32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, color);
 }
 
-/// An empty square: a state that is off.
 pub fn hollow(ui: &mut egui::Ui, color: Color32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
     ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
-/// A dashed outline: what is locked, or not chosen.
 pub fn dashed_rect(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
     let r = rect.shrink(stroke.width / 2.0);
     let pts = vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
     painter.extend(egui::Shape::dashed_line(&pts, stroke, 5.0, 3.0));
 }
 
-// ------------------------------------------------------------------ controls
-
-/// The button in a row to reach for: ink on paper reversed.
 pub fn primary(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response {
     let p = pal(ui);
     filled(ui, egui::Button::new(text).min_size(vec2(0.0, height)), (p.primary, p.primary_hover, p.primary_pressed), p.on_primary)
 }
 
-/// A button filled red (the record button while recording).
 pub fn red_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response {
     let p = pal(ui);
     filled(ui, button, (p.panic, p.panic_hover, p.panic_pressed), p.on_panic)
@@ -440,12 +380,10 @@ fn filled(ui: &mut egui::Ui, button: egui::Button<'_>, (rest, hover, pressed): (
     .inner
 }
 
-/// A button at the toolbar height.
 pub fn tool(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(text).min_size(vec2(0.0, TOOL_H)))
 }
 
-/// A button that opens a list: its label and a chevron under it.
 pub fn drop_button(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response {
     let id = ui.next_auto_id().with("chevron");
     let r = egui::Button::new((text, egui::Atom::custom(id, vec2(12.0, 10.0)))).min_size(vec2(0.0, height)).atom_ui(ui);
@@ -456,7 +394,6 @@ pub fn drop_button(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response
     r.response
 }
 
-/// A button outlined and lettered in `color` (remove, in red).
 pub fn outline_button(ui: &mut egui::Ui, text: &str, color: Color32, height: f32) -> egui::Response {
     ui.scope(|ui| {
         let w = &mut ui.visuals_mut().widgets;
@@ -469,7 +406,6 @@ pub fn outline_button(ui: &mut egui::Ui, text: &str, color: Color32, height: f32
     .inner
 }
 
-/// A button with a drawn mark before its label; filled while `on`.
 pub fn icon_text_button(ui: &mut egui::Ui, icon: Icon, text: &str, height: f32, on: bool) -> egui::Response {
     let id = ui.next_auto_id().with("icon");
     let p = pal(ui);
@@ -495,38 +431,28 @@ pub fn icon_text_button(ui: &mut egui::Ui, icon: Icon, text: &str, height: f32, 
     r.response
 }
 
-/// A button's width for `text` at the button padding in use: for laying a row out
-/// before drawing it.
 pub fn button_width(ui: &egui::Ui, text: &str) -> f32 {
     let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
     galley.size().x + 2.0 * ui.spacing().button_padding.x
 }
 
-/// The time axis under a chart: its words far enough apart for a clock's width, and
-/// never faded (egui_plot fades a label until its neighbours are far enough away).
 pub fn time_axis<'a>(p: &Pal, fmt: impl Fn(egui_plot::GridMark, &std::ops::RangeInclusive<f64>) -> String + 'a) -> egui_plot::AxisHints<'a> {
     egui_plot::AxisHints::new_x().formatter(fmt).label_spacing(92.0..=93.0).tick_label_font(FontId::monospace(14.0)).tick_label_color(p.ink2)
 }
 
-/// The value axis beside a chart: a label every 22 px or more, so a short chart still
-/// has three, never faded.
 pub fn value_axis<'a>(p: &Pal) -> egui_plot::AxisHints<'a> {
     egui_plot::AxisHints::new_y().label_spacing(22.0..=23.0).min_thickness(52.0).tick_label_font(FontId::monospace(14.0)).tick_label_color(p.ink2)
 }
 
-/// A combo box's chevron, drawn as the rest of the window's.
 pub fn combo_icon(ui: &egui::Ui, rect: Rect, visuals: &egui::style::WidgetVisuals, _open: bool) {
     paint_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(12.0, 10.0)), Icon::Down, visuals.fg_stroke.color);
 }
 
-/// A thin upright rule between groups in a row.
 pub fn vrule(ui: &mut egui::Ui, height: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(9.0, height), Sense::hover());
     ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, pal(ui).line));
 }
 
-/// A primary button standing on its end, its label read bottom to top: the folded
-/// signal list's way back.
 pub fn upright_button(ui: &mut egui::Ui, text: &str, size: Vec2) -> egui::Response {
     let p = pal(ui);
     let (rect, r) = ui.allocate_exact_size(size, Sense::click());
@@ -536,15 +462,12 @@ pub fn upright_button(ui: &mut egui::Ui, text: &str, size: Vec2) -> egui::Respon
         ui.painter().rect_filled(rect, 0.0, fill);
         let galley = egui::WidgetText::from(b(text)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
         let (w, h) = (galley.size().x, galley.size().y);
-        // Turned a quarter anticlockwise about its top left corner, which then sits at
-        // the bottom left of where it is drawn.
         let at = pos2(rect.center().x - h / 2.0, rect.center().y + w / 2.0);
         ui.painter().add(egui::epaint::TextShape::new(at, galley, p.on_primary).with_angle(-std::f32::consts::FRAC_PI_2));
     }
     r
 }
 
-/// A toggle shown as a chip: filled when on, a dashed outline when off.
 pub fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
     let p = pal(ui);
     let galley = egui::WidgetText::from(b(text)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
@@ -567,11 +490,7 @@ pub fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
     r
 }
 
-/// A button with a small arrow beside it that opens its settings (G47: one click
-/// records, saves or logs; the name, the seconds or the interval sit behind the
-/// arrow). `main` draws the button and returns its response; `settings` fills the popup.
 pub fn split(ui: &mut egui::Ui, arrow_name: &str, main: impl FnOnce(&mut egui::Ui) -> egui::Response, settings: impl FnOnce(&mut egui::Ui)) -> egui::Response {
-    // No scope around the two: in a wrapping row, a scope would not wrap as one.
     let r = main(ui);
     ui.add_space(-ui.spacing().item_spacing.x);
     let arrow = icon_button(ui, Icon::Down, arrow_name, vec2(32.0, r.rect.height()));
@@ -582,8 +501,6 @@ pub fn split(ui: &mut egui::Ui, arrow_name: &str, main: impl FnOnce(&mut egui::U
     r
 }
 
-/// A section's heading: its red number and its name, `right` beside them, and a rule
-/// under it (2 px in ink when `strong`).
 pub fn section<R>(ui: &mut egui::Ui, number: &str, title: &str, strong: bool, right: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let p = pal(ui);
     let inner = ui
@@ -604,7 +521,6 @@ pub fn section<R>(ui: &mut egui::Ui, number: &str, title: &str, strong: bool, ri
     inner
 }
 
-/// A section's red number and its name.
 fn heading(ui: &mut egui::Ui, number: &str, title: &str) {
     let p = pal(ui);
     ui.label(RichText::new(number).font(FontId::new(18.0, heavy())).color(p.red));
@@ -613,10 +529,6 @@ fn heading(ui: &mut egui::Ui, number: &str, title: &str) {
     }
 }
 
-/// A section's heading with its tools: `left` after its name and `right` at its right
-/// edge, on one row when they fit, else `right` on a second row. The widths are the
-/// tools' own (see [`button_width`]), so the rows are decided before anything is drawn:
-/// egui's wrapping rows do not wrap a group of buttons as one.
 pub fn section_tools(ui: &mut egui::Ui, number: &str, title: &str, left_w: f32, right_w: f32, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
     let p = pal(ui);
     let title_w = [number, title].iter().filter(|t| !t.is_empty()).map(|t| egui::WidgetText::from(RichText::new(*t).font(FontId::new(18.0, heavy()))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Body).size().x + ui.spacing().item_spacing.x).sum::<f32>();
@@ -638,18 +550,14 @@ pub fn section_tools(ui: &mut egui::Ui, number: &str, title: &str, left_w: f32, 
     ui.add_space(8.0);
 }
 
-/// The width a row of buttons takes: their labels, padding and the spacing between,
-/// plus `extra` for what is not a plain button (an arrow, a tag).
 pub fn buttons_width(ui: &egui::Ui, texts: &[&str], extra: f32) -> f32 {
     texts.iter().map(|t| button_width(ui, t)).sum::<f32>() + ui.spacing().item_spacing.x * texts.len() as f32 + extra
 }
 
-/// A sheet: flat, square, the page showing 8 px around it.
 pub fn sheet_frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new().fill(pal(ui).sheet).inner_margin(Margin::same(10))
 }
 
-/// What a status-strip cell's square says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
     On,
@@ -657,7 +565,6 @@ pub enum Mark {
     None,
 }
 
-/// One cell of the status strip: a rule over a small label and a bold value.
 pub fn status_cell(ui: &mut egui::Ui, width: f32, key: &str, value: &str, color: Color32, mark: Mark, rule: Color32) -> egui::Response {
     let p = pal(ui);
     ui.allocate_ui_with_layout(vec2(width, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -681,7 +588,6 @@ pub fn status_cell(ui: &mut egui::Ui, width: f32, key: &str, value: &str, color:
     .response
 }
 
-/// A small outlined tag, for FROZEN, "smoothed 100 ms" and the like.
 pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32, tip: &str) -> egui::Response {
     let galley = egui::WidgetText::from(b(text).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Small);
     let (rect, r) = ui.allocate_exact_size(galley.size() + vec2(12.0, 2.0), Sense::hover());
@@ -695,7 +601,6 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32, tip: &str) -> egui::
 mod tests {
     use super::*;
 
-    /// WCAG's contrast ratio.
     fn contrast(a: Color32, b: Color32) -> f64 {
         let lum = |c: Color32| {
             let f = |u: u8| {
@@ -765,19 +670,14 @@ mod tests {
         let ctx = egui::Context::default();
         install_fonts(&ctx);
         apply(&ctx, true, 1.0);
-        // A frame, so the fonts are loaded (its font texture, unused, let go).
         ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
         let defs = ctx.fonts(|f| f.definitions().clone());
         for (family, first) in [(FontFamily::Proportional, "next-400"), (bold(), "next-700"), (heavy(), "next-800"), (FontFamily::Monospace, "mono-400"), (mono_bold(), "mono-700")] {
             assert_eq!(defs.families[&family].first().map(String::as_str), Some(first), "{family:?}");
         }
-        // The variable mono face's own default weight is 200 (hairline): set to 400.
         let mono = egui::FontData::from_static(MONO);
         assert_eq!(mono.variation_axes().first().map(|a| a.default), Some(200.0));
         assert_eq!(defs.font_data["mono-400"].tweak.coords, egui::epaint::text::VariationCoords::new([("wght", 400.0)]));
-        // Everything the window prints in its own words, in the built-in faces rather than
-        // a fallback: Latin text, the separators and the units, the degree and the
-        // plus-minus.
         let text = "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 .,:;!?'\"()[]{}<>/\\|-_+=*&%$#@~ · ± ° Δ − – — … × ÅÄÖåäöÜüßéèçñ";
         for (family, face) in [(FontFamily::Proportional, "next-400"), (mono_bold(), "mono-700")] {
             let held = ctx.fonts_mut(|f| f.fonts.font(&family).characters().clone());

@@ -1,18 +1,8 @@
-//! The signal catalogue: what each number is, how it is selected, and how far to
-//! trust that.
-//!
-//! One is built in (`catalogue/irb2600-rw616.json`, generated from the measurements
-//! behind it), and it says what it was measured on. Users on other robots or
-//! RobotWare versions load their own file:
-//! the same format, where every field but the number is optional, so a list of
-//! numbers from a scan is already a valid catalogue.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
 pub const FORMAT: &str = "abb-signal-spy-catalogue";
 pub const VERSION: u32 = 1;
-/// Larger than any catalogue needs; bounds what a wrong file can make us parse.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_SIGNALS: usize = 70_000;
 
@@ -21,16 +11,10 @@ const BUILTIN: &str = include_str!("../../../catalogue/irb2600-rw616.json");
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
-    /// Named by ABB, pinned by a structural invariant, or equal to an independent
-    /// measurement to better than 1e-3.
     Confirmed,
-    /// A relationship reproduced on 12 independent readings, or a decisive test.
     Strong,
-    /// Fits, and no alternative survives, but not forced.
     Probable,
-    /// Responds, but what it is remains open.
     Open,
-    /// Valid, but returned nothing on the measured installation.
     Inert,
 }
 
@@ -46,21 +30,13 @@ impl Confidence {
     }
 }
 
-/// What chooses the value a signal reports, which decides what the add-channel
-/// dialog offers, so the wrong choice cannot be made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Select {
-    /// One number, the axis picks the joint (most signals). Without an axis it
-    /// silently reads joint 1.
     Axis,
-    /// One number per joint; the axis setting is ignored.
     Number,
-    /// One value per robot: the mechanical unit.
     Robot,
-    /// One value per drive module: the mechanical unit picks its module.
     Module,
-    /// Controller-wide: neither unit nor axis changes it.
     Controller,
 }
 
@@ -78,7 +54,6 @@ pub struct Signal {
     pub number: u32,
     #[serde(default)]
     pub name: String,
-    /// A physical quantity is named (the default view shows only these).
     #[serde(default)]
     pub named: bool,
     #[serde(default)]
@@ -91,23 +66,18 @@ pub struct Signal {
     pub confidence: Confidence,
     #[serde(default = "default_select")]
     pub select: Select,
-    /// The joint a joint-in-the-number signal reads (6001 is joint 2).
     #[serde(default)]
     pub joint: Option<u8>,
     #[serde(default)]
     pub sample_ms: Option<f64>,
-    /// Record type: "float", "int" or "string", when known.
     #[serde(default, rename = "type")]
     pub value_type: Option<String>,
-    /// Valid on the controller the catalogue was measured on.
     #[serde(default)]
     pub cell: bool,
-    /// Valid on a RobotWare 6 virtual controller.
     #[serde(default)]
     pub vc: bool,
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Numbers that report exactly the same quantity share a group.
     #[serde(default)]
     pub group: Option<String>,
     #[serde(default)]
@@ -129,20 +99,13 @@ fn default_select() -> Select {
     Select::Axis
 }
 
-/// The flags the program understands. A file may carry others; they are kept and
-/// shown, but only these change behaviour.
 pub mod flag {
-    /// Holds the last RAPID path-level value; never moves while EGM drives the robot.
     pub const FROZEN: &str = "frozen";
-    /// Carries a value every few samples and pads the rest with exact zeros.
     pub const ZERO_FILLED: &str = "zero_filled";
     pub const SENTINEL: &str = "sentinel";
     pub const NAN: &str = "nan";
-    /// An angle reduced to one turn.
     pub const WRAPPING: &str = "wrapping";
-    /// A string event, sent only now and then.
     pub const EVENT: &str = "event";
-    /// Physical (a current, a voltage, a resolver): absent on a virtual controller.
     pub const PHYSICAL: &str = "physical";
     pub const VC_ONLY: &str = "vc_only";
     pub const NO_DATA: &str = "no_data_2026_09";
@@ -153,7 +116,6 @@ impl Signal {
         self.flags.iter().any(|f| f == flag)
     }
 
-    /// The name to show: the measured name, else ABB's, else the number.
     pub fn display_name(&self) -> String {
         if !self.name.is_empty() {
             self.name.clone()
@@ -169,8 +131,6 @@ impl Signal {
     }
 }
 
-/// Degrees everywhere by default: the display unit and factor for a radian
-/// unit, `None` for anything else.
 pub fn angle_unit(units: &str) -> Option<(&'static str, f64)> {
     let u = units.trim();
     let k = 180.0 / std::f64::consts::PI;
@@ -195,13 +155,11 @@ pub struct Catalogue {
     #[serde(default)]
     pub credits: String,
     pub signals: Vec<Signal>,
-    /// Where it came from, for the window; not part of the file.
     #[serde(skip)]
     pub source: String,
 }
 
 impl Catalogue {
-    /// The one built into the program.
     pub fn builtin() -> Catalogue {
         let mut c = Catalogue::parse(BUILTIN).expect("the built-in catalogue is valid (tested)");
         c.source = "built in".into();
@@ -259,11 +217,9 @@ impl Catalogue {
     }
 
     pub fn get(&self, number: u32) -> Option<&Signal> {
-        // Sorted by the generator; a user file may not be, so no binary search.
         self.signals.iter().find(|s| s.number == number)
     }
 
-    /// Members of each alias group, by group id.
     pub fn groups(&self) -> BTreeMap<String, Vec<u32>> {
         let mut g: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for s in &self.signals {
@@ -277,9 +233,6 @@ impl Catalogue {
         g
     }
 
-    /// Search by number, name, ABB name, units, category or description. Every word
-    /// of the query must match somewhere (case-insensitive); a number matches as a
-    /// prefix of the signal number.
     pub fn search<'a>(&'a self, query: &str) -> impl Iterator<Item = &'a Signal> + 'a {
         let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
         self.signals.iter().filter(move |s| {
@@ -311,17 +264,14 @@ mod tests {
         assert_eq!(c.signals.iter().filter(|s| s.vc).count(), 319);
         assert_eq!(c.signals.iter().filter(|s| s.confidence == Confidence::Inert).count(), 141);
         assert!(c.signals.iter().filter(|s| s.named).count() >= 173);
-        // The documented four are confirmed and axis-selected.
         for n in 4000..=4003 {
             let s = c.get(n).unwrap();
             assert_eq!(s.confidence, Confidence::Confirmed, "{n}");
             assert_eq!(s.select, Select::Axis, "{n}");
         }
-        // The DC link is chosen by module, and physical.
         let dc = c.get(5027).unwrap();
         assert_eq!(dc.select, Select::Module);
         assert!(dc.has(flag::PHYSICAL));
-        // The joint lives in the number.
         for (i, n) in (6000..=6005).enumerate() {
             let s = c.get(n).unwrap();
             assert_eq!(s.select, Select::Number);
@@ -333,13 +283,9 @@ mod tests {
         assert!(c.get(5138).unwrap().has(flag::WRAPPING));
         assert_eq!(c.get(9872).unwrap().value_type.as_deref(), Some("string"));
         assert_eq!(c.get(9888).unwrap().value_type.as_deref(), Some("int"));
-        // Credited ABB names.
         assert_eq!(c.get(1519).unwrap().abb.as_ref().unwrap().source, "TuneMaster");
-        // Motor speed: one group, many numbers.
         let g = c.get(1717).unwrap().group.clone().unwrap();
         assert!(c.groups()[&g].len() >= 17);
-        // Nothing about the measured cell's network or tooling leaks into the text, nor
-        // how a name was got (only where it came from).
         let text = serde_json::to_string(&c.signals).unwrap();
         for bad in ["192.168.", "bridge", ".md", "--mech", "decompil"] {
             assert!(!text.to_lowercase().contains(bad), "{bad}");
@@ -363,7 +309,6 @@ mod tests {
         assert_eq!(c.signals[0].select, Select::Axis);
         assert_eq!(c.signals[0].confidence, Confidence::Open);
         assert_eq!(c.get(42).unwrap().display_name(), "Signal 42");
-        // A byte-order mark, as Notepad and PowerShell 5 write it.
         assert!(Catalogue::parse("\u{FEFF}{\"format\":\"abb-signal-spy-catalogue\",\"version\":1,\"signals\":[]}").is_ok());
     }
 

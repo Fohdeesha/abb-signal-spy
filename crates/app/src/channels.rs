@@ -1,10 +1,3 @@
-//! The channels (the right sheet, "03 channels"): one ruled row per channel with its
-//! value (a mean of at least 150 ms, longer if the channel is smoothed), min / max /
-//! mean since reset, and one status word. A value that is not live is marked, struck
-//! through and aged, never shown as current. With the cursors on, each row reads at
-//! A, at B and between them (G47). A click on a row turns the sheet into that
-//! channel's options: smoothing, its chart, its vertical scale (G47, G48).
-
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, RichText, Sense, Stroke};
@@ -37,7 +30,6 @@ pub fn age_text(at: Option<Instant>) -> String {
     }
 }
 
-/// What a status word means, for its hover.
 pub fn health_tip(h: Health) -> &'static str {
     match h {
         Health::Stale => "No sample arrived within its stale bound. The value shown is the last one received, NOT current.",
@@ -51,11 +43,9 @@ pub fn health_tip(h: Health) -> &'static str {
     }
 }
 
-/// A status word with its square: filled while live, empty otherwise.
 pub fn status_word(ui: &mut egui::Ui, h: Health) -> egui::Response {
     let p = theme::pal(ui);
     let c = health_color(h, p);
-    // The square before the word, whichever way the row is laid out.
     let rtl = ui.layout().prefer_right_to_left();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -81,9 +71,6 @@ pub fn status_word(ui: &mut egui::Ui, h: Health) -> egui::Response {
     .on_hover_text(health_tip(h))
 }
 
-/// A row in a list that is clicked as a whole: its face drawn under what `add` puts in
-/// it (hovered, or the stale amber), its rule under it, and its name for assistive
-/// tools.
 pub fn clickable_row<R>(ui: &mut egui::Ui, name: &str, stale: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> (egui::Response, R) {
     let p = theme::pal(ui);
     let under = ui.painter().add(egui::Shape::Noop);
@@ -111,12 +98,7 @@ pub fn clickable_row<R>(ui: &mut egui::Ui, name: &str, stale: bool, add: impl Fn
 }
 
 impl SpyApp {
-    /// Fold the samples that arrived since the last frame into each channel's
-    /// since-reset statistics.
     pub fn update_stats(&mut self) {
-        // The session started the history afresh (a different controller, at another
-        // address or behind the same one): statistics, markers and cursors on the
-        // old clock mean nothing now, and the old `upto` would hide the new samples.
         let epoch = self.session.store().epoch();
         if epoch != self.store_epoch {
             self.store_epoch = epoch;
@@ -218,7 +200,6 @@ impl SpyApp {
         }
     }
 
-    /// One channel's row; clicked, its options open.
     fn channel_row(&mut self, ui: &mut egui::Ui, i: usize, st: &Status, cursor: Option<&CursorReading>) -> egui::Response {
         let p = theme::pal(ui);
         let connected = view::session_live(&st.phase);
@@ -241,14 +222,11 @@ impl SpyApp {
             None => (None, sig.as_ref().is_some_and(view::is_text)),
         };
         let color = self.chans[i].color;
-        // With its number: several signals share a catalogue name (four rows read alike
-        // at the cell, 2026-10-04).
         let name = view::short_label(&self.catalogue, &key);
         let stale = matches!(h, Health::Stale);
         let s = self.chans[i].stats;
         let (r, _) = clickable_row(ui, &format!("Options for {name}"), stale, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            // The status at the right first, so the name truncates before it.
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 22.0), Sense::hover());
                 theme::paint_icon(ui.painter(), rect, theme::Icon::Right, p.ink3);
@@ -296,7 +274,6 @@ impl SpyApp {
                     Some(c) => cursor_lines(ui, c, p),
                     None if !stale => {
                         let mean = s.mean(reading).unwrap_or(f64::NAN);
-                        // Two lines when one does not fit: the sheet never widens for it.
                         let one = format!("min {}  max {}  mean {}", f(s.min), f(s.max), f(mean));
                         let fits = ui.fonts_mut(|fo| fo.layout_no_wrap(one.clone(), egui::FontId::monospace(14.0), p.ink2).size().x) <= ui.available_width();
                         let text = if fits { one } else { format!("min {}  max {}\nmean {}", f(s.min), f(s.max), f(mean)) };
@@ -314,7 +291,6 @@ impl SpyApp {
         r
     }
 
-    /// The options of the channel `options_for` names, in place of the list.
     pub fn channel_options(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.options_for.clone() else { return };
         let Some(i) = self.chans.iter().position(|c| c.key.id() == id) else {
@@ -407,8 +383,6 @@ impl SpyApp {
         }
     }
 
-    /// Smoothing, the chart it is drawn on, its unit and the zero-fill hold: labels in
-    /// one column, every box's right edge on one line (G48).
     fn display_options(&mut self, ui: &mut egui::Ui, i: usize) {
         let p = theme::pal(ui);
         let key = self.chans[i].key.clone();
@@ -416,7 +390,6 @@ impl SpyApp {
         let units = view::display(sig.as_ref(), self.chans[i].radians).units;
         let mut changed = false;
         let label_w = 96.0;
-        // Smoothing.
         option_row(ui, label_w, "smoothing", |ui, w| {
             let cur = SMOOTHING.iter().find(|(ms, _)| *ms == self.chans[i].smooth_ms).map(|(_, t)| *t).unwrap_or("off");
             egui::ComboBox::from_id_salt(("smoothing", &key)).selected_text(cur).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
@@ -428,7 +401,6 @@ impl SpyApp {
             });
         });
         ui.label(RichText::new("also smooths the value (150 ms at least).").size(14.0).color(p.ink3)).on_hover_text("On the screen only: recordings and saved files keep every sample.");
-        // Its chart: its own, or overlaid on a chart in the same unit.
         let lane = self.chans[i].lane;
         let own = self.chans.iter().filter(|c| c.lane == lane).count() == 1;
         let mut lanes: Vec<(u32, String)> = Vec::new();
@@ -436,7 +408,6 @@ impl SpyApp {
             if j == i || lanes.iter().any(|(l, _)| *l == c.lane) {
                 continue;
             }
-            // Overlay only where the units agree: a shared axis in two units misleads.
             if view::display(self.catalogue.get(c.key.signal), c.radians).units == units {
                 lanes.push((c.lane, view::short_label(&self.catalogue, &c.key)));
             }
@@ -452,7 +423,6 @@ impl SpyApp {
                 for (l, n) in &lanes {
                     if ui.selectable_label(*l == lane, format!("with {n}")).clicked() && *l != lane {
                         self.chans[i].lane = *l;
-                        // An overlaid chart has one scale: the chart's.
                         if let Some(first) = self.chans.iter().find(|c| c.lane == *l && c.key != key) {
                             self.chans[i].scale = first.scale;
                         }
@@ -467,7 +437,6 @@ impl SpyApp {
                 egui::ComboBox::from_id_salt(("units", &key)).selected_text(cur).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
                     for (rad, t) in [(false, "degrees"), (true, "radians")] {
                         if ui.selectable_value(&mut self.chans[i].radians, rad, t).changed() {
-                            // A scale in the other unit means nothing now.
                             self.chans[i].scale = Scale::default();
                             changed = true;
                         }
@@ -488,8 +457,6 @@ impl SpyApp {
         }
     }
 
-    /// The chart's vertical scale (G47): fit with a floor, fixed, or around zero. The
-    /// boxes are right-aligned, their right edges on one line (G48).
     fn scale_options(&mut self, ui: &mut egui::Ui, i: usize) {
         let p = theme::pal(ui);
         let key = self.chans[i].key.clone();
@@ -510,7 +477,6 @@ impl SpyApp {
         let id = egui::Id::new(("scale", key.id()));
         let (mut lo, mut hi) = match scale {
             Scale::Fixed { lo, hi } => (lo, hi),
-            // Round ends a little outside what the chart shows now.
             _ => self.lane_view_range(lane, &units).map_or((-1.0, 1.0), |(a, b)| (crate::charts::nice(a, false), crate::charts::nice(b, true))),
         };
         let mut half = match scale {
@@ -521,13 +487,11 @@ impl SpyApp {
             Scale::Fit { floor } => floor.unwrap_or(unit_floor),
             _ => unit_floor,
         };
-        // Fit, at least.
         scale_row(ui, matches!(scale, Scale::Fit { .. }), "fit, at least", "Fit what is in view, never tighter than this", |ui, chosen| {
             if num_box(ui, id.with("floor"), &mut floor, &format!("Smallest span in {units}"), matches!(scale, Scale::Fit { .. })) || chosen {
                 set = Some(Scale::Fit { floor: if (floor - unit_floor).abs() <= unit_floor * 1e-9 { None } else { Some(floor.max(0.0)) } });
             }
         });
-        // Fixed.
         scale_row(ui, matches!(scale, Scale::Fixed { .. }), "fixed", "Always from the first value to the second", |ui, chosen| {
             let on = matches!(scale, Scale::Fixed { .. });
             let a = num_box(ui, id.with("hi"), &mut hi, &format!("Top of the scale in {units}"), on);
@@ -537,13 +501,11 @@ impl SpyApp {
                 set = Some(Scale::Fixed { lo, hi });
             }
         });
-        // Around zero.
         scale_row(ui, matches!(scale, Scale::Centred { .. }), "around zero, ±", "From minus this to plus this", |ui, chosen| {
             if num_box(ui, id.with("half"), &mut half, &format!("Half the scale in {units}"), matches!(scale, Scale::Centred { .. })) || chosen {
                 set = Some(Scale::Centred { half });
             }
         });
-        // Only a range a chart can show: an upside-down one typed is left as it was.
         if let Some(s) = set
             && s.is_valid()
             && s != scale
@@ -551,14 +513,12 @@ impl SpyApp {
             for c in self.chans.iter_mut().filter(|c| c.lane == lane) {
                 c.scale = s;
             }
-            // A zoom held by the wheel gives way to a scale chosen here.
             self.lane_zoom.retain(|(l, _), _| *l != lane);
             self.mark_settings_dirty();
         }
     }
 }
 
-/// How a row's value is read, for its hover.
 fn readout_tip(reading: view::Reading, smooth: u32) -> String {
     let span = view::readout_window(smooth);
     match reading {
@@ -569,8 +529,6 @@ fn readout_tip(reading: view::Reading, smooth: u32) -> String {
     }
 }
 
-/// The cursor readings of a row (G47): at A, at B and B - A, then the stretch
-/// between them (or the stretch in view).
 pub fn cursor_lines(ui: &mut egui::Ui, c: &CursorReading, p: &theme::Pal) {
     let f = |v: Option<f64>| v.map(view::fmt).unwrap_or_else(|| "--".into());
     let mono = |t: String| RichText::new(t).monospace().size(14.0);
@@ -578,7 +536,6 @@ pub fn cursor_lines(ui: &mut egui::Ui, c: &CursorReading, p: &theme::Pal) {
     if c.a.is_none() && c.b.is_none() {
         ui.label(word("A: click a chart").color(p.hold));
     }
-    // Words and numbers in two columns of pairs: they line up row under row.
     if c.a.is_some() || c.b.is_some() {
         egui::Grid::new(ui.next_auto_id()).num_columns(4).spacing(egui::vec2(8.0, 1.0)).show(ui, |ui| {
             ui.label(word("A"));
@@ -599,8 +556,6 @@ pub fn cursor_lines(ui: &mut egui::Ui, c: &CursorReading, p: &theme::Pal) {
     stats_grid(ui, &c.between, if c.a.is_some() && c.b.is_some() { "between A and B" } else { "in view" }, p);
 }
 
-/// A stretch's statistics (G47: mean, sd, min, max), in two columns of pairs under
-/// what the stretch is.
 pub fn stats_grid(ui: &mut egui::Ui, s: &crate::charts::RangeStats, what: &str, p: &theme::Pal) {
     let has = s.n > 0;
     let num = |v: f64| RichText::new(if has { view::fmt(v) } else { "--".into() }).monospace().size(14.0).color(p.ink2);
@@ -626,8 +581,6 @@ fn rule(ui: &mut egui::Ui, p: &theme::Pal) {
     ui.add_space(6.0);
 }
 
-/// A labelled option: the label in a column of `label_w`, the control (given its
-/// width) filling the rest to the right edge.
 fn option_row(ui: &mut egui::Ui, label_w: f32, label: &str, add: impl FnOnce(&mut egui::Ui, f32)) {
     ui.horizontal(|ui| {
         ui.set_min_height(fields::HEIGHT);
@@ -643,8 +596,6 @@ fn option_row(ui: &mut egui::Ui, label_w: f32, label: &str, add: impl FnOnce(&mu
     });
 }
 
-/// A row of the scale: its radio button and words on the left, its boxes on the right
-/// (laid out from the right edge). `add` is told whether the radio was just chosen.
 fn scale_row(ui: &mut egui::Ui, on: bool, text: &str, tip: &str, add: impl FnOnce(&mut egui::Ui, bool)) {
     ui.horizontal(|ui| {
         ui.set_min_height(theme::TOOL_H);
@@ -653,14 +604,11 @@ fn scale_row(ui: &mut egui::Ui, on: bool, text: &str, tip: &str, add: impl FnOnc
     });
 }
 
-/// A number in a small right-aligned box, 62 px wide; dashed while its row is not the
-/// one chosen. True when a new number was typed (into `v`).
 fn num_box(ui: &mut egui::Ui, id: egui::Id, v: &mut f64, name: &str, on: bool) -> bool {
     let mut text: String = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| view::fmt_short(*v));
     let r = fields::line(ui, &mut text, name, |t| t.desired_width(64.0).min_size(egui::vec2(0.0, theme::TOOL_H)).horizontal_align(egui::Align::Max).id(id).char_limit(16));
     if !on && !r.has_focus() {
         let p = theme::pal(ui);
-        // Not the chosen row: its edge dashed over the field's own.
         ui.painter().rect_stroke(r.rect, 0.0, Stroke::new(1.0, p.field), egui::StrokeKind::Inside);
         theme::dashed_rect(ui.painter(), r.rect, Stroke::new(1.0, p.off_edge));
     }

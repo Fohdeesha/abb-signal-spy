@@ -1,20 +1,9 @@
-//! Text fields that answer UI Automation. egui's own text fields ignore a value set
-//! through it (an assistive tool filling a field in, or a script), and a one-line field
-//! had no name a tool could find it by: its hint reaches UI Automation only as a
-//! placeholder. Every text field in the window goes through here, and so every one is
-//! drawn alike: square, 40 px tall, its edge brighter under the pointer and doubled
-//! while typed into, and dashed while it cannot be changed.
-
 use eframe::egui::{self, Margin, Response, Stroke, TextEdit, Ui};
 
 use crate::theme;
 
-/// A one-line field's height.
 pub const HEIGHT: f32 = 40.0;
 
-/// A one-line text field, named `name` for assistive tools; `shape` sets its hint, width
-/// and the rest. A value set through UI Automation replaces the text, a line break
-/// becoming a space as in a paste.
 pub fn line(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(TextEdit<'_>) -> TextEdit<'_>) -> Response {
     let edit = TextEdit::singleline(text).min_size(egui::vec2(0.0, HEIGHT)).vertical_align(egui::Align::Center);
     let mut r = framed(ui, shape(edit));
@@ -22,14 +11,12 @@ pub fn line(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(TextE
     r
 }
 
-/// A text field of several lines; a value set keeps its line breaks.
 pub fn lines(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(TextEdit<'_>) -> TextEdit<'_>) -> Response {
     let mut r = framed(ui, shape(TextEdit::multiline(text)));
     answer(ui, &mut r, name, text, true);
     r
 }
 
-/// The field, with its face and edge drawn under it: egui's own frame cannot be dashed.
 fn framed(ui: &mut Ui, edit: TextEdit<'_>) -> Response {
     let under = ui.painter().add(egui::Shape::Noop);
     let r = ui.add(edit.frame(egui::Frame::new().inner_margin(Margin::symmetric(10, 4))));
@@ -72,7 +59,6 @@ fn answer(ui: &Ui, r: &mut Response, name: &str, text: &mut String, multiline: b
     }
 }
 
-/// The Windows 7 build has no UI Automation layer.
 #[cfg(not(feature = "accessibility"))]
 fn answer(_: &Ui, _: &mut Response, _: &str, _: &mut String, _: bool) {}
 
@@ -108,7 +94,6 @@ mod tests {
         )
     }
 
-    /// What UI Automation's set-value arrives as.
     fn set_value(h: &Harness<'static, Form>, role: Role, name: &str, value: &str) {
         let (target_node, target_tree) = h.get_by_role_and_label(role, name).accesskit_node().locate();
         h.event(Event::AccessKitActionRequest(ActionRequest { action: Action::SetValue, target_node, target_tree, data: Some(ActionData::Value(value.into())) }));
@@ -135,7 +120,6 @@ mod tests {
 
     #[test]
     fn typing_after_a_set_value_goes_on_from_its_end() {
-        // The field focused with its cursor further in than the new text is long.
         let mut h = form();
         h.get_by_role_and_label(Role::TextInput, "Controller address").focus();
         h.run();

@@ -1,9 +1,3 @@
-//! Pictures of the window, for looking at the layout without a desktop: the window
-//! drawn at a field laptop's 1366 x 700 (a 1366 x 768 screen, maximised) against the
-//! fake controller, rendered off screen, and saved as PNG files. Not run with the
-//! other tests: `ABB_SIGNAL_SPY_SHOTS=<folder> cargo test -p abb-signal-spy shots --
-//! --ignored`.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,9 +30,6 @@ fn save(h: &mut Harness<'static, SpyApp>, name: &str) {
     enc.write_header().and_then(|mut w| w.write_image_data(img.as_raw())).expect("the picture is written");
 }
 
-/// A controller whose signals move like a robot's: a DC link with ripple and one dip,
-/// a joint's torque, its current and its speed swinging together, and a resolver that
-/// goes quiet (stale) when told.
 fn showcase() -> Behaviour {
     let mut b = Behaviour::default();
     let float = |f: fn((u64, &str, u32)) -> f32| SignalDef { source: SignalSource::Float(Arc::new(f)), sample_ms: 4.032 };
@@ -89,7 +80,6 @@ fn settle(h: &mut Harness<'static, SpyApp>, ms: u64) {
     let _ = h.run_ok();
 }
 
-/// The window streaming the showcase's channels, ten seconds in.
 fn streaming(fake: &FakeController, dir: &std::path::Path, dark: bool) -> Harness<'static, SpyApp> {
     let mut h = window(dir, dark);
     h.state_mut().host_input = "127.0.0.1".into();
@@ -107,7 +97,6 @@ fn streaming(fake: &FakeController, dir: &std::path::Path, dark: bool) -> Harnes
     let newest = h.state().session.store().newest().unwrap();
     h.state_mut().markers.push(crate::app::Marker { t_ms: newest - 500, label: "dip".into() });
     settle(&mut h, 3_500);
-    // The resolver goes quiet: its row says so.
     fake.with(|b| {
         b.mute.insert(5138);
     });
@@ -126,12 +115,10 @@ fn shots() {
         drop(h);
         let mut h = streaming(&fake, &dir, true);
         save(&mut h, "dark-1-live");
-        // A channel's options.
         h.state_mut().options_for = Some(key(4002, "ROB_1", 2).id());
         settle(&mut h, 300);
         save(&mut h, "dark-2-options");
         h.state_mut().options_for = None;
-        // One chart filling the middle, paused, with cursors.
         let lane = (h.state().chans[1].lane, "Nm".to_string());
         h.state_mut().expanded = Some(lane);
         h.state_mut().toggle_pause();
@@ -145,17 +132,14 @@ fn shots() {
         h.state_mut().expanded = None;
         h.state_mut().toggle_pause();
         h.state_mut().cursors_on = false;
-        // The dashboard.
         h.state_mut().dashboard = true;
         settle(&mut h, 300);
         save(&mut h, "dark-4-dashboard");
         h.state_mut().dashboard = false;
-        // A signal's details beside the list.
         h.state_mut().selected = Some(4002);
         settle(&mut h, 300);
         save(&mut h, "dark-5-details");
         h.state_mut().selected = None;
-        // The dialogs and windows.
         h.state_mut().open_add(4002);
         settle(&mut h, 300);
         save(&mut h, "dark-8-add");
@@ -172,7 +156,6 @@ fn shots() {
         settle(&mut h, 300);
         save(&mut h, "dark-11-messages");
         h.state_mut().show_log = false;
-        // The list folded away, recording.
         h.state_mut().settings.signals_folded = true;
         h.state_mut().toggle_recording();
         settle(&mut h, 2_500);
@@ -180,7 +163,6 @@ fn shots() {
         h.state_mut().toggle_recording();
         h.state_mut().settings.signals_folded = false;
         settle(&mut h, 500);
-        // The recording, reviewed with cursors.
         let rec = h.state().last_folder.clone().expect("a recording");
         h.state_mut().open_recording(rec);
         let end = Instant::now() + Duration::from_secs(10);

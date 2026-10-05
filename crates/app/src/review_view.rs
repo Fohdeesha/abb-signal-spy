@@ -1,10 +1,3 @@
-//! Reviewing a recording: open one from the Recordings window, by its path,
-//! or by dropping its folder on the window; chart it on its own clock (the wall
-//! clock, exact across controller restarts) with its markers and connection events,
-//! cursors and the statistics of the stretch in view. The live session carries on
-//! underneath. Nothing here is ever presented as live: a banner says REVIEWING, and
-//! the values shown are statistics of what is in view, not readouts.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -24,26 +17,18 @@ use crate::fields;
 use crate::theme;
 use crate::view;
 
-/// A recording open for review.
 pub struct ReviewState {
     pub review: Arc<Review>,
-    /// The stretch in view, seconds from the recording's first sample.
     pub view: (f64, f64),
-    /// The next frame sets the charts to `view` (on opening, and after "Show all").
     pub fresh: bool,
     pub cursors_on: bool,
     pub cursor_a: Option<f64>,
     pub cursor_b: Option<f64>,
-    /// A chart's vertical scale as Ctrl + wheel left it, by (signal, unit).
     pub zoom: std::collections::HashMap<(u32, String), (f64, f64)>,
-    /// Times the channels' statistics were computed (each is a pass over every sample
-    /// in the stretch).
     pub stats_computed: u64,
-    /// The last statistics computed and their stretch: the panel's (0), the cursors' (1).
     stats_cache: [Option<StatsFor>; 2],
 }
 
-/// Each channel's statistics, and the stretch `[from, to)` they are of.
 type StatsFor = ((i64, i64), Vec<RangeStats>);
 
 impl ReviewState {
@@ -56,13 +41,10 @@ impl ReviewState {
         ((self.review.end - self.review.start) as f64 / 1000.0).max(0.001)
     }
 
-    /// Seconds on the chart to the recording's time axis (ms); saturating, however far
-    /// the charts are zoomed or dragged.
     fn t_of(&self, x: f64) -> i64 {
         self.review.start.saturating_add((x * 1000.0).round() as i64)
     }
 
-    /// The stretch in view on the recording's time axis, `[from, to)`.
     pub(crate) fn stretch(&self) -> (i64, i64) {
         (self.t_of(self.view.0), self.t_of(self.view.1).saturating_add(1))
     }
@@ -70,17 +52,13 @@ impl ReviewState {
 
 pub type ReviewJob = (PathBuf, JoinHandle<Result<Review, String>>);
 
-/// A reviewed chart: its signal (or kind of derived channel) and display unit.
 type Lane = (u32, String);
 
-/// The folder a dropped or typed path means: the recording folder itself, or one of
-/// its files.
 pub fn recording_dir(p: &Path) -> Option<PathBuf> {
     let dir = if p.is_dir() { p.to_path_buf() } else { p.parent()?.to_path_buf() };
     dir.join("recording.json").is_file().then_some(dir)
 }
 
-/// A recording's start in local time, for lists and the banner.
 fn local_start(meta: &Meta) -> String {
     match spy_core::util::parse_iso(&meta.started_utc) {
         Some(t) => spy_core::util::local_parts(t).map(|(y, mo, d, h, mi, s, _)| format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")).unwrap_or_else(|| meta.started_utc.clone()),
@@ -102,14 +80,11 @@ fn clock_text(secs: f64) -> String {
 }
 
 impl SpyApp {
-    /// Open a recording folder for review, in the background.
     pub fn open_recording(&mut self, dir: PathBuf) {
         if self.review_job.is_some() {
             self.toast(Level::Warn, "A recording is already being opened.");
             return;
         }
-        // The catalogue's zero-filled signals are read with their padding undone, as
-        // live (their recording keeps every sample as sent).
         let hold: Vec<u32> = self.catalogue.signals.iter().filter(|s| s.has(flag::ZERO_FILLED)).map(|s| s.number).collect();
         let ctx = self.ctx.clone();
         let d = dir.clone();
@@ -142,7 +117,6 @@ impl SpyApp {
         }
     }
 
-    /// A folder (or a file in one) dropped on the window.
     pub fn take_dropped(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         if let Some(p) = dropped.first() {
@@ -153,8 +127,6 @@ impl SpyApp {
         }
     }
 
-    /// The Recordings window: the recordings folder's recordings, newest first, and a
-    /// path for one kept elsewhere.
     pub fn recordings_window(&mut self, ctx: &egui::Context) {
         if !self.show_recordings {
             return;
@@ -231,8 +203,6 @@ impl SpyApp {
         }
     }
 
-    /// The strip while reviewing (G49): REVIEWING, not live, in a block of its own;
-    /// what is shown; the live session still running underneath; and the way back.
     pub fn review_strip(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let st = self.session.status().clone();
@@ -280,9 +250,6 @@ impl SpyApp {
         }
     }
 
-    /// Charts of the recording: each signal (with its axes overlaid) in a chart of its
-    /// own unit, on the recording's clock. Drag to move, the wheel zooms time, Ctrl +
-    /// wheel a chart's vertical scale, a double-click goes back to the whole of it.
     pub fn review_charts(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let (mut save_csv, mut save_png) = (false, false);
@@ -332,7 +299,6 @@ impl SpyApp {
             rs.cursor_a = None;
             rs.cursor_b = None;
         }
-        // How to place the cursors, step by step (G48).
         if rs.cursors_on {
             ui.horizontal_wrapped(|ui| {
                 ui.label(theme::b("cursors"));
@@ -380,14 +346,11 @@ impl SpyApp {
         let cat = &self.catalogue;
         let Some(rs) = &mut self.review else { return };
         let review = rs.review.clone();
-        // Lanes: one per signal and unit, in the recording's order.
         let mut lanes: Vec<((u32, String), Vec<usize>)> = Vec::new();
         for (i, ch) in review.channels.iter().enumerate() {
             if ch.v.is_empty() {
                 continue;
             }
-            // A derived channel shares a chart only with its own kind (two DC links'
-            // sags), never with a recorded channel that happens to have its units.
             let group = match (&ch.derived, &ch.key) {
                 (Some(spy_core::derived::Derived::Turn { .. }), _) => u32::MAX,
                 (Some(spy_core::derived::Derived::DutySum { .. }), _) => u32::MAX - 1,
@@ -407,26 +370,20 @@ impl SpyApp {
         }
         let fit = (ui.available_height() - 26.0) / lanes.len() as f32 - 30.0 - 8.0;
         let lane_h = fit.max(90.0);
-        // More charts than fit: each its own time axis, the last one's being out of sight.
         let every_axis = fit < 90.0;
         let (mut view_out, fresh) = (rs.view, rs.fresh);
         let (ca, cb, cursors_on) = (rs.cursor_a, rs.cursor_b, rs.cursors_on);
         let (mut clicked_a, mut clicked_b) = (None, None);
         let start = review.start;
         let wall = review.wall_clock;
-        // What each vertical line is, for the hover: the lines have no names, so that
-        // they stay out of the legend (on the cell, a review's events covered half of
-        // every chart there).
         let mut marks: Vec<(f64, String)> = review.marks.iter().map(|m| ((m.t - start) as f64 / 1000.0, format!("{}: {}", m.kind, m.text))).collect();
         if cursors_on {
             marks.extend(ca.map(|a| (a, "cursor A".to_string())));
             marks.extend(cb.map(|b| (b, "cursor B".to_string())));
         }
-        // Six pixels either side of a mark's line, in the chart's seconds.
         let mark_tol = (rs.view.1 - rs.view.0).abs() * 6.0 / f64::from(ui.available_width().max(100.0));
         let dark = ui.visuals().dark_mode;
         let mut transforms = Vec::new();
-        // A chart's new vertical zoom, or `None` for its own scale back.
         let mut zooms: Vec<(Lane, Option<(f64, f64)>)> = Vec::new();
         let mut back = false;
         egui::ScrollArea::vertical().id_salt("review-lanes").auto_shrink([false, false]).show(ui, |ui| {
@@ -467,7 +424,6 @@ impl SpyApp {
                 if members.len() > 1 {
                     plot = plot.legend(Legend::default().position(egui_plot::Corner::LeftTop));
                 }
-                // The widest its channels need (a motor's angle beside a joint's).
                 let min_span = members.iter().map(|&i| min_span_for(units, review.channels[i].key.as_ref().and_then(|k| cat.get(k.signal)))).fold(0.0, f64::max);
                 let zoomed = rs.zoom.get(&(*signal, units.clone())).copied();
                 let resp = plot.show(ui, |pu| {
@@ -584,7 +540,6 @@ impl SpyApp {
                 }
             }
             if back {
-                // Back to the whole recording.
                 rs.view = (0.0, rs.duration());
                 rs.fresh = true;
             }
@@ -597,10 +552,6 @@ impl SpyApp {
         }
     }
 
-    /// Each channel's statistics over `[from, to)`, in its display unit, computed once
-    /// for a stretch and kept (slot 0 the panel's stretch in view, 1 the cursors'): a
-    /// long recording's stretch holds tens of millions of samples, and the window
-    /// repaints many times a second.
     fn review_stats_cached(&mut self, slot: usize, from: i64, to: i64) -> Vec<RangeStats> {
         let cat = &self.catalogue;
         let Some(rs) = &mut self.review else { return Vec::new() };
@@ -615,9 +566,6 @@ impl SpyApp {
         v
     }
 
-    /// The right sheet while reviewing: each channel's statistics over the stretch in
-    /// view, or its readings at the cursors (G47: on its row), and the recording's
-    /// description. No status word, no readout: nothing here is live.
     pub fn review_table(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let Some(rs) = &self.review else { return };
@@ -698,7 +646,6 @@ impl SpyApp {
                 ui.add_space(8.0);
             }
         });
-        // The recording itself, along the bottom.
         let y = ui.cursor().top() + 4.0;
         ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(2.0, p.ink));
         ui.add_space(10.0);
@@ -737,15 +684,10 @@ impl SpyApp {
 fn rs_dir_text(review: &Option<ReviewState>) -> String {
     review.as_ref().map(|r| r.review.dir.display().to_string()).unwrap_or_default()
 }
-/// A channel's value at cursor `x` (seconds on the chart), in its display unit:
-/// nothing in a gap, or after the channel ended.
 pub(crate) fn at_cursor(rs: &ReviewState, ch: &ReviewChannel, x: f64, factor: f64) -> Option<f64> {
     ch.value_at(rs.t_of(x)).map(|v| v * factor)
 }
 
-/// Statistics of a recorded channel over `[from, to)`, in its display unit, read as the
-/// signal means it: a wrapping angle's mean on the circle (computed in radians, then
-/// scaled). A zero-filled signal's padding was undone when the recording was opened.
 pub(crate) fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from: i64, to: i64) -> RangeStats {
     let recorded = ch.key.as_ref().map_or(view::Reading::Plain, |k| view::reading(cat.get(k.signal)));
     let r = match ch.derived.as_ref().map_or(recorded, crate::derived_view::reading) {
@@ -755,8 +697,6 @@ pub(crate) fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from:
     let v: Vec<f64> = ch.range(from, to).map(|(_, v)| v).collect();
     let (_, factor) = display(ch);
     let mut s = view::stats_of(&v, r);
-    // A slow log's extremes are its intervals' recorded minimum and maximum, not the
-    // extremes of their means (a dip it caught would be contradicted otherwise).
     if ch.band.is_some()
         && let Some((lo, hi)) = ch.extremes(from, to)
     {
@@ -765,7 +705,6 @@ pub(crate) fn review_stats(cat: &catalogue::Catalogue, ch: &ReviewChannel, from:
     RangeStats { n: s.n, mean: s.mean * factor, min: s.min * factor, max: s.max * factor, sd: s.sd * factor }
 }
 
-/// For the exports: a recorded channel's display unit and factor, and its name.
 pub(crate) fn display_of(ch: &ReviewChannel) -> (String, f64) {
     display(ch)
 }
@@ -778,7 +717,6 @@ pub(crate) fn short_of(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String
     short(cat, ch)
 }
 
-/// A recorded channel's display unit and factor (degrees for radians).
 fn display(ch: &ReviewChannel) -> (String, f64) {
     let units = ch.entry.as_ref().map(|e| e.units.clone()).unwrap_or_default();
     match catalogue::angle_unit(&units) {
@@ -787,10 +725,6 @@ fn display(ch: &ReviewChannel) -> (String, f64) {
     }
 }
 
-/// A recorded channel's name: the catalogue's, as for a live channel. A name is an
-/// interpretation, not data, and one can be corrected after a recording was made
-/// (6000 was "joint angle, measured" until the cell showed it is the EGM reference).
-/// The name it was recorded under, where the catalogue does not know the signal.
 fn name(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
     match &ch.key {
         Some(k) if cat.get(k.signal).is_some() => view::label(cat, k),
@@ -809,8 +743,6 @@ fn short(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
     }
 }
 
-/// The hover text of a recorded channel: what it is, and the name it was recorded
-/// under when the catalogue now names it differently.
 fn about(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
     let now = name(cat, ch);
     let then = recorded_name(ch);
@@ -829,8 +761,6 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, marks: &[
     };
     let t = start.saturating_add((p.x * 1000.0).round() as i64);
     let when = if wall {
-        // Checked: zoomed out before 1601 or past year 30827, SystemTime arithmetic
-        // panics on Windows.
         let d = Duration::from_millis(t.unsigned_abs());
         let at = if t >= 0 { UNIX_EPOCH.checked_add(d) } else { UNIX_EPOCH.checked_sub(d) };
         at.map_or_else(|| "a time no clock shows".to_string(), view::local_time)
@@ -849,11 +779,7 @@ mod tests {
     use super::*;
     use spy_core::testdir::TestDir;
 
-    /// A small recording on disk, opened: 4002 J1 at 1000-1040 ms, then after a 5 s gap
-    /// at 6000-6040.
     fn gapped_review() -> Review {
-        // A folder of its own per call: two tests run this at once, and one removing the
-        // folder while the other reads it failed the other now and then.
         let d = TestDir::new("review-gap");
         std::fs::write(
             d.join("recording.json"),
@@ -902,8 +828,6 @@ mod tests {
 
     #[test]
     fn a_recorded_channel_goes_by_the_catalogues_name_now() {
-        // Recorded on the cell on 2026-09-26 before 6000 was found to be the EGM
-        // reference: its old name stays in the recording, the review shows the right one.
         let d = TestDir::new("review-name");
         std::fs::write(
             d.join("recording.json"),

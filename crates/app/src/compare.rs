@@ -1,14 +1,3 @@
-//! Compare one channel with every other charted one (the open-signal explorer). Over the stretch the charts show, live or in a recording under review,
-//! each other channel is paired with it tick by tick (the XY plot's rule: a partner
-//! within 1 ms or no pair) and fitted with the least-squares line; the list is ranked by
-//! how closely the two follow a straight line (|r|). That is how most of the catalogue's
-//! signals were identified: an unknown against the rulers (joint angles, speeds,
-//! torques), looking for the one it is a straight line of. One click puts a pair in the
-//! XY plot, to look at before believing a number.
-//!
-//! Computed once when asked (and again on "compare again"), not every frame: a live
-//! ten-minute view pairs a hundred thousand samples per channel.
-
 use std::time::SystemTime;
 
 use eframe::egui::{self, RichText};
@@ -20,25 +9,20 @@ use crate::theme;
 use crate::view::{self, Health};
 use crate::xy::{fit, Candidate, Fit, XyState};
 
-/// Fewer pairs than this and r says nothing: two points always lie on a line.
 pub(crate) const MIN_PAIRS: usize = 10;
 
-/// One other channel against the subject.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Row {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) units: String,
     pub(crate) pairs: usize,
-    /// The subject as a line of this channel: `subject = slope x this + offset`.
     pub(crate) fit: Option<Fit>,
-    /// How many samples it had in the stretch.
     pub(crate) samples: usize,
     pub(crate) health: Option<Health>,
 }
 
 impl Row {
-    /// The correlation, where it means something: enough pairs, and both change.
     pub(crate) fn r(&self) -> Option<f64> {
         if self.pairs < MIN_PAIRS {
             return None;
@@ -47,7 +31,6 @@ impl Row {
     }
 }
 
-/// What a comparison found, and over what.
 pub(crate) struct Compared {
     pub(crate) subject: String,
     pub(crate) subject_title: String,
@@ -60,11 +43,9 @@ pub(crate) struct Compared {
     pub(crate) reviewing: bool,
 }
 
-/// The compare window: which channel, and the last comparison.
 pub struct CompareState {
     pub subject: String,
     pub(crate) result: Option<Compared>,
-    /// Compare (again) at the next frame.
     pub(crate) pending: bool,
 }
 
@@ -74,10 +55,7 @@ impl CompareState {
     }
 }
 
-/// Rank the rows: those with a correlation first, from the largest |r| down; then the
-/// rest (too few pairs, or a channel that does not change), in the order they came.
 pub(crate) fn rank(rows: &mut [Row]) {
-    // A stable sort keeps the charted order among equals and among the unranked.
     rows.sort_by(|a, b| match (a.r(), b.r()) {
         (Some(x), Some(y)) => y.abs().total_cmp(&x.abs()),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -86,7 +64,6 @@ pub(crate) fn rank(rows: &mut [Row]) {
     });
 }
 
-/// The subject's samples against another channel's over the same stretch.
 pub(crate) fn row(subject: &[(i64, f64)], other: &Candidate, from: i64, to: i64) -> Row {
     let xs = other.values(from, to);
     let mut pairs = Vec::new();
@@ -94,7 +71,6 @@ pub(crate) fn row(subject: &[(i64, f64)], other: &Candidate, from: i64, to: i64)
     Row { id: other.id.clone(), title: other.title.clone(), units: other.units.clone(), pairs: pairs.len(), fit: fit(&pairs), samples: xs.len(), health: other.health() }
 }
 
-/// What a row says about the pair, in words.
 pub(crate) fn verdict(row: &Row, subject_samples: usize) -> String {
     if subject_samples == 0 {
         return "no samples of it in view".into();
@@ -115,7 +91,6 @@ pub(crate) fn verdict(row: &Row, subject_samples: usize) -> String {
     }
 }
 
-/// The local time of day, `14:03:07` (UTC, said so, where local time is unknown).
 fn clock(t: SystemTime) -> String {
     match spy_core::util::local_parts(t) {
         Some((_, _, _, h, mi, s, _)) => format!("{h:02}:{mi:02}:{s:02}"),
@@ -124,12 +99,10 @@ fn clock(t: SystemTime) -> String {
 }
 
 impl SpyApp {
-    /// Open the compare window for a channel (by id), comparing at once.
     pub fn open_compare(&mut self, subject: String) {
         self.compare = Some(CompareState::new(subject));
     }
 
-    /// The charted channels of a signal number, by id, and how many others are charted.
     pub(crate) fn charted_ids_of(&self, signal: u32) -> (Vec<String>, usize) {
         let prefix = format!("{signal}/");
         let (mine, others): (Vec<String>, Vec<String>) = self.xy_sources().0.into_iter().map(|c| c.id).partition(|id| id.starts_with(&prefix));
@@ -268,7 +241,6 @@ mod tests {
 
     #[test]
     fn a_handful_of_pairs_says_nothing() {
-        // Two points always lie on a line: r = 1 from a handful of pairs is no evidence.
         assert_eq!(row_of("x", MIN_PAIRS - 1, Some(1.0)).r(), None);
         assert_eq!(row_of("x", MIN_PAIRS, Some(1.0)).r(), Some(1.0));
         assert_eq!(verdict(&row_of("x", 3, Some(1.0)), 100), "only 3 pairs");

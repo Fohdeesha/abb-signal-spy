@@ -1,7 +1,3 @@
-//! The window: state, layout, the controller bar, the session line, dialogs and the
-//! log pane. The catalogue browser, the channel table, the charts and the recording
-//! controls live in their own modules as further `impl SpyApp` blocks.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,7 +21,6 @@ use crate::settings::{SavedChannel, SavedController, Settings};
 use crate::theme;
 use crate::view;
 
-/// One channel as the window keeps it.
 pub struct ChanView {
     pub key: ChannelKey,
     pub color: Color32,
@@ -33,9 +28,7 @@ pub struct ChanView {
     pub hold_nonzero: bool,
     pub lane: u32,
     pub stats: Stats,
-    /// Display only: its line and value smoothed over this many ms (0: off).
     pub smooth_ms: u32,
-    /// Its chart's vertical scale (the first channel's, for an overlaid chart).
     pub scale: crate::charts::Scale,
 }
 
@@ -45,20 +38,15 @@ impl ChanView {
     }
 }
 
-/// min / max / mean since the last reset, in the native unit, of the samples as the
-/// signal means them (a zero-filled signal's padding undone; see [`view::Reading`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Stats {
     pub n: u64,
     pub sum: f64,
     pub min: f64,
     pub max: f64,
-    /// For a wrapping angle's mean, taken on the circle.
     pub sum_sin: f64,
     pub sum_cos: f64,
-    /// A zero-filled signal's padding, undone across frames.
     pub hold: Option<view::ZeroHold>,
-    /// Newest timeline ms already counted.
     pub upto: i64,
 }
 
@@ -69,7 +57,6 @@ impl Default for Stats {
 }
 
 impl Stats {
-    /// The mean since reset, in the native unit.
     pub fn mean(&self, r: view::Reading) -> Option<f64> {
         if self.n == 0 {
             return None;
@@ -90,18 +77,13 @@ pub enum Discovery {
 }
 
 pub struct Toast {
-    /// When it was first drawn: it stays six seconds from then, so one said while the
-    /// window was minimised is still there when the window is shown again.
     pub shown: Option<Instant>,
     pub text: String,
     pub level: Level,
 }
 
-/// Toasts on screen at once; older ones are in the log pane. Unseen, they pile up
-/// while the window is minimised (a virtual controller restarting again and again).
 const MAX_TOASTS: usize = 8;
 
-/// What the add-channel dialog is adding.
 pub struct AddDialog {
     pub signal: u32,
     pub unit: String,
@@ -111,11 +93,7 @@ pub struct AddDialog {
 pub struct SpyApp {
     pub ctx: egui::Context,
     pub session: Session,
-    /// The connection worker's options, for starting a new one (the product's: the
-    /// defaults, which ask before taking InfoStream only on a remote controller).
     pub session_opts: Options,
-    /// The address the session was last asked to connect to; it follows the session
-    /// to a restarted virtual controller's new port.
     pub connected_to: Option<Target>,
     pub log: Arc<LogBook>,
     pub catalogue: Catalogue,
@@ -124,7 +102,6 @@ pub struct SpyApp {
     pub settings_dirty: Option<Instant>,
     pub chans: Vec<ChanView>,
     pub next_lane: u32,
-    /// The store's epoch the statistics were counted in.
     pub store_epoch: u64,
 
     pub host_input: String,
@@ -140,45 +117,28 @@ pub struct SpyApp {
     pub only_favourites: bool,
     pub add: Option<AddDialog>,
     pub sets: Option<crate::sets::SetDialog>,
-    /// Derived channels, computed from channels in `chans`.
     pub derived: Vec<crate::derived_view::DerivedView>,
-    /// How far back a sag's plateau compares the DC link's level: 20 s. The tests
-    /// shorten it, with a link that drains as much faster.
     pub plateau_trend_ms: i64,
-    /// Each chart's mapping from its data to the screen, as drawn in the last frame
-    /// (live or reviewed): where a test points to hover a place on a chart.
     pub lane_transforms: Vec<egui_plot::PlotTransform>,
-    /// The text the charts' hover showed last (a tooltip's text is not in the
-    /// accessibility tree, so this is how a test reads it).
     pub hover_text: std::sync::Arc<std::sync::Mutex<String>>,
 
-    /// The RWS extras: a logged-in session, the login being typed (never saved), how
-    /// often the event log is looked at, the window, and the events for the charts.
     pub rws: Option<crate::rws_view::RwsLink>,
     pub rws_form: crate::rws_view::RwsForm,
     pub rws_poll: Duration,
     pub show_rws: bool,
     pub controller_events: Vec<crate::rws_view::ControllerEvent>,
-    /// Recordings just closed that controller events still on their way belong to.
     pub late_windows: Vec<crate::rws_view::LateWindow>,
-    /// The stretch (UTC ms) a "Save last" being written covers.
     pub snapshot_span: Option<(i64, i64)>,
 
     pub window_s: f64,
     pub paused_at: Option<i64>,
-    /// Set when pausing: the next frame fixes the charts on the paused window, and
-    /// after that the person scrolls and zooms freely.
     pub pause_fresh: bool,
     pub cursors_on: bool,
     pub cursor_a: Option<f64>,
     pub cursor_b: Option<f64>,
     pub markers: Vec<Marker>,
-    /// A chart's vertical scale as Ctrl + wheel left it, by (lane, display unit) (see
-    /// `charts::lanes`), until "reset scale" or a double-click.
     pub lane_zoom: HashMap<(u32, String), (f64, f64)>,
-    /// The vertical range each chart showed last.
     pub lane_ranges: HashMap<(u32, String), (f64, f64)>,
-    /// The wheel over a live chart, between notches.
     pub wheel_acc: f32,
 
     pub recorder: Option<Recorder>,
@@ -192,43 +152,29 @@ pub struct SpyApp {
     pub phone_snapshot: Arc<Mutex<Snapshot>>,
     pub phone_built: Instant,
 
-    /// The live charts' stretch in view (timeline ms), and where the charts are on
-    /// screen, for saving what is in view; a picture of them asked for.
     pub view_ms: Option<(i64, i64)>,
     pub charts_rect: Option<egui::Rect>,
-    /// Where the signal list is: its details open beside it.
     pub signals_rect: Option<egui::Rect>,
     pub png_pending: Option<crate::export::Picture>,
-    /// The XY plot, while its window is open, and where its plot is on screen.
     pub xy: Option<crate::xy::XyState>,
     pub xy_rect: Option<egui::Rect>,
-    /// The XY window around it, while a plot is drawn: what its Save PNG keeps.
     pub xy_window_rect: Option<egui::Rect>,
-    /// The compare window (one channel against every other charted one), while open.
     pub compare: Option<crate::compare::CompareState>,
-    /// The person's own notes on signals, and the editor while open.
     pub notes: crate::notes::Notes,
     pub note_edit: Option<crate::notes::Edit>,
-    /// A CSV being written, and what to add to its "saved" message.
     pub export_job: Option<crate::export::ExportJob>,
     pub export_note: &'static str,
-    /// Set to stop the save under way (the window closing): it leaves nothing behind.
     pub export_stop: Arc<std::sync::atomic::AtomicBool>,
 
-    /// A recording open for review, and one being opened.
     pub review: Option<crate::review_view::ReviewState>,
     pub review_job: Option<crate::review_view::ReviewJob>,
     pub show_recordings: bool,
     pub recordings_list: Option<Vec<(PathBuf, spy_core::recording::Meta)>>,
     pub recording_path_input: String,
 
-    /// The channel (its id) whose options fill the right panel instead of the list.
     pub options_for: Option<String>,
-    /// The chart (lane and unit) filling the middle on its own.
     pub expanded: Option<(u32, String)>,
-    /// The big numbers in place of the charts (G47).
     pub dashboard: bool,
-    /// The messages (the log) open above the footer.
     pub show_log: bool,
 
     pub confirm_reset: bool,
@@ -253,9 +199,6 @@ impl SpyApp {
         SpyApp::with_options(cc, data_dir, another_instance, Options::default())
     }
 
-    /// `opts`: the connection worker's. The product always uses the defaults; the
-    /// tests ask on loopback too, to reach the question, and hand in their own
-    /// virtual controllers rather than look for this PC's.
     pub fn with_options(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, another_instance: bool, opts: Options) -> SpyApp {
         let ctx = cc.egui_ctx.clone();
         let settings_path = data_dir.join("settings.json");
@@ -267,7 +210,6 @@ impl SpyApp {
 
         let log = Arc::new(LogBook::new());
         if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("signal-spy.log")) {
-            // Keep the file bounded: start afresh past 5 MB.
             if f.metadata().map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
                 if let Ok(f2) = std::fs::File::create(data_dir.join("signal-spy.log")) {
                     log.attach_file(f2);
@@ -277,8 +219,6 @@ impl SpyApp {
             }
         }
         log.info(format!("ABB Signal Spy {} started. Settings: {}", env!("CARGO_PKG_VERSION"), settings_path.display()));
-        // An internal error last time (the panic hook's crash.txt): said once, with
-        // the file kept under a name of its own for a report.
         let crash = data_dir.join("crash.txt");
         let crash_note = crash.is_file().then(|| {
             let kept = data_dir.join(format!("crash-{}.txt", spy_core::util::local_stamp(std::time::SystemTime::now())));
@@ -395,11 +335,7 @@ impl SpyApp {
             log_filter_warn: false,
             title: String::new(),
         };
-        // Restore the channel set (the controller is not contacted until Connect).
         let saved = app.settings.channels.clone();
-        // Lanes count from 1; 0 is a file that never said (trimmed by hand, or older):
-        // each such channel gets a chart of its own, after every lane the file names,
-        // rather than all of them sharing one with volts beside degrees.
         app.next_lane = saved.iter().map(|c| c.lane + 1).max().unwrap_or(1).max(1);
         for c in saved {
             if let (Ok(unit), Some(axis)) = (MechUnit::new(&c.unit), Axis::new(c.axis)) {
@@ -418,7 +354,6 @@ impl SpyApp {
             }
         }
         app.sync_channels();
-        // And the derived channels whose inputs came back with them.
         for d in app.settings.derived.clone() {
             if app.derived.iter().any(|x| x.live.def().same(&d.def)) {
                 continue;
@@ -441,7 +376,6 @@ impl SpyApp {
             };
             app.derived.push(crate::derived_view::DerivedView { live: spy_core::derived::Live::new(d.def), color, lane, stats: Stats::default(), target_text, target_from: None });
         }
-        // On screen, not only in the log: something the person wrote was not used.
         if let Some(n) = note {
             app.toast(Level::Warn, n);
         }
@@ -452,12 +386,9 @@ impl SpyApp {
         if let Some(n) = crash_note {
             app.toast(Level::Warn, n);
         }
-        // The guide opens by itself once, on the first run; afterwards it is in Help.
         app.show_guide = first_run;
         app
     }
-
-    // ------------------------------------------------------------------ helpers
 
     pub fn toast(&mut self, level: Level, text: impl Into<String>) {
         let text = text.into();
@@ -465,7 +396,6 @@ impl SpyApp {
         self.show_toast(level, text);
     }
 
-    /// A toast for something logged by other means (said once in the log, not twice).
     pub fn show_toast(&mut self, level: Level, text: String) {
         self.toasts.push(Toast { shown: None, text, level });
         let excess = self.toasts.len().saturating_sub(MAX_TOASTS);
@@ -483,8 +413,6 @@ impl SpyApp {
             .iter()
             .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane, smooth_ms: c.smooth_ms, scale: c.scale })
             .collect();
-        // A plateau is not kept: it was measured on the controller of the moment; nor a
-        // target read from a controller (its commutator offset). A typed target is.
         self.settings.derived = self
             .derived
             .iter()
@@ -503,8 +431,6 @@ impl SpyApp {
         self.settings_dirty = None;
     }
 
-    /// Push the channel list to the session, drop removed channels' history, and
-    /// remember the set.
     pub fn sync_channels(&mut self) {
         let keys: Vec<ChannelKey> = self.chans.iter().map(|c| c.key.clone()).collect();
         for ch in self.session.store().all() {
@@ -512,8 +438,6 @@ impl SpyApp {
                 self.session.store().remove(&ch.key);
             }
         }
-        // Text events send only on a change: the session is told which they are, so
-        // their silence before a first record is not reported as a fault.
         let text: Vec<ChannelKey> = keys.iter().filter(|k| self.catalogue.get(k.signal).is_some_and(view::is_text)).cloned().collect();
         self.session.set_channels_expecting_text(keys, text);
         self.prune_derived();
@@ -521,8 +445,6 @@ impl SpyApp {
         self.mark_settings_dirty();
     }
 
-    /// Each channel's colour by its place, from the theme in use: after a change of
-    /// channels, and of theme.
     pub fn recolor(&mut self) {
         let dark = self.settings.dark;
         for (i, c) in self.chans.iter_mut().enumerate() {
@@ -569,9 +491,6 @@ impl SpyApp {
     pub fn connect(&mut self) {
         match self.parse_target() {
             Ok(t) => {
-                // The connection worker stopped after an internal error (its status
-                // says so): a request to it would go nowhere, so Connect starts a new
-                // one, on the same history. A recording fed by the old one has ended.
                 if !self.session.is_running() {
                     for r in [self.recorder.take(), self.slow.take()].into_iter().flatten() {
                         let s = r.stop();
@@ -583,9 +502,6 @@ impl SpyApp {
                     self.session = Session::spawn(self.session_opts.clone(), self.log.clone(), store, Arc::new(move || c.request_repaint()));
                     self.sync_channels();
                 }
-                // Another controller: a running recording must not carry on with a
-                // second controller's samples under the same channel names, and
-                // markers placed on the first one's clock mean nothing on the next.
                 let previous = self.session.status().target.clone();
                 if previous.as_ref().is_some_and(|p| p != &t) {
                     let mut stopped = Vec::new();
@@ -609,18 +525,11 @@ impl SpyApp {
         }
     }
 
-    /// The session followed a restarted virtual controller to its new port: the
-    /// address above, the recent list and a saved entry follow it too, or the next
-    /// Connect would go back to the port nothing listens on any more (and finish a
-    /// recording as if for another controller).
     fn follow_moved_controller(&mut self) {
         let Some((from, to)) = self.session.status().moved.clone() else { return };
-        // A move from somewhere else: already followed, or one reported just before
-        // the person connected elsewhere.
         if self.connected_to.as_ref() != Some(&from) {
             return;
         }
-        // Not over what the person is typing.
         if self.parse_target().ok().as_ref() == Some(&from) {
             self.port_input = to.port.to_string();
         }
@@ -636,10 +545,7 @@ impl SpyApp {
         self.connected_to = Some(to);
     }
 
-    // ------------------------------------------------------------------ top bar
-
     fn menu(&mut self, ui: &mut egui::Ui) {
-        // Menu entries in the plain face: a menu of bold lines is hard to scan.
         fn plain(ui: &mut egui::Ui) {
             ui.style_mut().override_text_style = Some(egui::TextStyle::Body);
         }
@@ -757,12 +663,9 @@ impl SpyApp {
     }
 
     fn load_catalogue_dialog(&mut self) {
-        // A plain path field, rather than a file-dialog dependency: see the window.
         self.show_catalogue_info = true;
     }
 
-    /// The controller's address, connecting, and the recording buttons: one sheet across
-    /// the top.
     fn controller_bar(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let phase = self.session.status().phase.clone();
@@ -771,7 +674,6 @@ impl SpyApp {
             ui.horizontal(|ui| {
                 ui.set_min_height(fields::HEIGHT);
                 ui.label(theme::b("controller").color(p.ink2));
-                // Locked while connected: the address of the session under way.
                 ui.add_enabled_ui(!active, |ui| {
                     fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("e.g. 192.168.125.1").desired_width(150.0))
                         .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.")
@@ -940,7 +842,6 @@ impl SpyApp {
             }
     }
 
-    /// Frames and samples a second, over the last second or so.
     fn update_rates(&mut self, st: &spy_core::session::Status) {
         let now = Instant::now();
         let dt = now.duration_since(self.rates.0).as_secs_f64();
@@ -949,8 +850,6 @@ impl SpyApp {
         }
     }
 
-    /// The connection's state in a word or two, its colour, and whether its square is
-    /// filled (a session under way) or empty.
     pub fn phase_word(st: &spy_core::session::Status, p: &theme::Pal) -> (String, Color32, theme::Mark) {
         let (word, color) = match &st.phase {
             Phase::Idle => ("not connected".to_string(), p.ink2),
@@ -958,8 +857,6 @@ impl SpyApp {
             Phase::Handshaking => ("handshake".into(), p.hold),
             Phase::AwaitingApproval => ("waiting for your answer".into(), p.hold),
             Phase::SettingUp => ("setting up".into(), p.hold),
-            // Set up, and nothing arriving (another program gets the samples, a VC
-            // paused): the notice under the strip says why. Not a green "streaming".
             Phase::Streaming if st.advice.is_some() => ("not receiving".into(), p.hold),
             Phase::Streaming => ("streaming".into(), p.live),
             Phase::Reconnecting { attempt, retry_in } => (format!("reconnecting, try {attempt} (every {:.0} s)", retry_in.as_secs_f64()), p.hold),
@@ -970,15 +867,10 @@ impl SpyApp {
         (word, color, mark)
     }
 
-    /// The other programs on the controller worth naming: every real IRC5 also lists its
-    /// pendant, always there, so it is left out (G48).
     pub fn others_shown(st: &spy_core::session::Status) -> Vec<&spy_core::session::OtherClient> {
         st.others.iter().filter(|o| !o.pendant).collect()
     }
 
-    /// The strip under the controller bar (G49, the bridge's): the connection, the
-    /// controller, the channels, the recording and the other programs, each a labelled
-    /// cell under a rule.
     fn status_strip(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let st = self.session.status().clone();
@@ -986,7 +878,6 @@ impl SpyApp {
         let gap = 16.0;
         let link_w = 64.0;
         let w = ((ui.available_width() - link_w - gap * 5.0) / 5.0).floor().max(80.0);
-        // Top-aligned: every cell's rule on one line.
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             let (word, color, mark) = Self::phase_word(&st, p);
@@ -1052,8 +943,6 @@ impl SpyApp {
         self.notices(ui, &st);
     }
 
-    /// What needs saying under the strip, only while it is true: why the session
-    /// stopped, what to do about samples not arriving, a second window, samples lost.
     fn notices(&mut self, ui: &mut egui::Ui, st: &spy_core::session::Status) {
         let p = theme::pal(ui);
         let mut lines: Vec<(String, Color32)> = Vec::new();
@@ -1099,8 +988,6 @@ impl SpyApp {
             })
             .collect()
     }
-
-    // ------------------------------------------------------------------ dialogs
 
     fn approval_dialog(&mut self, ctx: &egui::Context) {
         let st = self.session.status().clone();
@@ -1291,7 +1178,6 @@ impl SpyApp {
         });
         let entries = self.log.since(self.log.next_seq().saturating_sub(400));
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-            // Lines to copy from, for a report.
             ui.style_mut().interaction.selectable_labels = true;
             for e in entries.iter().filter(|e| !self.log_filter_warn || e.level >= Level::Warn) {
                 let color = match e.level {
@@ -1304,9 +1190,6 @@ impl SpyApp {
         });
     }
 
-    /// The line along the bottom: the time, what the charts do with the mouse while
-    /// they can be moved, where a recording goes, or the newest message; and the
-    /// messages themselves a click away.
     fn footer(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let rect = ui.max_rect();
@@ -1327,7 +1210,6 @@ impl SpyApp {
                     open_folder = Some(dir);
                 }
             } else if let Some(e) = self.log.since(self.log.next_seq().saturating_sub(1)).last().filter(|e| !self.toasts.iter().any(|t| t.text == e.text)) {
-                // (Not while a toast says it: once on screen is enough.)
                 let color = match e.level {
                     Level::Info => p.ink2,
                     Level::Warn => p.hold,
@@ -1357,8 +1239,6 @@ impl SpyApp {
         });
     }
 
-    /// While the charts can be moved (paused, or a recording), how: said where it is
-    /// read, with Ctrl + wheel for the vertical scale (G48).
     fn mouse_hint(&self) -> Option<String> {
         const MOVE: &str = "drag to move through time · wheel zooms time · ctrl + wheel zooms the vertical scale · double-click goes back";
         if let Some(rs) = &self.review {
@@ -1367,7 +1247,6 @@ impl SpyApp {
         if self.dashboard {
             return None;
         }
-        // The cursors' distance apart, while both are placed (the rows read their values).
         let apart = match (self.cursors_on, self.cursor_a, self.cursor_b) {
             (true, Some(a), Some(b)) => format!("A and B {:.3} s apart · ", (b - a).abs()),
             _ => String::new(),
@@ -1387,8 +1266,6 @@ impl SpyApp {
         if self.toasts.is_empty() {
             return;
         }
-        // Clicks pass through: a message over the channels must not take a click meant
-        // for a button under it.
         egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -44.0)).interactable(false).show(ctx, |ui| {
             let p = theme::pal(ui);
             for t in &self.toasts {
@@ -1411,12 +1288,9 @@ impl SpyApp {
             return;
         }
         let (space, m, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::M), i.key_pressed(egui::Key::Escape)));
-        // Escape closes a signal's details (no dialog over them: a dialog takes it first).
         if esc && self.add.is_none() && self.note_edit.is_none() && self.sets.is_none() {
             self.selected = None;
         }
-        // While reviewing, the live charts are hidden: pausing them unseen, or putting a
-        // marker into a live recording from what is under review, would mislead.
         if self.review.is_some() {
             if m {
                 self.toast(Level::Info, "M puts a marker on the live charts: close the recording under review first.");
@@ -1446,8 +1320,6 @@ impl SpyApp {
             return;
         };
         let label = if self.marker_text.trim().is_empty() { format!("M{}", self.markers.len() + 1) } else { self.marker_text.trim().to_string() };
-        // The controller's clock at the marker, so a recorder working through a
-        // backlog still files it at the moment it was placed.
         let controller_ms = Some(self.session.status().timeline.controller_ms(t));
         if let Some(r) = &self.recorder {
             r.marker(&label, controller_ms);
@@ -1460,8 +1332,6 @@ impl SpyApp {
         self.marker_text.clear();
     }
 
-    /// The window title carries the state, so the taskbar says whether it is live
-    /// and recording while the window is minimized.
     fn update_title(&mut self, ctx: &egui::Context) {
         let st = self.session.status();
         let state = match &st.phase {
@@ -1523,8 +1393,6 @@ impl SpyApp {
             let def = self.derived[i].live.def();
             let v = view::readout(&self.derived[i].live.lock(), crate::derived_view::reading(def));
             let (value, on_target) = crate::derived_view::value_text(def, v, h.is_live());
-            // The number too: a snapshot the window stops updating is shown with it,
-            // never with ON TARGET (the phone server's rule).
             let (number, _) = crate::derived_view::value_text(def, v, false);
             chans.push(serde_json::json!({
                 "name": self.derived_label(def),
@@ -1548,19 +1416,12 @@ impl SpyApp {
     }
 }
 
-/// The first eight characters of a system id. By characters, not bytes: the id is
-/// the controller's text, and a byte slice through a multi-byte character panics.
 pub fn short_id(id: &str) -> String {
     let t = id.trim_matches(['{', '}']);
     if t.chars().count() > 8 { format!("{{{}…}}", t.chars().take(8).collect::<String>()) } else { id.to_string() }
 }
 
 impl eframe::App for SpyApp {
-    /// The upkeep, which must not stop when the drawing does. eframe calls this before
-    /// every frame and, while the window is minimised, on its own whenever a repaint
-    /// was asked for, with no frame drawn: the phone view, the taskbar title, the
-    /// derived channels and the recorders' checks go on meanwhile (measured: with all
-    /// of it in `ui`, the phone read NOT CURRENT a second after minimising).
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
         self.poll_review();
@@ -1575,7 +1436,6 @@ impl eframe::App for SpyApp {
         if self.settings_dirty.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
             self.save_settings();
         }
-        // The next look, drawn or not: the phone's snapshot is built every 250 ms.
         ctx.request_repaint_after(Duration::from_millis(250));
     }
 
@@ -1585,7 +1445,6 @@ impl eframe::App for SpyApp {
         self.take_screenshot(&ctx);
         self.shortcuts(&ctx);
 
-        // The page, and square sheets on it 8 px apart (G49).
         let p = theme::pal(ui);
         let page = egui::Frame::new().fill(p.page);
         egui::Panel::top("menu").frame(page.inner_margin(egui::Margin::symmetric(4, 1))).show_separator_line(false).show(ui, |ui| {
@@ -1615,8 +1474,6 @@ impl eframe::App for SpyApp {
             } else {
                 egui::Panel::left("signals").frame(sheet(8, 0)).resizable(true).default_size(298.0).size_range(248.0..=470.0).show_separator_line(false).show(ui, |ui| self.browser(ui));
             }
-            // While a recording is reviewed it has the charts and the right panel; the
-            // live session carries on underneath, and the strip says so.
             egui::Panel::right("channels").frame(sheet(0, 8)).resizable(true).default_size(338.0).size_range(308.0..=490.0).show_separator_line(false).show(ui, |ui| {
                 if self.review.is_some() {
                     self.review_table(ui);
@@ -1641,7 +1498,6 @@ impl eframe::App for SpyApp {
 
         self.recordings_window(&ctx);
         self.rws_window(&ctx);
-        // Before the XY window: its "XY" buttons open that plot in the same frame.
         self.compare_window(&ctx);
         self.xy_window(&ctx);
         self.add_dialog(&ctx);
@@ -1652,7 +1508,6 @@ impl eframe::App for SpyApp {
         self.info_windows(&ctx);
         self.toasts(&ctx);
 
-        // Live charts move with the controller clock (the upkeep asks for its own look).
         if self.session.status().phase == Phase::Streaming && self.paused_at.is_none() {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
@@ -1664,9 +1519,6 @@ impl eframe::App for SpyApp {
 }
 
 impl SpyApp {
-    /// Everything that must happen on the way out, whichever way out it is: finish
-    /// the recordings properly, stop listening on the LAN, save, and tear the
-    /// controller session down.
     pub fn shutdown(&mut self) {
         if let Some(r) = self.recorder.take() {
             let s = r.stop();
@@ -1675,7 +1527,6 @@ impl SpyApp {
         if let Some(r) = self.slow.take() {
             r.stop();
         }
-        // A save under way stops, and its part file goes with it.
         if let Some(job) = self.export_job.take() {
             self.export_stop.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = job.join();
@@ -1689,8 +1540,6 @@ impl SpyApp {
 
 impl Drop for SpyApp {
     fn drop(&mut self) {
-        // Also on a panic: the recorders close their files and the session handle's
-        // own drop tears the controller session down.
         if let Some(r) = self.recorder.take() {
             let _ = r.stop();
         }
@@ -1723,8 +1572,6 @@ mod tests {
     fn short_ids_never_split_a_character() {
         assert_eq!(super::short_id("{12345678-9ABC-4DEF-8123-456789ABCDEF}"), "{12345678…}");
         assert_eq!(super::short_id("{abc}"), "{abc}");
-        // Latin-1 text from a controller: multi-byte in UTF-8, with byte 8 falling
-        // inside a character ("A" is one byte, each "Ä" two).
         assert_eq!(super::short_id("{AÄÄÄÄÄÄÄÄÄ}"), "{AÄÄÄÄÄÄÄ…}");
         assert_eq!(super::short_id(""), "");
     }

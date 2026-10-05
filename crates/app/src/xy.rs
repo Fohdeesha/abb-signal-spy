@@ -1,12 +1,3 @@
-//! The XY plot: one channel against another over the stretch the charts
-//! show, live or in a recording under review, so pausing, scrolling or zooming the
-//! charts picks the stretch. A point is a pair of samples of the same controller tick
-//! (the derived channels' rule, [`same_ticks`]: a partner within 1 ms or no point,
-//! never interpolated). Every pair is drawn, thinned only where two land on the same
-//! pixel, so an outlier shows like any other point. Beside it: how many pairs, their
-//! correlation and the least-squares line, the way most of the catalogue's signals
-//! were identified (a resolver angle against the motor angle: slope 0.9999 to 1.0001).
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,21 +15,15 @@ use crate::view::{self, Health};
 
 const POINT: egui::Color32 = egui::Color32::from_rgb(0x5A, 0x9B, 0xD5);
 
-/// The XY window: which channels, by id (a live channel and its recording share one,
-/// so a choice carries over to a review), and the pairs last computed.
 #[derive(Default)]
 pub struct XyState {
     pub x: Option<String>,
     pub y: Option<String>,
     pub(crate) cache: Option<(Key, Pairs)>,
-    /// The person dragged or zoomed the plot: it keeps their view until a
-    /// double-click, or other channels, bring back the whole stretch.
     pub(crate) zoomed: bool,
-    /// The ranges of x and y the plot showed last, which its points were thinned for.
     pub(crate) shown: Option<((f64, f64), (f64, f64))>,
 }
 
-/// What pairs were computed from: the channels, the stretch, and the data then.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Key {
     pub(crate) x: String,
@@ -48,8 +33,6 @@ pub(crate) struct Key {
     data: Data,
 }
 
-/// The state of the data: live, the newest sample and the history's epoch; a review,
-/// which recording (it never changes once open).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Data {
     Live(Option<i64>, u64),
@@ -57,25 +40,16 @@ pub(crate) enum Data {
 }
 
 pub(crate) struct Pairs {
-    /// (time, x, y) of each tick both have a sample of, in the display units.
     pub(crate) points: Vec<(i64, f64, f64)>,
     pub(crate) fit: Option<Fit>,
-    /// How many samples each had in the stretch.
     pub(crate) counts: (usize, usize),
-    /// The smallest and largest x, and y.
     extent: Option<((f64, f64), (f64, f64))>,
-    /// When they were paired, and how long that took.
     at: Instant,
     took: Duration,
 }
 
-/// The plot spends at most about one part in this of its time pairing: a live view of
-/// ten minutes (150,000 pairs, measured: 73 % of a core with the plot open against 41 %
-/// without, pairing every frame) moves on a few times a second instead of every frame.
 const PAIRING_SHARE: u32 = 10;
 
-/// Whether to pair again for `key`: at once for other channels; for a moved stretch
-/// or new data, once the last pairing's cost has been paid back [`PAIRING_SHARE`] times.
 fn pair_again(cache: Option<&(Key, Pairs)>, key: &Key) -> bool {
     match cache {
         None => true,
@@ -83,7 +57,6 @@ fn pair_again(cache: Option<&(Key, Pairs)>, key: &Key) -> bool {
     }
 }
 
-/// The least-squares line `y = slope x + offset` and the correlation, where y changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fit {
     pub slope: f64,
@@ -91,8 +64,6 @@ pub struct Fit {
     pub r: Option<f64>,
 }
 
-/// The least-squares line through the finite pairs and their correlation. Nothing for
-/// fewer than two, or where x does not change (no line then).
 pub fn fit(pairs: &[(i64, f64, f64)]) -> Option<Fit> {
     let pts = || pairs.iter().filter(|p| p.1.is_finite() && p.2.is_finite());
     let n = pts().count();
@@ -112,17 +83,12 @@ pub fn fit(pairs: &[(i64, f64, f64)]) -> Option<Fit> {
     Some(Fit { slope, offset: my - slope * mx, r: (syy > 0.0).then(|| (sxy / (sxx * syy).sqrt()).clamp(-1.0, 1.0)) })
 }
 
-/// The points to draw of `pairs` inside the ranges `x` and `y`: one per cell of a `w`
-/// by `h` grid (a pixel each), so a stretch of a hundred thousand pairs draws as fast as
-/// the pixels it covers, and every cell holding a pair shows one: nothing is thinned
-/// away that would show. Pairs outside the ranges, or not finite, are left out.
 pub fn thin(pairs: &[(i64, f64, f64)], x: (f64, f64), y: (f64, f64), w: usize, h: usize) -> Vec<[f64; 2]> {
     let (w, h) = (w.max(1), h.max(1));
     let (kx, ky) = (w as f64 / (x.1 - x.0), h as f64 / (y.1 - y.0));
     let mut seen = vec![0u64; (w * h).div_ceil(64)];
     let mut out = Vec::new();
     for &(_, px, py) in pairs {
-        // Also leaves out NaN, which compares false.
         if !(px >= x.0 && px <= x.1 && py >= y.0 && py <= y.1) {
             continue;
         }
@@ -136,7 +102,6 @@ pub fn thin(pairs: &[(i64, f64, f64)], x: (f64, f64), y: (f64, f64), w: usize, h
     out
 }
 
-/// A channel the plot can take.
 pub(crate) struct Candidate {
     pub(crate) id: String,
     pub(crate) title: String,
@@ -146,12 +111,10 @@ pub(crate) struct Candidate {
 
 enum Source {
     Live(Member),
-    /// A recorded channel (by index) and its display factor.
     Recorded(Arc<Review>, usize, f64),
 }
 
 impl Candidate {
-    /// Its samples over `[from, to)` in its display unit.
     pub(crate) fn values(&self, from: i64, to: i64) -> Vec<(i64, f64)> {
         match &self.source {
             Source::Live(m) => m.values(from, to),
@@ -168,8 +131,6 @@ impl Candidate {
 }
 
 impl SpyApp {
-    /// What the plot can show: the channels charted, the stretch in view, and the
-    /// state of the data. A recording under review has the charts, so it has the plot.
     pub(crate) fn xy_sources(&self) -> (Vec<Candidate>, Option<(i64, i64)>, Data) {
         if let Some(rs) = &self.review {
             let r = rs.review.clone();
@@ -187,8 +148,6 @@ impl SpyApp {
         }
         let st = self.session.status().clone();
         let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, &st)).collect();
-        // Named with their numbers: several signals share a catalogue name (four rows of
-        // Compare read alike on the IRC5, 2026-10-04).
         let cands = self.members(&charted, &st).into_iter().map(|m| Candidate { id: m.id.clone(), title: m.name.clone(), units: m.lane.1.clone(), source: Source::Live(m) }).collect();
         let store = self.session.store();
         (cands, self.view_ms, Data::Live(store.newest(), store.epoch()))
@@ -201,12 +160,10 @@ impl SpyApp {
         };
     }
 
-    /// The XY window, after the charts have set the stretch in view this frame.
     pub fn xy_window(&mut self, ctx: &egui::Context) {
         let Some(mut xy) = self.xy.take() else { return };
         let (cands, stretch, data) = self.xy_sources();
         let find = |id: &Option<String>| id.as_ref().and_then(|id| cands.iter().find(|c| &c.id == id));
-        // The first two charted, until the person chooses.
         if xy.x.is_none() && xy.y.is_none() && cands.len() >= 2 {
             xy.x = Some(cands[0].id.clone());
             xy.y = Some(cands[1].id.clone());
@@ -245,8 +202,6 @@ impl SpyApp {
                 ui.label(RichText::new("Nothing charted yet.").weak());
                 return;
             };
-            // Other channels than those last paired (or the window just opened): the
-            // whole stretch of them, not the view of the last ones.
             let chosen_again = xy.cache.as_ref().is_none_or(|(k, _)| k.x != cx.id || k.y != cy.id);
             let key = Key { x: cx.id.clone(), y: cy.id.clone(), from, to, data };
             if pair_again(xy.cache.as_ref(), &key) {
@@ -270,8 +225,6 @@ impl SpyApp {
             let Some((xr, yr)) = p.extent else { return };
             let (xb, yb) = (autoscale(xr.0, xr.1, min_span(&cx.units)), autoscale(yr.0, yr.1, min_span(&cy.units)));
             let (xu, yu) = (cx.units.clone(), cy.units.clone());
-            // egui_plot fits its bounds to the whole stretch (the items drawn never reach
-            // past it) until the person drags or zooms; a double-click fits them again.
             let pal = theme::pal(ui);
             let resp = Plot::new("xy-plot")
                 .x_axis_label(format!("{}  [{}]", cx.title, cx.units))
@@ -308,7 +261,6 @@ impl SpyApp {
                     if let Some(line) = p.fit.and_then(|f| line_in(f, vx, vy)) {
                         pu.line(Line::new("least-squares line", PlotPoints::from(line.to_vec())).color(pal.ink2).style(egui_plot::LineStyle::dashed_loose()));
                     }
-                    // Where it is now.
                     if !reviewing && let Some(&(_, x, y)) = p.points.last() {
                         pu.points(Points::new("newest", PlotPoints::from(vec![[x, y]])).radius(4.5).color(pal.hold));
                     }
@@ -318,9 +270,6 @@ impl SpyApp {
             rect = Some(resp.response.rect);
         });
         self.xy_rect = rect;
-        // Its picture is the whole window while a plot is in it: the title (which says
-        // when it is a review), the channels, the pairs, r and the line, and the plot with
-        // its axes (the plot alone said none of that).
         self.xy_window_rect = rect.and(shown.map(|w| w.response.rect));
         self.xy = open.then_some(xy);
         if png {
@@ -329,8 +278,6 @@ impl SpyApp {
     }
 }
 
-/// The part of the line `y = slope x + offset` inside the ranges `x` by `y`: drawn
-/// past them, it would widen the bounds the plot fits to the pairs.
 pub fn line_in(f: Fit, x: (f64, f64), y: (f64, f64)) -> Option<[[f64; 2]; 2]> {
     let (mut x0, mut x1) = x;
     if f.slope != 0.0 {
@@ -348,7 +295,6 @@ fn extent(v: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
     (lo <= hi).then_some((lo, hi))
 }
 
-/// How many pairs, and what follows from them; or why there are none.
 fn pairs_text(p: &Pairs, x: &Candidate, y: &Candidate, secs: f64) -> String {
     let n = p.points.len();
     if n == 0 {
@@ -381,10 +327,8 @@ mod tests {
         assert!((f.slope - 2.0).abs() < 1e-12 && (f.offset - 3.0).abs() < 1e-12 && (f.r.unwrap() - 1.0).abs() < 1e-12, "{f:?}");
         let down: Vec<(i64, f64, f64)> = (0..10).map(|i| (i, i as f64, -0.5 * i as f64)).collect();
         assert!((fit(&down).unwrap().r.unwrap() + 1.0).abs() < 1e-12);
-        // A known small case: (0,1) (1,3) (2,2): slope 0.5, offset 1.5, r 0.5.
         let f = fit(&[(0, 0.0, 1.0), (1, 1.0, 3.0), (2, 2.0, 2.0)]).unwrap();
         assert!((f.slope - 0.5).abs() < 1e-12 && (f.offset - 1.5).abs() < 1e-12 && (f.r.unwrap() - 0.5).abs() < 1e-12, "{f:?}");
-        // A pair that is not a number is left out, not spread through the sums.
         let f = fit(&[(0, 0.0, 1.0), (1, f64::NAN, 5.0), (2, 1.0, 3.0), (3, 2.0, 2.0), (4, 3.0, f64::INFINITY)]).unwrap();
         assert!((f.slope - 0.5).abs() < 1e-12, "{f:?}");
         assert_eq!(fit(&[(0, 1.0, 2.0), (1, 1.0, 3.0)]), None, "x does not change: no line");
@@ -428,7 +372,6 @@ mod tests {
 
     #[test]
     fn thinning_keeps_one_point_in_every_pixel_that_has_one() {
-        // A dense curve, and one outlier far from it.
         let mut pairs: Vec<(i64, f64, f64)> = (0..100_000).map(|i| (i, (i as f64 * 0.001).sin(), (i as f64 * 0.0013).cos())).collect();
         pairs.push((100_000, 0.9, -0.9));
         let (x, y, w, h) = ((-1.1, 1.1), (-1.1, 1.1), 400, 300);
@@ -440,7 +383,6 @@ mod tests {
         assert_eq!(drawn.len(), cells.len());
         assert!(drawn.len() < 20_000, "{} points drawn for a curve", drawn.len());
         assert!(drawn.contains(&[0.9, -0.9]), "the outlier was thinned away");
-        // Outside the ranges, or not a number: not drawn.
         assert!(thin(&[(0, 5.0, 0.0), (1, 0.0, f64::NAN), (2, 0.0, 0.0)], x, y, w, h) == vec![[0.0, 0.0]]);
     }
 }

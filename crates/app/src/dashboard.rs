@@ -1,8 +1,3 @@
-//! The live dashboard (G47): every channel's value as a big number in place of the
-//! charts, to read from a step away. The numbers are the rows' (a mean of at least
-//! 150 ms, longer for a smoothed channel); one that is not live is marked, struck
-//! through and aged, never shown as current.
-
 use eframe::egui::{self, RichText, Stroke};
 
 use spy_core::session::Status;
@@ -12,21 +7,17 @@ use crate::settings::DASH_SIZES;
 use crate::theme;
 use crate::view::{self, Health};
 
-/// One tile's contents.
 struct Tile {
     name: String,
     color: egui::Color32,
     health: Health,
     value: String,
     units: String,
-    /// Since reset: "349.1 to 358.0".
     range: Option<String>,
-    /// The newest sample's age, for a stale one.
     age: Option<String>,
     on_target: bool,
 }
 
-/// Columns for `n` tiles: the fewest that keep them wide.
 pub fn columns(n: usize) -> usize {
     match n {
         0..=3 => n.max(1),
@@ -141,7 +132,6 @@ fn tile(ui: &mut egui::Ui, t: &Tile, size: egui::Vec2, number: f32) {
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(16.0, 12.0))).layout(egui::Layout::top_down(egui::Align::Min)));
     let ui = &mut child;
-    // The status at the right first, so the name truncates before it.
     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
         crate::channels::status_word(ui, t.health);
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -149,7 +139,6 @@ fn tile(ui: &mut egui::Ui, t: &Tile, size: egui::Vec2, number: f32) {
             ui.add(egui::Label::new(theme::b(&t.name).size(20.0)).truncate());
         });
     });
-    // As big as asked, or as fits the tile.
     let chars = t.value.chars().count().max(1) as f32 + (t.units.chars().count() as f32 * 0.5);
     let fit = (ui.available_width() * 0.95 / (chars * 0.62)).floor();
     let size = number.min(fit).max(20.0);

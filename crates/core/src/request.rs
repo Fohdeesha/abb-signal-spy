@@ -1,27 +1,5 @@
-//! The requests this program sends. The complete list, and nothing else:
-//!
-//! | request | what it does |
-//! |---|---|
-//! | handshake | service 6, `ctrl1 = 1`; the controller answers with its system id and client list |
-//! | `Set SetProtocol -Value 1` | samples as protobuf |
-//! | `Set StreamConnect -Timeout 5000` | open the InfoStream session |
-//! | `Get StreamDefine ...` | define one stream |
-//! | SUBSCRIBE | ask for the sample events |
-//! | `Set StartStream` / `Set StopStream` | start or stop delivery (controller-wide, measured) |
-//! | `Set StreamUndefine -StreamId N` | remove one of OUR streams |
-//! | `Set StreamUndefineAll` | remove EVERY client's streams; only behind the "Reset InfoStream" button |
-//! | `Set StreamDisconnect` | close the InfoStream session |
-//! | AYA reply | answer the keepalive, echoing its ctrl values |
-//!
-//! Read-only by construction: there is no request here that moves the robot, writes
-//! RAPID, configuration or I/O, or takes mastership, and [`Command`] is a closed set
-//! so none can be added by accident at a call site.
-
 use crate::wire::{cause, encode_frame, rad_format, rad_kind, service, RadOut};
 
-/// Axes are one-based everywhere a person sees them and zero-based on the wire. An
-/// axis-indexed signal defined without an axis silently reads joint 1, so the
-/// conversion lives in one place and takes a type that cannot hold a zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
 pub struct Axis(u8);
@@ -53,9 +31,6 @@ impl From<Axis> for u8 {
     }
 }
 
-/// A mechanical unit name as the controller spells it (ROB_1, STN_1 ...). Checked,
-/// because it is interpolated into a command line: a space would split it into two
-/// arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct MechUnit(String);
@@ -100,18 +75,14 @@ impl std::fmt::Display for MechUnit {
     }
 }
 
-/// One stream definition as it goes on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Define {
-    /// The `-Channel` asked for. The controller assigns the stream id it will send
-    /// samples under; this number is not it.
     pub channel: u8,
     pub signal: u32,
     pub unit: MechUnit,
     pub axis: Axis,
 }
 
-/// Every text command this program can send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     SetProtocolProtobuf,
@@ -120,7 +91,6 @@ pub enum Command {
     StartStream,
     StopStream,
     Undefine(u32),
-    /// Controller-wide. Removes every client's streams.
     UndefineAll,
     StreamDisconnect,
 }
@@ -133,8 +103,6 @@ impl Command {
             Command::Define(d) => (
                 "GET",
                 "StreamDefine",
-                // -SampleRate 1 is the native rate; -Latency 1 gives one sample per
-                // stream per frame (measured: about 250 frames a second).
                 format!(
                     "-Channel {} -Signal {} -MechUnit {} -Axis {} -SampleRate 1 -Latency 1",
                     d.channel,
@@ -151,14 +119,10 @@ impl Command {
         }
     }
 
-    /// Short name for logs.
     pub fn name(&self) -> &'static str {
         self.parts().1
     }
 
-    /// The request frame. `host` is the controller's address as it appears in the
-    /// resource URL (`/<host>/INFOSTREAM`); the peer's IP is used, the way the
-    /// working clients always did.
     pub fn frame(&self, txn: u16, host: &str) -> Vec<u8> {
         let (verb, prop, args) = self.parts();
         let mut d = Vec::with_capacity(64);
@@ -169,8 +133,6 @@ impl Command {
         push(verb);
         push(&format!("/{host}/INFOSTREAM"));
         push(prop);
-        // Always present, empty or not: the Python reference, which is proven on the
-        // cell and the VC, sends an empty argument field for argument-less commands.
         push(&args);
         d.push(0);
         encode_frame(txn, service::REQUEST, cause::CMD, 12, 0, &[RadOut { kind: rad_kind::REQUEST, format: rad_format::TEXT, data: &d }])
@@ -182,12 +144,10 @@ fn latin1_byte(c: char) -> u8 {
     if v < 256 { v as u8 } else { b'?' }
 }
 
-/// The handshake: a control frame, no RADs, `ctrl1 = 1`.
 pub fn hello(txn: u16) -> Vec<u8> {
     encode_frame(txn, service::CONTROL, cause::CMD, 1, 0, &[])
 }
 
-/// The subscription request for InfoStream sample events.
 pub fn subscribe(txn: u16, host: &str) -> Vec<u8> {
     let mut d = Vec::with_capacity(48);
     d.extend_from_slice(b"SUBSCRIBE\0/");
@@ -200,9 +160,6 @@ pub fn subscribe(txn: u16, host: &str) -> Vec<u8> {
     encode_frame(txn, service::REQUEST, cause::CMD, 12, 0, &[RadOut { kind: rad_kind::REQUEST, format: rad_format::SUBSCRIBE, data: &d }])
 }
 
-/// The keepalive answer: service 4, cause 5, the controller's own transaction id,
-/// and its ctrl1/ctrl2 ECHOED. Measured on the cell: zeroing them makes the
-/// controller drop the connection at once; not answering drops it after ~16 s.
 pub fn aya_reply(txn: u16, ctrl1: u32, ctrl2: u32) -> Vec<u8> {
     encode_frame(txn, service::AYA, cause::RESPONSE, ctrl1, ctrl2, &[])
 }
@@ -243,7 +200,6 @@ mod tests {
 
     #[test]
     fn frames_match_the_reference_client() {
-        // Byte for byte what a working client sent to the VC on 2026-09-25.
         let stop = Command::StopStream.frame(14, "127.0.0.1");
         let fr = Frame::parse(&stop).unwrap();
         assert_eq!(fr.rads().next().unwrap().data, b"SET\0/127.0.0.1/INFOSTREAM\0StopStream\0\0\0");

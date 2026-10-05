@@ -1,10 +1,3 @@
-//! Ready-made channel sets: the channels a common look needs, added in one
-//! go: both DC links, one robot's torques or joint positions,
-//! its resolver angles on six axes, and the `8000-8009` block for slow logging.
-//!
-//! A set is only a list of channels: each is added as the add dialog would add it,
-//! with the same limits, and can be removed on its own afterwards.
-
 use eframe::egui::{self, RichText};
 
 use spy_core::catalogue::flag;
@@ -17,14 +10,10 @@ use crate::app::SpyApp;
 use crate::fields;
 use crate::theme;
 
-/// What a set asks the person to choose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// One robot (mechanical unit).
     OneRobot,
-    /// Any number of robots: one channel each (a robot picks its drive module).
     EachRobot,
-    /// Nothing: controller-wide signals.
     Controller,
 }
 
@@ -34,9 +23,7 @@ pub struct ChannelSet {
     pub about: &'static str,
     pub scope: Scope,
     pub signals: &'static [u32],
-    /// Each signal on axes 1 to 6.
     pub six_axes: bool,
-    /// All in one chart; otherwise a chart each.
     pub overlay: bool,
 }
 
@@ -69,8 +56,6 @@ pub const SETS: &[ChannelSet] = &[
     },
 ];
 
-/// The set's channels for the chosen robots (the first one only, for a one-robot
-/// set; any one, for a controller-wide set).
 pub fn keys(set: &ChannelSet, units: &[MechUnit]) -> Vec<ChannelKey> {
     let units: &[MechUnit] = match set.scope {
         Scope::EachRobot => units,
@@ -88,13 +73,10 @@ pub fn keys(set: &ChannelSet, units: &[MechUnit]) -> Vec<ChannelKey> {
     out
 }
 
-/// The sets dialog's choices.
 #[derive(Debug, Clone)]
 pub struct SetDialog {
     pub set: usize,
-    /// The one robot, for a one-robot set.
     pub unit: String,
-    /// The robots ticked, for a set with one channel per robot.
     pub ticked: Vec<String>,
 }
 
@@ -104,8 +86,6 @@ impl SpyApp {
         self.sets = Some(SetDialog { set: 0, unit, ticked: self.settings.units.clone() });
     }
 
-    /// Replace every channel with these; false (and a message) when that would break
-    /// the rules, leaving the channels as they were.
     pub fn replace_channels(&mut self, keys: Vec<ChannelKey>, overlay: bool) -> bool {
         if keys.len() > MAX_CHANNELS {
             self.toast(Level::Error, format!("At most {MAX_CHANNELS} channels at once."));
@@ -169,7 +149,6 @@ impl SpyApp {
             }
             let units: Result<Vec<MechUnit>, String> = match set.scope {
                 Scope::OneRobot => MechUnit::new(&d.unit).map(|u| vec![u]).map_err(|_| "A mechanical unit name is letters, digits and _ (like ROB_1).".to_string()),
-                // In the list's order, whatever order they were ticked in.
                 Scope::EachRobot => self.settings.units.iter().filter(|u| d.ticked.contains(u)).map(|u| MechUnit::new(u).map_err(|_| format!("{u} is not a mechanical unit name."))).collect(),
                 Scope::Controller => Ok(vec![self.settings.units.first().and_then(|u| MechUnit::new(u).ok()).unwrap_or_else(|| MechUnit::new("ROB_1").expect("a valid name"))]),
             };
@@ -257,7 +236,6 @@ mod tests {
         let block = keys(by_name("The 8000-8009 block"), &[unit("ROB_1"), unit("ROB_2")]);
         assert_eq!(block.iter().map(|k| k.signal).collect::<Vec<_>>(), (8000..=8009).collect::<Vec<_>>(), "controller-wide: once");
         assert!(keys(by_name("DC links"), &[]).is_empty());
-        // Every set fits in the channels there are.
         for s in SETS {
             assert!(keys(s, &[unit("ROB_1"), unit("ROB_2")]).len() <= MAX_CHANNELS, "{}", s.name);
         }
@@ -265,8 +243,6 @@ mod tests {
 
     #[test]
     fn every_set_signal_is_selected_the_way_the_set_asks() {
-        // The built-in catalogue says how each number is selected: a set must ask
-        // for what the number needs (an axis only where the axis picks the joint).
         let cat = spy_core::catalogue::Catalogue::builtin();
         for s in SETS {
             for &n in s.signals {

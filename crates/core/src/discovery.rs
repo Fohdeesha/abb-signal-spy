@@ -1,11 +1,3 @@
-//! Finding the local virtual controllers, and a handshake-only probe.
-//!
-//! A RobotStudio virtual controller serves RobAPI InfoStream on a port it picks at
-//! every start (the RW6 VC's was 17475 on 2026-08-28 and 45198 on 2026-09-24), not
-//! on 5515. So the app asks Windows which TCP ports the VC processes listen on (the
-//! IP Helper API; no administrator rights needed), and handshakes each one: the
-//! ports that answer with the RobAPI magic are the ones to offer.
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -14,9 +6,7 @@ use crate::reply::Announce;
 use crate::request;
 use crate::wire::{self, service, Frame, FrameStatus};
 
-/// VC host processes: RobotWare 6 and RobotWare 7.
 pub const VC_PROCESSES: &[&str] = &["RobVC.exe", "Vrchost64.exe"];
-/// Ports a VC also listens on that are known not to be RobAPI (RWS).
 const NOT_ROBAPI: &[u16] = &[80, 443, 90, 91];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,11 +21,9 @@ pub struct LocalController {
     pub process: String,
     pub pid: u32,
     pub port: u16,
-    /// The handshake's answer, or why there was none.
     pub hello: Result<Announce, String>,
 }
 
-/// Every TCP port a VC process listens on, over IPv4.
 #[cfg(windows)]
 pub fn vc_listeners() -> Result<Vec<Listener>, String> {
     Ok(listening_ports()?.into_iter().filter(|l| VC_PROCESSES.iter().any(|p| p.eq_ignore_ascii_case(&l.process))).collect())
@@ -54,7 +42,6 @@ fn listening_ports() -> Result<Vec<Listener>, String> {
 
     let mut size: u32 = 0;
     let mut buf: Vec<u64> = Vec::new();
-    // The table can grow between the size query and the read; retry a few times.
     for _ in 0..5 {
         let rc = unsafe { GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut size, 0, u32::from(AF_INET), TCP_TABLE_OWNER_PID_LISTENER, 0) };
         if rc == NO_ERROR {
@@ -63,7 +50,6 @@ fn listening_ports() -> Result<Vec<Listener>, String> {
         if rc != ERROR_INSUFFICIENT_BUFFER {
             return Err(format!("GetExtendedTcpTable failed ({rc})"));
         }
-        // u64 elements keep the table 8-byte aligned.
         buf = vec![0u64; (size as usize).div_ceil(8) + 1];
     }
     if buf.is_empty() {
@@ -71,7 +57,6 @@ fn listening_ports() -> Result<Vec<Listener>, String> {
     }
     let bytes = buf.len() * 8;
     let base = buf.as_ptr().cast::<u8>();
-    // MIB_TCPTABLE_OWNER_PID: u32 dwNumEntries, then the rows.
     let n = unsafe { base.cast::<u32>().read() } as usize;
     let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     let rows_at = std::mem::align_of::<MIB_TCPROW_OWNER_PID>().max(4);
@@ -81,7 +66,6 @@ fn listening_ports() -> Result<Vec<Listener>, String> {
     let mut out = Vec::new();
     for i in 0..n {
         let row = unsafe { base.add(rows_at + i * row_size).cast::<MIB_TCPROW_OWNER_PID>().read_unaligned() };
-        // The port is in network byte order in the low 16 bits.
         let port = u16::from_be((row.dwLocalPort & 0xFFFF) as u16);
         out.push(Listener { pid: row.dwOwningPid, process: process_name(row.dwOwningPid).unwrap_or_default(), port });
     }
@@ -112,9 +96,6 @@ fn process_name(pid: u32) -> Option<String> {
     }
 }
 
-/// Handshake and nothing else: connect, send the control frame, read the answer,
-/// close. Nothing is defined and no InfoStream session is opened, but for the
-/// moment it is connected this program is one of the controller's RobAPI clients.
 pub fn hello(addr: SocketAddr, timeout: Duration) -> Result<Announce, String> {
     let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("cannot connect: {e}"))?;
     let _ = s.set_nodelay(true);
@@ -151,15 +132,12 @@ pub fn hello(addr: SocketAddr, timeout: Duration) -> Result<Announce, String> {
                         let _ = s.shutdown(std::net::Shutdown::Both);
                         return Ok(a);
                     }
-                    // Anything else (an AYA) is not the answer; keep reading.
                 }
             }
         }
     }
 }
 
-/// Every local VC port that answers the RobAPI handshake, and the ones that did
-/// not (with why), handshaken in parallel.
 pub fn local_controllers(timeout: Duration) -> Result<Vec<LocalController>, String> {
     let listeners = vc_listeners()?;
     let handles: Vec<_> = listeners
@@ -177,10 +155,6 @@ pub fn local_controllers(timeout: Duration) -> Result<Vec<LocalController>, Stri
     Ok(out)
 }
 
-/// Where the local virtual controllers answer RobAPI now: each port that answered
-/// the handshake, with the system id it gave. The product asks Windows and
-/// handshakes every VC port ([`local_controllers`]); tests hand in their fakes, and
-/// [`VcFinder::none`] looks nowhere.
 #[derive(Clone)]
 pub struct VcFinder(Option<std::sync::Arc<FindFn>>);
 
@@ -207,19 +181,10 @@ impl std::fmt::Debug for VcFinder {
     }
 }
 
-/// Whether an address resolved to this PC only: where a virtual controller runs. A
-/// controller reached over the network is never looked for among the local VCs,
-/// whose systems may well be copies of it.
 pub fn on_this_pc(addrs: &[SocketAddr]) -> bool {
     !addrs.is_empty() && addrs.iter().all(|a| a.ip().is_loopback())
 }
 
-/// The port a restarted virtual controller answers on now. A VC takes a new port at
-/// every start, a warm restart included (the RW6 VC's moved from 45198 to 62097,
-/// 2026-09-28), so a connection refused where one was is looked for among the
-/// local VC ports. Only the controller seen before (its system id) is followed, and
-/// only when exactly one port answers with it: another VC, or two ports answering
-/// alike, is never guessed at, and the old port answering means it has not moved.
 pub fn restarted_port(system: &str, from: u16, found: &[(u16, Option<String>)]) -> Option<u16> {
     let mut ports: Vec<u16> = found.iter().filter(|(_, id)| id.as_deref() == Some(system)).map(|(p, _)| *p).collect();
     ports.sort_unstable();
@@ -265,7 +230,6 @@ mod tests {
     fn only_the_same_controller_on_exactly_one_new_port_is_followed() {
         let s = |p: u16, id: &str| (p, Some(id.to_string()));
         assert_eq!(restarted_port("A", 45198, &[s(62097, "A")]), Some(62097));
-        // Among other VCs, and seen twice on the same port (two answers to one scan).
         assert_eq!(restarted_port("A", 45198, &[s(1111, "B"), (2222, None), s(62097, "A"), s(62097, "A")]), Some(62097));
         assert_eq!(restarted_port("A", 45198, &[s(62097, "B")]), None, "another controller is never taken");
         assert_eq!(restarted_port("A", 45198, &[(62097, None)]), None, "nor one that gave no system id");
@@ -288,7 +252,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_listener_table_is_readable() {
-        // This process's own listener must show up with its port.
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let all = listening_ports().unwrap();

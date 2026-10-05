@@ -1,8 +1,3 @@
-//! Recording controls in the controller bar (G47): one click each to record every
-//! sample, save the last seconds (what just happened, even if nothing was recording)
-//! or log averages for runs of hours; the next recording's name, the seconds and the
-//! interval behind a small arrow beside each. And the phone view's switch.
-
 use std::sync::Arc;
 
 use eframe::egui::{self, RichText};
@@ -30,13 +25,10 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// The seconds "save last" keeps, as its button says them.
 pub fn seconds_text(s: f64) -> String {
     SAVE_LAST.iter().find(|(v, _)| (v - s).abs() < 1e-9).map(|(_, t)| t.to_string()).unwrap_or_else(|| format!("{s:.0} s"))
 }
 
-/// A red button with a white mark drawn before its label: a dot to record, a square
-/// to stop.
 fn red_with_mark(ui: &mut egui::Ui, text: &str, square: bool, enabled: bool) -> egui::Response {
     let id = ui.next_auto_id().with("mark");
     let p = theme::pal(ui);
@@ -66,7 +58,6 @@ impl SpyApp {
     pub fn record_controls(&mut self, ui: &mut egui::Ui) {
         let have = !self.chans.is_empty();
         let why_not = "Add a channel first.";
-        // Record.
         let status = self.recorder.as_ref().map(|r| r.status());
         let dir = self.record_dir();
         let mut clicked = false;
@@ -100,7 +91,6 @@ impl SpyApp {
         if clicked {
             self.toggle_recording();
         }
-        // A recording's trouble shows on the bar too, not only behind the arrow.
         if let Some(s) = &status
             && (s.lost > 0 || s.warning.is_some())
         {
@@ -111,7 +101,6 @@ impl SpyApp {
         }
 
         ui.add_space(8.0);
-        // Save the last N seconds.
         let busy = self.snapshot_job.is_some();
         let secs = self.settings.snapshot_s;
         let mut save = false;
@@ -143,7 +132,6 @@ impl SpyApp {
         }
 
         ui.add_space(8.0);
-        // Slow log.
         let mut toggle = false;
         let mut interval = None;
         let current = self.settings.slow_interval_ms;
@@ -181,7 +169,6 @@ impl SpyApp {
         }
     }
 
-    /// Record, or stop the recording under way.
     pub fn toggle_recording(&mut self) {
         match self.recorder.take() {
             None => match Recorder::start(&self.session, &self.record_dir(), &self.rec_label, None, &self.infos()) {
@@ -200,7 +187,6 @@ impl SpyApp {
                     RecState::Failed(e) => self.toast(Level::Error, format!("The recording ended with an error: {e}")),
                     _ => self.toast(Level::Info, format!("Recorded {} rows to {}", s.rows, s.dir.display())),
                 }
-                // Controller events of its last seconds are still on their way.
                 let to = now_ms();
                 self.rws_after_recording(s.dir.clone(), to - s.started.elapsed().as_millis() as i64, to);
                 self.last_folder = Some(s.dir);
@@ -208,7 +194,6 @@ impl SpyApp {
         }
     }
 
-    /// Save the last seconds of every channel from the live history, in the background.
     pub fn save_last(&mut self) {
         if self.snapshot_job.is_some() || self.chans.is_empty() {
             return;
@@ -233,7 +218,6 @@ impl SpyApp {
         }));
     }
 
-    /// Start the slow log, or stop the one under way.
     pub fn toggle_slow_log(&mut self) {
         match self.slow.take() {
             None => {
@@ -259,7 +243,6 @@ impl SpyApp {
         }
     }
 
-    /// The phone view's switch (the view menu): off until switched on.
     pub fn phone_switch(&mut self, ui: &mut egui::Ui) {
         let mut on = self.phone.is_some();
         if ui.checkbox(&mut on, "phone view").on_hover_text("A read-only page for a phone on the same network. Off until switched on; it opens a listening port on this PC while it is on.").changed() {
@@ -284,8 +267,6 @@ impl SpyApp {
         }
     }
 
-    /// A recorder that failed (disk full, folder gone), or closed itself (the
-    /// controller behind the address changed), is reported and dropped.
     pub fn check_recorders(&mut self) {
         let mut said = Vec::new();
         for slot in [&mut self.recorder, &mut self.slow] {

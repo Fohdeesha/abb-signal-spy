@@ -1,10 +1,3 @@
-//! The catalogue browser (left panel) and the add-channel dialog.
-//!
-//! By default only named signals show; the open and the inert ones sit behind
-//! toggles. Numbers that report the same quantity collapse into one row ("Motor
-//! speed, 18 numbers, any works"). Adding a channel asks only what the signal's
-//! selector needs, so the wrong choice cannot be made.
-
 use eframe::egui::{self, RichText};
 
 use spy_core::catalogue::{flag, Confidence, Select, Signal};
@@ -28,7 +21,6 @@ pub fn confidence_color(c: Confidence, p: &theme::Pal) -> egui::Color32 {
     }
 }
 
-/// The badges a signal carries, with what each means.
 pub fn signal_badges(ui: &mut egui::Ui, s: &Signal) {
     if s.has(flag::FROZEN) {
         theme::badge(ui, "FROZEN", theme::pal(ui).hold, "Holds the last RAPID path-level value and does NOT move while EGM drives the robot. Do not use it to tell whether the robot moved.");
@@ -70,7 +62,6 @@ impl SpyApp {
         }
         let shown = (s.named && self.settings.show_named) || (self.settings.show_open && s.confidence == Confidence::Open) || (self.settings.show_inert && s.confidence == Confidence::Inert);
         if !shown && self.search.trim().chars().all(|c| c.is_ascii_digit()) && !self.search.trim().is_empty() {
-            // A number typed in full finds its signal whatever the toggles say.
             return s.number.to_string() == self.search.trim();
         }
         if !shown {
@@ -81,7 +72,6 @@ impl SpyApp {
         {
             return false;
         }
-        // Confidence orders confirmed < strong < probable < open < inert.
         if let Some(min) = self.min_confidence
             && s.confidence > min
         {
@@ -152,7 +142,6 @@ impl SpyApp {
             });
         });
 
-        // Rows: one per alias group, in number order.
         let query = self.search.clone();
         let mut rows: Vec<(u32, usize)> = Vec::new();
         let mut seen_groups: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -192,7 +181,6 @@ impl SpyApp {
             }
         });
         if let Some(n) = clicked {
-            // A second click on the open one closes its details.
             self.selected = if self.selected == Some(n) { None } else { Some(n) };
         }
         if let Some(n) = add {
@@ -200,8 +188,6 @@ impl SpyApp {
             self.open_add(n);
         }
 
-        // A number not in the list: under it, the list taking what height is left (with
-        // the messages open on a small screen, it can be none).
         ui.add_space(4.0);
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(2.0, p.ink));
@@ -221,8 +207,6 @@ impl SpyApp {
         });
     }
 
-    /// The signal list folded away to a strip (G47), remembered: its number, a way
-    /// back, and "add signals".
     pub fn signals_strip(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         ui.vertical_centered(|ui| {
@@ -237,13 +221,8 @@ impl SpyApp {
         });
     }
 
-    /// A signal's details, in a pop-out beside the list (G47): what it is, how sure
-    /// the catalogue is, your notes, and adding it.
     pub fn signal_details(&mut self, ctx: &egui::Context) {
         let (Some(n), Some(list)) = (self.selected, self.signals_rect) else { return };
-        if self.add.is_some() || self.note_edit.is_some() {
-            // A dialog over it: the pop-out waits underneath.
-        }
         let mut close = false;
         let height = (list.height() + 20.0).max(200.0);
         egui::Area::new(egui::Id::new("signal-details"))
@@ -308,12 +287,10 @@ impl SpyApp {
             signal_badges(ui, &s);
         });
         ui.label(RichText::new(select_words(s.select)).size(14.0).color(p.ink2));
-        // The actions first, where they stay in view above a long description.
         ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, "add as a channel...", fields::HEIGHT).clicked() {
                 self.open_add(n);
             }
-            // Charted, with something to compare it with: the open-signal explorer.
             let (ids, others) = self.charted_ids_of(n);
             if let Some(id) = ids.first()
                 && others > 0
@@ -378,9 +355,7 @@ impl SpyApp {
         self.add = Some(AddDialog { signal, unit, axis });
     }
 
-    /// Add channels; false (and a message) when that would break the rules.
     pub fn add_channels(&mut self, keys: Vec<ChannelKey>, overlay: bool) -> bool {
-        // Each once, however often asked for (a settings file can name a unit twice).
         let mut fresh: Vec<ChannelKey> = Vec::new();
         for k in &keys {
             if !self.chans.iter().any(|c| &c.key == k) && !fresh.contains(k) {
@@ -395,8 +370,6 @@ impl SpyApp {
             self.toast(Level::Error, format!("At most {MAX_CHANNELS} channels at once: {} free.", MAX_CHANNELS - self.chans.len()));
             return false;
         }
-        // Overlaid ("in one chart"): with some of them there already, all of them share
-        // the first one's chart, the ones already there moved into it.
         let present: Vec<usize> = if overlay { self.chans.iter().enumerate().filter(|(_, c)| keys.contains(&c.key)).map(|(i, _)| i).collect() } else { Vec::new() };
         let lane = match present.first() {
             Some(&i) => self.chans[i].lane,
@@ -406,7 +379,6 @@ impl SpyApp {
             self.chans[i].lane = lane;
         }
         for (j, k) in fresh.into_iter().enumerate() {
-            // Overlaid channels share the first one's chart; otherwise each gets its own.
             let l = if overlay || j == 0 { lane } else { self.next_lane_and_bump() };
             let i = self.chans.len();
             self.chans.push(ChanView { hold_nonzero: self.catalogue.get(k.signal).is_some_and(|s| s.has(flag::ZERO_FILLED)), ..ChanView::new(k.clone(), chan_color(i, self.settings.dark), l) });
@@ -481,7 +453,6 @@ impl SpyApp {
                     ui.label(format!("This number reads joint {j}."));
                 }
 
-            // Warnings that stop the known mistakes.
             if let Some(s) = &sig {
                 if s.has(flag::PHYSICAL) && loopback {
                     ui.colored_label(theme::pal(ui).hold, "You are connected to a virtual controller, which has no physical measurements: nothing will arrive for this signal.");
@@ -500,7 +471,6 @@ impl SpyApp {
                 let unit = MechUnit::new(&d.unit).unwrap_or_else(|_| MechUnit::new("ROB_1").unwrap());
                 let key = |signal: u32, axis: u8| ChannelKey { signal, unit: unit.clone(), axis: Axis::new(axis).unwrap_or(Axis::new(1).unwrap()) };
                 let enabled = unit_ok && free > 0;
-                // A greyed-out button says why.
                 let why_not = |n: usize| if !unit_ok { "Type a mechanical unit name first (like ROB_1).".to_string() } else { format!("Needs {n} free channel(s); {free} of {MAX_CHANNELS} free. Remove a channel first.") };
                 if ui.add_enabled_ui(enabled, |ui| theme::primary(ui, "add", fields::HEIGHT)).inner.on_disabled_hover_text(why_not(1)).clicked() {
                     let axis = if select == Select::Axis { d.axis } else { 1 };
@@ -509,8 +479,6 @@ impl SpyApp {
                 if select == Select::Axis && ui.add_enabled(unit_ok && free >= 6, egui::Button::new("add all six axes").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Six channels, overlaid in one chart").on_disabled_hover_text(why_not(6)).clicked() {
                     to_add = Some(((1..=6).map(|a| key(d.signal, a)).collect(), true));
                 }
-                // A loaded catalogue could claim joint 6 for signal 3: then there is
-                // no block, rather than an underflow.
                 if select == Select::Number
                     && let Some(base) = sig.as_ref().and_then(|s| s.joint).and_then(|j| d.signal.checked_sub(u32::from(j.max(1) - 1))).filter(|b| *b > 0 && b.checked_add(5).is_some())
                     && ui.add_enabled(unit_ok && free >= 6, egui::Button::new(format!("add the block {}-{}", base, base + 5)).min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("All six joints, overlaid in one chart").on_disabled_hover_text(why_not(6)).clicked()
@@ -541,13 +509,10 @@ impl SpyApp {
     }
 }
 
-/// One row of the signal list: its number, its name and its unit, picked or not;
-/// named for assistive tools by its number and name.
 #[allow(clippy::too_many_arguments)]
 fn signal_row(ui: &mut egui::Ui, n: u32, name: &str, units: &str, count: usize, picked: bool, noted: bool, frozen: bool, height: f32) -> egui::Response {
     let p = theme::pal(ui);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click());
-    // Its marks said in its name too: they are drawn, not written.
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, picked, format!("{n} {name}{}{}", if frozen { " (frozen)" } else { "" }, if noted { " (notes)" } else { "" })));
     if !ui.is_rect_visible(rect) {
         return r;
@@ -563,7 +528,6 @@ fn signal_row(ui: &mut egui::Ui, n: u32, name: &str, units: &str, count: usize, 
     let mid = rect.center().y;
     let num = galley(theme::num(n.to_string(), 16.0), 60.0);
     painter.galley(egui::pos2(rect.left() + 4.0, mid - num.size().y / 2.0), num, p.ink);
-    // From the right: the unit, then the marks, then the name in what is left.
     let mut right = rect.right() - 6.0;
     if !units.is_empty() {
         let u = galley(RichText::new(units).size(14.0), 80.0);

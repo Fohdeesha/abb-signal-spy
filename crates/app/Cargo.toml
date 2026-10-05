@@ -12,28 +12,17 @@ name = "abb-signal-spy"
 path = "src/main.rs"
 
 [features]
-# The Windows 10/11 build has both. The Windows 7 build (`tools/build_win7.ps1`) has
-# neither: Windows 7 has no DirectX 12, and the screen-reader layer imports
-# combase.dll, which Windows 7 does not have.
 default = ["dx12", "accessibility"]
-# The wgpu (DirectX 12) renderer, tried before OpenGL.
 dx12 = ["eframe/wgpu_no_default_features", "dep:wgpu"]
-# Windows UI Automation, for screen readers.
 accessibility = ["eframe/accesskit"]
 
 [dependencies]
 signal-spy-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
-# Both renderers: wgpu (DirectX 12) first, OpenGL if that cannot start (a remote
-# desktop session or a PC without a usable GPU), so the window opens either way.
-# wgpu without its default features: only the DirectX 12 backend and the WGSL
-# shader front-end egui needs, instead of every backend for every platform.
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 wgpu = { version = "30", default-features = false, features = ["dx12", "wgsl", "std", "parking_lot"], optional = true }
 egui_plot = "0.37"
-# Saving the charts as a picture. Already in the tree (egui's test harness uses it);
-# MIT or Apache-2.0.
 png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
@@ -45,8 +34,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Networking_WinSock",
-    # The out-of-memory note (src/oom.rs): files written, and the clock read, without
-    # allocating.
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_SystemInformation",
@@ -54,7 +41,4 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 signal-spy-core = { path = "../core", features = ["fake"] }
-# Drives the real window code with simulated input: no real mouse, no desktop. With
-# wgpu, it also draws the window off screen for src/shots.rs.
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
-

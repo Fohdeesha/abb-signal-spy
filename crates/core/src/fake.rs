@@ -1,56 +1,3 @@
-//! An in-process stand-in for a controller's RobAPI InfoStream, behaving the way the
-//! RW6 virtual controller did when measured on 2026-09-24 and 2026-09-25. It plays
-//! the controller byte for byte (a real TCP listener, the real framing, typed sample
-//! records) rather than mocking the client's internals, so a test against it
-//! exercises the same code a controller does.
-//!
-//! What it reproduces, each from a measurement:
-//!
-//! * the handshake: system id and client list in two RADs, both padded with `p`
-//! * command replies: a u32 status then text; refusals as the VC words them
-//! * stream ids assigned controller-wide: the highest free id from 215 down, so a
-//!   freed id is handed out again at once (measured 2026-09-25: an undefined 214 went
-//!   to the very next define, and after another client's StreamUndefineAll its
-//!   defines got 215 and 214, the ids the first client had been streaming on); or,
-//!   with [`IdPools::Irc5`], the real IRC5's three pools (measured 2026-09-26)
-//! * sample frames on service 8, cause 1, txn 0, one sample per stream per frame,
-//!   24 ms signals every sixth tick, integer signals as `LogsrvIntMsg`
-//! * ONE subscription id for every client, and single tenancy: every sample frame
-//!   goes to the connection that first sent StreamConnect or SUBSCRIBE, whichever
-//!   (a StreamConnect alone takes the samples: measured 2026-09-28); either
-//!   client's StopStream, StartStream or StreamUndefineAll acts on everyone's
-//!   streams. When that connection closes, a client that connected InfoStream
-//!   meanwhile gets nothing, whatever it sends (StartStream, SUBSCRIBE again); only a
-//!   connection that does so after it becomes the new tenant (measured 2026-09-25
-//!   and 2026-09-28)
-//! * a define or undefine while streaming stops delivery until StartStream
-//! * a closed connection's streams are reaped, and more (measured 2026-09-26): when
-//!   the tenant's connection closes,
-//!   however it leaves, **every** stream goes, another connection's included; when a
-//!   connection that defined a stream closes, every stream goes too and every
-//!   subscriber still connected gets nothing more (only a new connection does). A
-//!   connection that only handshook changes nothing when it leaves. One difference
-//!   is not modelled: after the tenant left, the VC also starved a connection that had
-//!   connected but not yet subscribed, where the real IRC5 served it; the fake does
-//!   what the IRC5 did
-//! * the handshake is answered whenever it is sent, mid-session too, with the
-//!   current client list
-//! * the AYA keepalive with ctrl 4000/16000; a zeroed reply drops the connection
-//!   at once, no reply drops it at the timeout. Sent every 4 s here, for good; the VC
-//!   sent two, 4 s apart just after a connection opened, and then no more
-//!   (measured 2026-09-29)
-//! * a broken connection kept, listed and as the tenant, until the controller lets go
-//!   of it (measured 2026-09-25 and 2026-09-27): seen by the client as a drop
-//!   ([`FakeController::break_connections`]) or, for a fault out in the network, as
-//!   silence ([`FakeController::cut_network`])
-//! * with [`Behaviour::stall_while_held`], the real IRC5's stall after a network fault
-//!   (measured 2026-10-04): RobAPI answers nobody while it holds the broken
-//!   connection and for a while after, a handshake sent meanwhile is never answered,
-//!   and with [`Behaviour::stall_refuses`] new connections are refused
-//!
-//! Loopback only, on a port the OS picks, so a test can never reach a controller or
-//! stand in for one.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -66,23 +13,15 @@ pub const SYSTEM_ID: &str = "{00000000-FA4E-4000-8000-000000000001}";
 pub const SUBSCRIPTION_ID: u32 = 155_974_524;
 pub const FIRST_STREAM_ID: u32 = 215;
 pub const FIRST_TEXT_STREAM_ID: u32 = 233;
-/// Text streams the VC gave before answering -50348 "no channel available". (The
-/// IRC5's text pool size is unmeasured; the fake uses the same bound.)
 pub const TEXT_POOL: usize = 4;
 
-/// How a controller numbers its streams (measured on the VC 2026-09-25 and the IRC5
-/// 2026-09-26). Freed ids are handed out again at once in every pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum IdPools {
-    /// The RW6 VC: 215 down; text from 233 up.
     #[default]
     Vc,
-    /// The real IRC5: 259 down; the drive-side signals the VC does not have from 17
-    /// down; text from 260 up.
     Irc5,
 }
 
-/// Signals the IRC5 numbered from its second pool, from 17 down.
 pub const IRC5_DRIVE_POOL_SIGNALS: [u32; 34] = [
     1188, 1531, 1887, 2332, 2772, 3680, 3896, 5027, 5722, 6093, 6740, 7000, 7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008,
     7009, 7010, 7011, 7012, 7013, 7014, 7015, 7040, 7041, 7042, 7043, 7044, 7045, 9834,
@@ -90,21 +29,13 @@ pub const IRC5_DRIVE_POOL_SIGNALS: [u32; 34] = [
 const OK: u32 = 0x0004_8000;
 const FAIL: u32 = 0xC004_FFFE;
 
-/// Where and when a sample is taken: controller ms, mechanical unit, one-based axis.
 pub type At<'a> = (u64, &'a str, u32);
 
-/// How a signal behaves on this fake controller.
 #[derive(Clone)]
 pub enum SignalSource {
-    /// A float that follows `f(at)`.
     Float(Arc<dyn Fn(At<'_>) -> f32 + Send + Sync>),
-    /// An integer signal, sent as `LogsrvIntMsg`.
     Int(Arc<dyn Fn(At<'_>) -> i64 + Send + Sync>),
-    /// A string event (`LogsrvStringMsg`): sent after each StartStream and then only
-    /// when it changes, from a small pool of stream ids counting up from 233 (the
-    /// RW6 VC's 221, 222, 225 and 9872, measured 2026-09-25).
     Text(Arc<dyn Fn(At<'_>) -> String + Send + Sync>),
-    /// Accepted but never sends a sample.
     Silent,
 }
 
@@ -134,11 +65,9 @@ impl std::fmt::Debug for SignalSource {
 #[derive(Clone, Debug)]
 pub struct SignalDef {
     pub source: SignalSource,
-    /// Reported sample time: 4.032 or 24.192.
     pub sample_ms: f64,
 }
 
-/// What the client asked for, per connection, for the tests' assertions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Seen {
     pub conn: usize,
@@ -165,7 +94,6 @@ struct Stream {
     unit: String,
     axis0: u32,
     sample_ms: f64,
-    /// From the text pool.
     text: bool,
 }
 
@@ -173,81 +101,38 @@ struct Conn {
     id: usize,
     writer: TcpStream,
     subscribed: bool,
-    /// Subscribed while another connection was the tenant, or still subscribed when
-    /// another connection's streams were torn down: never gets a sample again.
     orphan: bool,
-    /// Defined a stream at some point: its leaving tears InfoStream down.
     defined: bool,
-    /// Bytes kept back while `hold_delivery` is set.
     held: Vec<u8>,
-    /// Broken, but the controller has not noticed: kept (as the tenant, if it was)
-    /// until then, though nothing reaches the client.
     zombie_until: Option<Instant>,
-    /// Cut off by a fault in the network: nothing reaches its client, and what its
-    /// client sends is lost on the way.
     cut: bool,
     last_aya_answer: Instant,
     peer: SocketAddr,
 }
 
-/// Knobs a test turns.
 pub struct Behaviour {
     pub signals: HashMap<u32, SignalDef>,
-    /// Mechanical units and how many joints each has.
     pub units: HashMap<String, u32>,
-    /// Tick of the sample clock. The VC ticks at exactly 4 ms.
     pub tick: Duration,
-    /// Controller-clock milliseconds per tick; 4 on the VC. A test can make it wrap.
     pub stamp_step: u64,
-    /// Stamp like the real IRC5 instead: its tick is 4.032 ms and its clock counts
-    /// whole milliseconds, so steps are 4 with a 5 every 31.25 ticks, and 24 or 25 for
-    /// the 24 ms signals (measured on the IRC5, 2026-09-26).
     pub irc5_clock: bool,
     pub aya_interval: Duration,
     pub aya_timeout: Duration,
-    /// Hold the reply to a define of this signal until the next define arrives on
-    /// the same connection.
     pub hold_define_of: Option<u32>,
-    /// Release that held reply after the next define's reply rather than before it:
-    /// replies out of the order of their requests.
     pub release_held_after: bool,
-    /// Send the stamps modulo 2^32, as a controller that keeps them in 32 bits does.
     pub wrap32: bool,
-    /// Answer every request after this delay (a slow controller).
     pub reply_delay: Duration,
-    /// Stop sending samples for these signals (a dead feed on a live session).
     pub mute: HashSet<u32>,
-    /// Stop all sample delivery (the whole feed dead, keepalives still flowing).
     pub mute_all: bool,
-    /// A virtual controller the PC is too busy for: no samples, and its clock stops
-    /// too, while it still answers (measured on the RW6 VC, 2026-09-27).
     pub freeze: bool,
-    /// Do not answer the handshake at all.
     pub mute_handshake: bool,
-    /// Extra entries in the handshake's client list, beyond the connections.
     pub extra_clients: Vec<String>,
-    /// Refuse the next define of each of these signals with this status, once.
     pub refuse_next: HashMap<u32, i64>,
-    /// A stall on the network: everything for the clients (samples, replies,
-    /// keepalives) is kept back, then delivered in order when this is cleared, as TCP
-    /// delivers after a hiccup. The controller carries on meanwhile.
     pub hold_delivery: bool,
-    /// How stream ids are numbered: the VC's way or the IRC5's.
     pub id_pools: IdPools,
-    /// The system id the handshake reports: change it to stand in for a different
-    /// controller at the same address (a cable moved to the next robot).
     pub system_id: String,
-    /// Never answer these commands (by property, e.g. "StartStream"), though they
-    /// still take effect: a controller that loses a reply.
     pub unanswered: HashSet<String>,
-    /// The real IRC5 after a network fault (measured 2026-10-04): from the network's
-    /// return while it still holds a broken connection, until this long after it lets
-    /// go of it, its RobAPI answers nobody. A connection is still taken, but what is
-    /// sent on it meanwhile, its handshake included, is never answered, not even once
-    /// the stall is over (waited 40 s); a connection made after the stall is answered
-    /// at once. `None`: the VC's way, which answers as soon as the network is back.
     pub stall_while_held: Option<Duration>,
-    /// During that stall, refuse new connections outright, as the IRC5 also did.
     pub stall_refuses: bool,
 }
 
@@ -255,9 +140,6 @@ impl Default for Behaviour {
     fn default() -> Behaviour {
         let mut signals = HashMap::new();
         let float = |f: fn(At<'_>) -> f32| SignalDef { source: SignalSource::Float(Arc::new(f)), sample_ms: 4.032 };
-        // Joint angles, TCP x, the documented 4000-4003, a DC link, and a 24 ms
-        // integer signal, with values a test can recognise: axis-indexed ones carry
-        // their axis and unit in the value, so a misattributed stream shows.
         for n in 6000..=6005u32 {
             signals.insert(n, float(|(t, _, _)| ((t as f64) * 0.001).sin() as f32));
         }
@@ -309,7 +191,6 @@ struct State {
     conns: BTreeMap<usize, Conn>,
     next_conn: usize,
     streams: BTreeMap<u32, Stream>,
-    /// What each text stream last sent; cleared by StartStream so they resend.
     text_sent: HashMap<u32, String>,
     streaming: bool,
     clock_ms: u64,
@@ -317,14 +198,11 @@ struct State {
     seen: Vec<Seen>,
     aya_answers: Vec<AyaAnswer>,
     held_reply: Option<(usize, Vec<u8>)>,
-    /// The part of a millisecond the IRC5-like clock has counted but not stamped.
     clock_frac: f64,
     connections_total: usize,
     samples_sent: u64,
     handshakes: u64,
-    /// The network is down until then: nothing passes either way.
     cut_until: Option<Instant>,
-    /// The stall after a held broken connection was let go lasts until then.
     stall_end: Option<Instant>,
 }
 
@@ -336,7 +214,6 @@ pub struct FakeController {
 }
 
 fn lock(s: &Mutex<State>) -> MutexGuard<'_, State> {
-    // A panicking test thread must not wedge every other test through poisoning.
     s.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -345,7 +222,6 @@ impl FakeController {
         FakeController::start_on(0, behaviour)
     }
 
-    /// On this port (0: one the OS picks), as a controller back where it was.
     pub fn start_on(port: u16, behaviour: Behaviour) -> std::io::Result<FakeController> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let addr = listener.local_addr()?;
@@ -390,7 +266,6 @@ impl FakeController {
         self.addr.port()
     }
 
-    /// Change the behaviour while running.
     pub fn with<R>(&self, f: impl FnOnce(&mut Behaviour) -> R) -> R {
         f(&mut lock(&self.state).behaviour)
     }
@@ -404,7 +279,6 @@ impl FakeController {
     pub fn aya_answers(&self) -> Vec<AyaAnswer> {
         lock(&self.state).aya_answers.clone()
     }
-    /// Currently defined streams as (id, signal, unit, one-based axis).
     pub fn streams(&self) -> Vec<(u32, u32, String, u32)> {
         lock(&self.state).streams.values().map(|s| (s.id, s.signal, s.unit.clone(), s.axis0 + 1)).collect()
     }
@@ -420,7 +294,6 @@ impl FakeController {
     pub fn samples_sent(&self) -> u64 {
         lock(&self.state).samples_sent
     }
-    /// Handshake (control) frames received, from every connection.
     pub fn handshakes(&self) -> u64 {
         lock(&self.state).handshakes
     }
@@ -431,20 +304,17 @@ impl FakeController {
         lock(&self.state).clock_ms = ms;
     }
 
-    /// Send an AYA to every connection now.
     pub fn send_aya(&self) {
         let mut st = lock(&self.state);
         let frame = wire::encode_frame(0, service::AYA, cause::AYA, 4000, 16000, &[]);
         broadcast(&mut st, &frame);
     }
 
-    /// Raw bytes to every open connection, as-is.
     pub fn inject(&self, bytes: &[u8]) {
         let mut st = lock(&self.state);
         broadcast(&mut st, bytes);
     }
 
-    /// A sample frame with exactly these records, to the current tenant.
     pub fn inject_samples(&self, records: &[Record]) {
         let mut st = lock(&self.state);
         let rad = sample::encode_rad(SUBSCRIPTION_ID, 0x01DD_4CF3_AA5D_7B80, records, Some(0xAD));
@@ -454,7 +324,6 @@ impl FakeController {
         }
     }
 
-    /// Drop every connection, the way a controller restart does.
     pub fn drop_connections(&self) {
         let st = lock(&self.state);
         for c in st.conns.values() {
@@ -462,11 +331,6 @@ impl FakeController {
         }
     }
 
-    /// Break every connection the way a network fault does: the clients see it
-    /// drop, but the controller only lets go of it after `linger` (a real one does
-    /// at its keepalive timeout), and until then it stays the tenant, so a client
-    /// that connects again meanwhile subscribes as an orphan and gets nothing
-    /// (measured 2026-09-25).
     pub fn break_connections(&self, linger: Duration) {
         let mut st = lock(&self.state);
         let until = Instant::now() + linger;
@@ -476,16 +340,6 @@ impl FakeController {
         }
     }
 
-    /// A fault out in the network (a cable pulled between switches, the controller's
-    /// switch port shut): for `outage` nothing passes either way, and neither end hears
-    /// of it, so a client sees silence, not a drop. The controller keeps every
-    /// connection it had until `hold` after the cut (a real one lets go at its
-    /// keepalive timeout), listed and, if it was, the tenant. Those connections stay
-    /// cut off: a client is expected to give up on its own before the network is back
-    /// (a shorter hiccup is `hold_delivery`), and what it sends meanwhile, its goodbye
-    /// included, is lost, where a real network might deliver it late and so free the
-    /// connection sooner. A connection made during the outage is served once it is
-    /// over, as TCP would complete it then.
     pub fn cut_network(&self, outage: Duration, hold: Duration) {
         let mut st = lock(&self.state);
         let now = Instant::now();
@@ -522,8 +376,6 @@ fn network_down(st: &State) -> bool {
     st.cut_until.is_some_and(|t| Instant::now() < t)
 }
 
-/// The IRC5's stall after a network fault ([`Behaviour::stall_while_held`]): from the
-/// network's return while a broken connection is still held, to the end of its tail.
 fn stalled(st: &State) -> bool {
     if st.behaviour.stall_while_held.is_none() || network_down(st) {
         return false;
@@ -536,7 +388,6 @@ fn send_to(st: &mut State, conn: usize, bytes: &[u8]) {
     let hold = st.behaviour.hold_delivery;
     let down = network_down(st);
     let failed = match st.conns.get_mut(&conn) {
-        // Lost on the way.
         Some(c) if down || c.cut => false,
         Some(c) if hold => {
             c.held.extend_from_slice(bytes);
@@ -553,32 +404,22 @@ fn send_to(st: &mut State, conn: usize, bytes: &[u8]) {
     }
 }
 
-/// Where every sample goes: the earliest subscribed connection still open that did
-/// not subscribe while another was the tenant.
 fn tenant(st: &State) -> Option<usize> {
     st.conns.values().filter(|c| c.subscribed && !c.orphan).map(|c| c.id).min()
 }
 
 fn close_conn(st: &mut State, conn: usize) {
-    // A broken connection the controller has not noticed yet stays until it does.
     if st.conns.get(&conn).is_some_and(|c| c.zombie_until.is_some_and(|t| Instant::now() < t)) {
         return;
     }
     let was_tenant = tenant(st) == Some(conn);
     let Some(c) = st.conns.remove(&conn) else { return };
-    // One cut off by the network: its end is lost on the way like everything else;
-    // the socket closes when its reader ends, once the network is back.
     if !c.cut {
         let _ = c.writer.shutdown(Shutdown::Both);
     }
     if was_tenant {
-        // Measured 2026-09-26: the tenant's exit, whatever it sent, clears every stream.
         st.streams.clear();
     } else if c.defined {
-        // So does the exit of a connection that defined a stream, and the subscribers
-        // left get nothing more on their connections. Not a broken connection the
-        // controller still holds: that one keeps the tenancy until it lets go, and
-        // what a leaving client does to it is unmeasured.
         st.streams.clear();
         for other in st.conns.values_mut() {
             if other.subscribed && other.zombie_until.is_none() {
@@ -598,9 +439,6 @@ fn accept_loop(listener: TcpListener, state: Arc<Mutex<State>>, running: Arc<Ato
     let addr = listener.local_addr().ok();
     let mut listener = Some(listener);
     while running.load(Ordering::SeqCst) {
-        // Refusing during a stall: no listener, so a connection is refused, as the
-        // IRC5's were; the same port listens again once the stall is over (the
-        // connections it took meanwhile carry on).
         let refusing = {
             let st = lock(&state);
             st.behaviour.stall_refuses && stalled(&st)
@@ -655,7 +493,6 @@ fn conn_loop(id: usize, mut stream: TcpStream, state: Arc<Mutex<State>>, running
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            // Nothing new; what arrived while the network was down may be due now.
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => break,
         }
@@ -673,7 +510,6 @@ fn conn_loop(id: usize, mut stream: TcpStream, state: Arc<Mutex<State>>, running
             match wire::frame_at(&buf) {
                 FrameStatus::NeedMore => break,
                 FrameStatus::Desync(_) => {
-                    // A controller drops a client that sends garbage.
                     let mut st = lock(&state);
                     close_conn(&mut st, id);
                     return;
@@ -690,7 +526,6 @@ fn conn_loop(id: usize, mut stream: TcpStream, state: Arc<Mutex<State>>, running
         }
     }
     close_conn(&mut lock(&state), id);
-    // Nothing reaches the client while the network is down, the socket's close included.
     while running.load(Ordering::SeqCst) && network_down(&lock(&state)) {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -703,11 +538,10 @@ fn text_fields(d: &[u8]) -> Vec<String> {
 fn reply_frame(txn: u16, service_no: u8, kind: u8, format: u8, cause_no: u8, data: &[u8], pad: bool) -> Vec<u8> {
     let mut f = wire::encode_frame(txn, service_no, cause_no, 0, 0, &[RadOut { kind, format, data }]);
     if pad {
-        // The VC pads kind-0x23 RADs to four bytes with 'p' after the RAD.
         let rad_len = 4 + data.len();
         let padding = (4 - rad_len % 4) % 4;
         if padding > 0 {
-            f.pop(); // trailer
+            f.pop();
             f.extend(std::iter::repeat_n(wire::PAD, padding));
             f.push(wire::TRAILER);
             let total = f.len() as u32;
@@ -732,8 +566,6 @@ fn handshake_reply(st: &State, txn: u16) -> Vec<u8> {
     sys.push(0);
     let mut lst = list.into_bytes();
     lst.push(0);
-    // Built by hand: two RADs with 'p' padding between and after, then the
-    // unexplained extra byte the VC sends before the trailer.
     let mut body = Vec::new();
     for (kind, data) in [(rad_kind::SYSTEM_ID, &sys), (rad_kind::REQUEST, &lst)] {
         let len = 4 + data.len();
@@ -757,7 +589,6 @@ fn handshake_reply(st: &State, txn: u16) -> Vec<u8> {
 fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
     let Some(frame) = Frame::parse(bytes) else { return };
     let mut st = lock(state);
-    // Stalled: only the keepalive exchange goes on; a request is lost for good.
     if stalled(&st) && frame.service() != service::AYA {
         if frame.service() == service::CONTROL {
             st.handshakes += 1;
@@ -775,7 +606,6 @@ fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
         service::AYA => {
             st.aya_answers.push(AyaAnswer { conn, txn: frame.txn(), cause: frame.cause(), ctrl1: frame.ctrl1(), ctrl2: frame.ctrl2() });
             if frame.ctrl1() == 0 && frame.ctrl2() == 0 {
-                // Measured on the cell: a zeroed answer is rejected outright.
                 close_conn(&mut st, conn);
             } else if let Some(c) = st.conns.get_mut(&conn) {
                 c.last_aya_answer = Instant::now();
@@ -794,13 +624,11 @@ fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
                 if let Some(c) = st.conns.get_mut(&conn)
                     && !c.subscribed
                 {
-                    // Subscribing again changes nothing (the VC answered "TRUE 1").
                     c.subscribed = true;
                     c.orphan = tenant_now.is_some();
                 }
                 let r = reply_frame(txn, service::RESPONSE, rad_kind::REQUEST, rad_format::STATUS_TEXT, cause::NOTICE, &status_text(0, &format!("TRUE 0 {SUBSCRIPTION_ID}")), true);
                 send_to(&mut st, conn, &r);
-                // The small subscription notice the VC sends on service 3.
                 let mut notice = 0x0004_8000u32.to_be_bytes().to_vec();
                 notice.extend_from_slice(&SUBSCRIPTION_ID.to_be_bytes());
                 notice.extend_from_slice(&[0x23, 0x3A, 0x4F, 0x50, 0x01, 0xDD, 0x4C, 0xD2, 0]);
@@ -815,8 +643,6 @@ fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
             let (status, text, is_define_of) = reply;
             let r = reply_frame(txn, service::RESPONSE, rad_kind::REPLY, rad_format::STATUS_TEXT, cause::RESPONSE, &status_text(status, &text), false);
             if prop == "StreamDefine" {
-                // A reply held back for an earlier define on this connection goes out
-                // with this one's: just ahead of it, or just after it.
                 let held = if st.held_reply.as_ref().is_some_and(|(c, _)| *c == conn) { st.held_reply.take() } else { None };
                 let after = st.behaviour.release_held_after;
                 if let Some((c, h)) = &held
@@ -853,7 +679,6 @@ fn arg(args: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Returns (status, text, Some(signal) for a define).
 fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String, Option<u32>) {
     let refuse = |code: i64| {
         (FAIL, format!("ERROR: C:\\fake\\rdh_infostream.cpp[379]: code: 0xc004fffe Failed to define moc signal, status {code} streamId -1; "), None)
@@ -867,9 +692,6 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
             (OK, String::new(), None)
         }
         "StreamConnect" => {
-            // The first connection to send StreamConnect gets every sample, subscribed
-            // or not (RW6 VC 2026-09-28); one that sends it while another
-            // is the tenant is starved, as with SUBSCRIBE.
             let tenant_now = tenant(st);
             if let Some(c) = st.conns.get_mut(&conn)
                 && !c.subscribed
@@ -880,12 +702,12 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
             (0, String::new(), None)
         }
         "StopStream" => {
-            st.streaming = false; // controller-wide, measured
+            st.streaming = false;
             (OK, String::new(), None)
         }
         "StreamDisconnect" => (OK, String::new(), None),
         "StreamUndefineAll" => {
-            st.streams.clear(); // every client's, measured
+            st.streams.clear();
             st.streaming = false;
             (OK, String::new(), None)
         }
@@ -893,7 +715,6 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
             if let Some(id) = arg(args, "-StreamId").and_then(|v| v.parse::<u32>().ok()) {
                 st.streams.remove(&id);
             }
-            // Measured: an undefine while streaming stops delivery for all streams.
             st.streaming = false;
             (OK, String::new(), None)
         }
@@ -930,8 +751,6 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
             };
             let pools = st.behaviour.id_pools;
             let first_text = if pools == IdPools::Irc5 { 260 } else { FIRST_TEXT_STREAM_ID };
-            // Each numeric pool: (its top, its bottom). The IRC5's main pool stops above
-            // its second one, which a dozen channels never come near.
             let (top, bottom) = match pools {
                 IdPools::Vc => (FIRST_STREAM_ID, 1),
                 IdPools::Irc5 if IRC5_DRIVE_POOL_SIGNALS.contains(&signal) => (17, 1),
@@ -941,14 +760,11 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
                 if st.streams.values().filter(|s| s.text).count() >= TEXT_POOL {
                     return no_channel(signal);
                 }
-                // The lowest free: the VC gave 233 to 221, and later to 9872 and to
-                // 9875 once it was free again (typed-vc-rw6.txt); the IRC5 260 up.
                 match (first_text..).find(|id| !st.streams.contains_key(id)) {
                     Some(id) => id,
                     None => return no_channel(signal),
                 }
             } else {
-                // The highest free, from the pool's top down.
                 match (bottom..=top).rev().find(|id| !st.streams.contains_key(id)) {
                     Some(id) => id,
                     None => return no_channel(signal),
@@ -958,7 +774,6 @@ fn command(st: &mut State, conn: usize, prop: &str, args: &str) -> (u32, String,
             if let Some(c) = st.conns.get_mut(&conn) {
                 c.defined = true;
             }
-            // Measured: a define while streaming does not deliver until StartStream.
             st.streaming = false;
             (OK, format!("-StreamId {id} -SampleTime {}", fmt_ms(def.sample_ms)), Some(signal))
         }
@@ -985,7 +800,6 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
         }
         let mut st = lock(&state);
         if st.behaviour.freeze {
-            // Time stands still: no tick, no stamp, no sample.
             drop(st);
             continue;
         }
@@ -1000,7 +814,6 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
         };
         st.clock_ms = st.clock_ms.wrapping_add(step);
 
-        // A network stall that has cleared: what was kept back goes out, in order.
         if !st.behaviour.hold_delivery {
             let waiting: Vec<usize> = st.conns.values().filter(|c| !c.held.is_empty()).map(|c| c.id).collect();
             for id in waiting {
@@ -1008,7 +821,6 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
             }
         }
 
-        // Broken connections the controller now notices.
         let now = Instant::now();
         let expired: Vec<usize> = st.conns.values().filter(|c| c.zombie_until.is_some_and(|t| now >= t)).map(|c| c.id).collect();
         let tail = st.behaviour.stall_while_held;
@@ -1018,14 +830,12 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
                 c.zombie_until = None;
                 was_cut = c.cut;
             }
-            // Let go of: what is left of the IRC5's stall starts now.
             if was_cut && let Some(tail) = tail {
                 st.stall_end = Some(now + tail);
             }
             close_conn(&mut st, id);
         }
 
-        // Keepalives, and the timeout for a client that never answers.
         if Instant::now() >= next_aya {
             next_aya = Instant::now() + st.behaviour.aya_interval;
             let frame = wire::encode_frame(0, service::AYA, cause::AYA, 4000, 16000, &[]);
@@ -1049,7 +859,6 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
             if st.behaviour.mute.contains(&s.signal) {
                 continue;
             }
-            // 24 ms signals every sixth tick.
             if s.sample_ms > 10.0 && !tick_no.is_multiple_of(6) {
                 continue;
             }
@@ -1073,7 +882,6 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
         for (id, v) in texts_sent {
             st.text_sent.insert(id, v);
         }
-        // Integer records first, as on the VC.
         records.sort_by_key(|r| (r.kind != ValueKind::Int, r.stream));
         if records.is_empty() {
             continue;

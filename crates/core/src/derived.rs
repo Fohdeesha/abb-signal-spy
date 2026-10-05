@@ -1,24 +1,3 @@
-//! Derived channels (decided 2026-09-27): values the window computes
-//! from streamed channels. They are never streamed, and never written as data: a
-//! recording keeps what the controller sent plus these definitions, and a review
-//! computes them again.
-//!
-//! - **Turn to target**: a resolver angle's signed shortest turn to a target, for
-//!   turning a resolver onto its mark (what `abb_resolver_web.py` showed).
-//! - **PWM duty sum**: the three leg duty ratios of one axis (5020-5022) added up:
-//!   1.50 by construction under space-vector modulation (measured 1.50003, sd 0.008).
-//! - **DC-link sag**: how far a DC link sits below its charged plateau, which the
-//!   person sets (the mean of the last two seconds, robot armed and still, the link
-//!   having held that level for 20 s).
-//!
-//! A value exists only where every input has a sample of the same controller tick.
-//! Streams in one signal group share their stamps exactly; two groups (the drive
-//! module's and the motion signals) stamp the same tick up to 1 ms apart at about 3 %
-//! of samples, and a neighbouring tick is always at least 2 ms away (measured on a
-//! recording of a real IRC5, 2026-09-26). So a partner within
-//! [`SAME_TICK_MS`] is the same tick, and a missing one is a gap, never filled from a
-//! neighbour.
-
 use std::f64::consts::{PI, TAU};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -26,52 +5,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{ChannelKey, Ring, Store};
 
-/// Within this of the target (either way) a turn reads ON TARGET.
 pub const ON_TARGET_DEG: f64 = 0.25;
-/// A plateau is the mean of this much of the newest history.
 pub const PLATEAU_MS: i64 = 2000;
-/// A plateau needs at least this much of that stretch to have arrived.
 pub const PLATEAU_MIN_MS: i64 = 1500;
-/// A plateau below this is not an armed drive's DC link: motors off it read 16 V on
-/// the measured cell, armed 378-397 V (2026-09-26), and every IRC5 drive's charged
-/// link is hundreds of volts. Set below it, every sag after arming would read about
-/// the whole link (decided 2026-09-28).
 pub const PLATEAU_MIN_V: f64 = 50.0;
-/// With the motors off a DC link drains slowly: 2.6 % of its voltage every 10 s on the
-/// cell, about 20 minutes down to its floor. Over two seconds a draining link is
-/// steadier than an armed one, whose level ripples; over 20 s they part: an armed
-/// link's two-second mean moved at most 0.71 %, a draining one's at least 5.11 %
-/// (measured on the cell's recording, 2026-09-29). So a plateau also compares its
-/// level with the level this long before (decided 2026-09-29) ...
 pub const PLATEAU_TREND_MS: i64 = 20_000;
-/// ... and is refused when the two differ by more than this fraction of the level.
 pub const PLATEAU_TREND_MAX: f64 = 0.02;
-/// What the three duty ratios add up to under space-vector modulation.
 pub const DUTY_SUM: f64 = 1.5;
-/// The three PWM leg duty ratios (confirmed; which leg is U, V or W was not
-/// determined).
 pub const PWM_LEGS: [u32; 3] = [5020, 5021, 5022];
-/// Two inputs' samples this close (ms) are the same controller tick.
 pub const SAME_TICK_MS: i64 = 1;
-/// The resolver angle in the calibration's own frame, `(cal_offset + motor) mod 2pi`
-/// (checked against the controller's own calibration): the frame a motor's commutator offset is
-/// in. 5000 and 7325 read the resolver too, but a fixed per-axis offset away.
 pub const RESOLVER_ANGLE: u32 = 5138;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Derived {
-    /// `target - angle`, the short way round, in degrees within (-180, 180]: how far
-    /// to turn, and which way. Nothing until a target is set.
     Turn {
         angle: ChannelKey,
         #[serde(default)]
         target_deg: Option<f64>,
     },
-    /// The three leg duty ratios added up.
     DutySum { legs: [ChannelKey; 3] },
-    /// `plateau - voltage`, in volts: positive below the plateau. Nothing until a
-    /// plateau is set.
     Sag {
         link: ChannelKey,
         #[serde(default)]
@@ -79,20 +32,16 @@ pub enum Derived {
     },
 }
 
-/// The signed shortest turn from `angle_rad` to `target_deg`, in degrees within
-/// (-180, 180].
 pub fn turn_deg(target_deg: f64, angle_rad: f64) -> f64 {
     let d = (target_deg.to_radians() - angle_rad).rem_euclid(TAU);
     (if d > PI { d - TAU } else { d }).to_degrees()
 }
 
 impl Derived {
-    /// The duty sum of the axis `key` names, whichever leg it is.
     pub fn duty_sum(key: &ChannelKey) -> Derived {
         Derived::DutySum { legs: PWM_LEGS.map(|signal| ChannelKey { signal, unit: key.unit.clone(), axis: key.axis }) }
     }
 
-    /// The streamed channels it is computed from, in the order `value` takes them.
     pub fn inputs(&self) -> Vec<ChannelKey> {
         match self {
             Derived::Turn { angle, .. } => vec![angle.clone()],
@@ -101,8 +50,6 @@ impl Derived {
         }
     }
 
-    /// Stable text id, for files: what is derived, from what. The settings (a target,
-    /// a plateau) are not part of it.
     pub fn id(&self) -> String {
         match self {
             Derived::Turn { angle, .. } => format!("turn:{}", angle.id()),
@@ -119,8 +66,6 @@ impl Derived {
         }
     }
 
-    /// For people, in the form channel labels take: what, then where. A turn names its
-    /// angle's signal: several wrapping angles can each have one on the same axis.
     pub fn name(&self) -> String {
         match self {
             Derived::Turn { angle: k, .. } => format!("{}  {} {} J{}", self.kind_name(), k.signal, k.unit, k.axis.one_based()),
@@ -137,13 +82,10 @@ impl Derived {
         }
     }
 
-    /// The same derivation (a changed target or plateau is still the same one).
     pub fn same(&self, other: &Derived) -> bool {
         self.id() == other.id()
     }
 
-    /// A duty sum is of the three PWM legs of one axis, in order (a hand-edited file
-    /// could name any three channels); the others have nothing to check.
     pub fn legs_valid(&self) -> bool {
         match self {
             Derived::DutySum { legs } => legs.iter().zip(PWM_LEGS).all(|(k, s)| k.signal == s && k.unit == legs[0].unit && k.axis == legs[0].axis),
@@ -151,7 +93,6 @@ impl Derived {
         }
     }
 
-    /// Whether it has what it needs to give values (a target, a plateau).
     pub fn is_set(&self) -> bool {
         match self {
             Derived::Turn { target_deg, .. } => target_deg.is_some_and(f64::is_finite),
@@ -160,7 +101,6 @@ impl Derived {
         }
     }
 
-    /// The value at one instant from the inputs' values then, in `inputs` order.
     pub fn value(&self, v: &[f64]) -> Option<f64> {
         match self {
             Derived::Turn { target_deg: Some(t), .. } if t.is_finite() => Some(turn_deg(*t, v[0])),
@@ -170,8 +110,6 @@ impl Derived {
         }
     }
 
-    /// The derived series from the inputs' series (each in time order, in `inputs`
-    /// order): a value at every instant all of them have a sample for.
     pub fn combine(&self, inputs: &[&[(i64, f64)]]) -> Vec<(i64, f64)> {
         let mut out = Vec::new();
         if self.is_set() && inputs.len() == self.inputs().len() {
@@ -181,10 +119,6 @@ impl Derived {
     }
 }
 
-/// Every controller tick all the series (each in time order) have a sample of: each
-/// of the first series' samples, with every other series' closest sample within
-/// [`SAME_TICK_MS`] of it. None is a gap, never filled from a neighbour. `f` gets the
-/// first series' time and the values, in `inputs` order.
 pub fn same_ticks(inputs: &[&[(i64, f64)]], mut f: impl FnMut(i64, &[f64])) {
     let Some((first, rest)) = inputs.split_first() else { return };
     let mut at = vec![0usize; rest.len()];
@@ -195,7 +129,6 @@ pub fn same_ticks(inputs: &[&[(i64, f64)]], mut f: impl FnMut(i64, &[f64])) {
             while at[k] < s.len() && s[at[k]].0 < t - SAME_TICK_MS {
                 at[k] += 1;
             }
-            // The same tick: the closest sample within SAME_TICK_MS.
             let near = [at[k], at[k] + 1].into_iter().filter_map(|i| s.get(i).map(|&(tk, vk)| ((tk - t).abs(), vk))).filter(|&(d, _)| d <= SAME_TICK_MS).min_by_key(|&(d, _)| d);
             match near {
                 Some((_, vk)) => vals[k + 1] = vk,
@@ -206,24 +139,15 @@ pub fn same_ticks(inputs: &[&[(i64, f64)]], mut f: impl FnMut(i64, &[f64])) {
     }
 }
 
-/// The plateau for a sag: the mean of the newest [`PLATEAU_MS`] of a DC link's
-/// history, with its standard deviation. Refused, with the reason, when too little
-/// of that stretch has arrived: counted in samples, so a gap inside it is not coverage.
 pub fn plateau(ring: &Ring) -> Result<(f64, f64), String> {
     let Some((last, _)) = ring.last() else { return Err("nothing has arrived from the DC link yet".into()) };
     stretch(ring, last).ok_or_else(|| format!("only {:.1} s of the DC link has arrived; it needs {:.0} s", covered(ring, last) as f64 / 1000.0, PLATEAU_MS as f64 / 1000.0))
 }
 
-/// Whether a DC link held its level: `now` (a plateau's mean) against `before` (its
-/// level [`PLATEAU_TREND_MS`] earlier, [`level_before`]) within [`PLATEAU_TREND_MAX`].
 pub fn level_holds(before: f64, now: f64) -> bool {
     ((now - before) / now).abs() <= PLATEAU_TREND_MAX
 }
 
-/// The DC link's level `span_ms` before its newest sample: the mean of the
-/// [`PLATEAU_MS`] ending then, which a plateau is compared with
-/// ([`PLATEAU_TREND_MS`]). Refused, with the reason, when the history does not reach
-/// back that far with enough samples.
 pub fn level_before(ring: &Ring, span_ms: i64) -> Result<f64, String> {
     let Some((last, _)) = ring.last() else { return Err("nothing has arrived from the DC link yet".into()) };
     match stretch(ring, last - span_ms) {
@@ -240,9 +164,6 @@ pub fn level_before(ring: &Ring, span_ms: i64) -> Result<f64, String> {
     }
 }
 
-/// The mean and standard deviation of a ring's samples in the [`PLATEAU_MS`] up to and
-/// including `end`, or `None` when fewer than [`PLATEAU_MIN_MS`] of it have samples
-/// (counted in samples, so a gap inside it is not coverage).
 fn stretch(ring: &Ring, end: i64) -> Option<(f64, f64)> {
     let v: Vec<(i64, f64)> = ring.range(end - PLATEAU_MS + 1, end + 1).filter(|(_, v)| v.is_finite()).collect();
     if v.len() < 2 || covered(ring, end) < PLATEAU_MIN_MS {
@@ -254,24 +175,17 @@ fn stretch(ring: &Ring, end: i64) -> Option<(f64, f64)> {
     Some((mean, sd))
 }
 
-/// How many ms of the [`PLATEAU_MS`] up to `end` have samples no further apart than
-/// the ring's gap.
 fn covered(ring: &Ring, end: i64) -> i64 {
     let gap = ring.gap_ms();
     let t: Vec<i64> = ring.range(end - PLATEAU_MS + 1, end + 1).filter(|(_, v)| v.is_finite()).map(|(t, _)| t).collect();
     t.windows(2).map(|w| w[1] - w[0]).filter(|&step| step as f64 <= gap).sum()
 }
 
-/// A derived channel's live history, kept up with its inputs' histories in the
-/// store. Only ever as far as the slowest input: a partner still on its way is not
-/// taken for a missing one.
 #[derive(Debug)]
 pub struct Live {
     def: Derived,
     ring: Arc<Mutex<Ring>>,
-    /// Newest controller time already combined.
     upto: i64,
-    /// The store's epoch the history belongs to.
     epoch: u64,
 }
 
@@ -292,16 +206,12 @@ impl Live {
         self.ring.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// A new target or plateau: the whole history is computed again against it.
     pub fn set(&mut self, def: Derived) {
         self.def = def;
         self.lock().clear();
         self.upto = i64::MIN;
     }
 
-    /// Combine whatever the inputs have gained. A history started afresh (another
-    /// controller) starts this one afresh too, and a plateau measured on the old
-    /// one is dropped: it says nothing about this one.
     pub fn update(&mut self, store: &Store) {
         let epoch = store.epoch();
         if epoch != self.epoch {
@@ -319,11 +229,6 @@ impl Live {
         if newest <= self.upto {
             return;
         }
-        // Every input has reached `newest`, and a stream's samples arrive in order: a
-        // partner stamped up to SAME_TICK_MS after its tick's first sample is in (the
-        // next tick is 2 ms or more on), even for the first input's sample at `newest`
-        // itself, whose partner can be stamped just after it. A partner stamped up to
-        // that much before is looked for from that much before.
         let from = self.upto.saturating_add(1);
         let series: Vec<Vec<(i64, f64)>> = chans
             .iter()
@@ -359,10 +264,8 @@ mod tests {
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert!(close(turn_deg(90.0, 80f64.to_radians()), 10.0));
         assert!(close(turn_deg(90.0, 100f64.to_radians()), -10.0));
-        // Across the 0/360 jump: from 359 to 1 is +2, from 1 to 359 is -2.
         assert!(close(turn_deg(1.0, 359f64.to_radians()), 2.0));
         assert!(close(turn_deg(359.0, 1f64.to_radians()), -2.0));
-        // Never more than half a turn either way.
         for a in 0..720 {
             let t = turn_deg(37.0, (a as f64 * 0.5).to_radians());
             assert!(t > -180.0 - 1e-9 && t <= 180.0 + 1e-9, "{t}");
@@ -378,16 +281,12 @@ mod tests {
         let u = [(0, 0.5), (4, 0.6), (8, 0.7), (12, 0.4)];
         let v = [(0, 0.5), (8, 0.5), (12, 0.6)];
         let w = [(0, 0.5), (4, 0.4), (8, 0.3), (12, 0.5), (16, 0.5)];
-        // 4 has no V sample: a gap, not a sum of two.
         assert_eq!(d.combine(&[&u, &v, &w]), vec![(0, 1.5), (8, 1.5), (12, 1.5)]);
-        // Another signal group stamps the same tick up to 1 ms off (measured on the
-        // IRC5): the same tick. 2 ms off is not.
         let x = [(0, 0.5), (4, 0.5), (8, 0.5)];
         let y = [(1, 0.5), (3, 0.6), (10, 0.5)];
         let z = [(0, 0.5), (5, 0.5), (8, 0.5)];
         let sums = d.combine(&[&x, &y, &z]);
         assert_eq!(sums.iter().map(|&(t, v)| (t, (v * 1e9).round() / 1e9)).collect::<Vec<_>>(), vec![(0, 1.5), (4, 1.6)]);
-        // The closest, where two are near.
         let y = [(0, 0.5), (4, 0.6), (5, 0.9), (8, 0.5)];
         assert_eq!(d.combine(&[&x, &y, &x])[1], (4, 1.6));
         assert!(d.combine(&[&u, &v]).is_empty(), "the wrong number of inputs gives nothing");
@@ -408,7 +307,6 @@ mod tests {
         }
         let text = serde_json::to_string(&Derived::Sag { link: key(5027, 1), plateau_v: Some(356.5) }).unwrap();
         assert_eq!(text, r#"{"kind":"sag","link":{"signal":5027,"unit":"ROB_1","axis":1},"plateau_v":356.5}"#);
-        // A bad axis in a hand-edited file is refused, not read as another joint.
         assert!(serde_json::from_str::<Derived>(r#"{"kind":"sag","link":{"signal":5027,"unit":"ROB_1","axis":9}}"#).is_err());
     }
 
@@ -420,7 +318,6 @@ mod tests {
             r.push(i * 4, 356.0 + if i % 2 == 0 { 0.5 } else { -0.5 });
         }
         assert!(plateau(&r).unwrap_err().contains("1.2 s"), "{:?}", plateau(&r));
-        // A dip until 1.8 s, then steady to 4 s: the plateau is the steady part.
         for i in 300..1000 {
             r.push(i * 4, if i < 450 { 300.0 } else { 356.0 + if i % 2 == 0 { 0.5 } else { -0.5 } });
         }
@@ -448,12 +345,9 @@ mod tests {
         let all = |live: &Live| live.lock().range(i64::MIN, i64::MAX).map(|(t, v)| (t, (v * 1e9).round() / 1e9)).collect::<Vec<_>>();
         fill(&store, &a, &[(0, 0.5), (4, 0.5), (8, 0.5)]);
         fill(&store, &b, &[(0, 0.5), (4, 0.5), (8, 0.5)]);
-        // The third leg is another signal group's: its ticks stamped 1 ms later.
         fill(&store, &c, &[(1, 0.5)]);
         live.update(&store);
         assert_eq!(all(&live), vec![(0, 1.5)]);
-        // Its 5 and 9 arrive after the others' 4 and 8: 4 is summed once 5 is in, and 8
-        // waits for 9.
         fill(&store, &c, &[(5, 0.4)]);
         live.update(&store);
         assert_eq!(all(&live), vec![(0, 1.5), (4, 1.4)]);
@@ -465,9 +359,6 @@ mod tests {
         live.update(&store);
         assert_eq!(live.lock().len(), 3, "nothing twice");
 
-        // A group stamped 1 ms earlier: the partner of the first leg's 20 is 19, which
-        // came with an update before 20 was combined (that waits until every input
-        // has reached 20).
         let store = Store::new();
         let mut live = Live::new(Derived::duty_sum(&key(5020, 1)));
         fill(&store, &a, &[(16, 0.5), (20, 0.4)]);
@@ -482,8 +373,6 @@ mod tests {
 
     #[test]
     fn the_live_history_joins_a_partner_stamped_just_after_the_newest() {
-        // The first input the earlier-stamping group: its newest sample's partner,
-        // stamped 1 ms later, is already in. Not left out, and not lost for good.
         let store = Store::new();
         let [a, b, c] = PWM_LEGS.map(|s| key(s, 1));
         let mut live = Live::new(Derived::duty_sum(&a));
@@ -499,7 +388,6 @@ mod tests {
         assert_eq!(live.lock().range(i64::MIN, i64::MAX).map(|(t, _)| t).collect::<Vec<_>>(), vec![0, 4]);
     }
 
-    /// 25 s of a DC link at `v(seconds)`, 4 ms apart.
     fn link(v: impl Fn(f64) -> f64) -> Ring {
         let mut r = Ring::new(4.0);
         for i in 0..6250 {
@@ -511,17 +399,12 @@ mod tests {
     #[test]
     fn a_plateau_compares_its_level_with_twenty_seconds_before() {
         let held = |r: &Ring| level_holds(level_before(r, PLATEAU_TREND_MS).unwrap(), plateau(r).unwrap().0);
-        // Armed and still on the cell: 386 V with a ripple of a few volts, and a level
-        // that moved at most 0.71 % over 20 s (measured, 2026-09-29).
         let armed = link(|s| 386.0 * (1.0 + 0.0071 * s / 20.0) + 3.0 * (s * 2.0 * PI * 3.0).sin());
         assert!(held(&armed), "an armed link refused");
         assert!(plateau(&armed).unwrap().1 > 1.0, "the ripple is there");
-        // The motors off: the cell's link drained 2.6 % every 10 s (tau about 385 s),
-        // its slowest 20 s by 5.11 %; over two seconds it is steadier than the armed one.
         let draining = link(|s| 338.0 * (-s / 385.0).exp());
         assert!(plateau(&draining).unwrap().1 < plateau(&armed).unwrap().1, "the drain's two seconds are the steadier");
         assert!(!held(&draining), "a draining link taken for an armed one");
-        // A link still charging after the motors came on.
         let charging = link(|s| if s < 8.0 { 16.0 } else { 386.0 });
         assert!(!held(&charging));
     }
@@ -535,21 +418,17 @@ mod tests {
         assert!(plateau(&r).is_ok(), "ten seconds: enough for the mean");
         let e = level_before(&r, PLATEAU_TREND_MS).unwrap_err();
         assert!(e.contains("charted for only 10 s") && e.contains("22 s"), "{e}");
-        // A gap where the level before would be: 4 s to 8 s with no samples.
         let mut r = Ring::new(4.0);
         for i in (0..6250).filter(|i| !(1000..2000).contains(i)) {
             r.push(i * 4, 386.0);
         }
         let e = level_before(&r, PLATEAU_TREND_MS).unwrap_err();
         assert!(e.contains("has a gap"), "{e}");
-        // The same history whole: the level 20 s before is there.
         assert_eq!(level_before(&link(|_| 386.0), PLATEAU_TREND_MS), Ok(386.0));
     }
 
     #[test]
     fn a_plateau_needs_two_seconds_of_samples_not_of_span() {
-        // Samples from 1.6 s to 2.0 s, a gap, then 3.2 s to 3.6 s: the newest two
-        // seconds run from first sample to last, but only 0.8 s of them has samples.
         let mut r = Ring::new(4.0);
         for i in 0..=100 {
             r.push(1600 + i * 4, 356.0);
@@ -588,7 +467,6 @@ mod tests {
         live.set(Derived::Sag { link: k.clone(), plateau_v: Some(355.0) });
         live.update(&store);
         assert_eq!(live.lock().range(i64::MIN, i64::MAX).collect::<Vec<_>>(), vec![(0, 5.0), (4, 3.0)], "the whole history against the new plateau");
-        // Another controller: its DC link is not measured against this one's plateau.
         store.clear();
         fill(&store, &k, &[(100, 340.0)]);
         live.update(&store);

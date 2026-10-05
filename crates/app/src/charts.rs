@@ -1,13 +1,3 @@
-//! The charts (the middle sheet, "02 charts"): stacked lanes on one controller-time
-//! axis, a rolling window of 1 s to 10 min (10 s by default), hover with the
-//! wall-clock time, markers, the controller's events and two cursors. They zoom live
-//! too (G47): the wheel changes the window, Ctrl + wheel a chart's vertical scale, a
-//! drag pauses and moves through the 10-minute history, a double-click goes back. A
-//! chart's vertical scale fits what is in view with a floor, or is fixed, or centred
-//! on zero; a channel can be smoothed on the screen; one chart can fill the middle
-//! (G48). A gap is drawn as a gap, never interpolated across, and a stale channel's
-//! empty stretch is shaded.
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -24,8 +14,6 @@ use crate::fields;
 use crate::theme;
 use crate::view::{self, Health};
 
-/// Where a chart line's samples come from: a channel's history in the store, or a
-/// derived channel's.
 #[derive(Clone)]
 enum Src {
     Stream(Arc<Channel>),
@@ -41,34 +29,24 @@ impl Src {
     }
 }
 
-/// One line on the charts.
 #[derive(Clone)]
 pub(crate) struct Member {
     pub(crate) id: String,
-    /// The chart's lane and the display unit.
     pub(crate) lane: (u32, String),
     color: egui::Color32,
     factor: f64,
     hold: bool,
     reading: view::Reading,
-    /// For the legend, and wherever channels are listed side by side (Compare, the XY
-    /// plot): with its number, since several signals share a catalogue name.
     pub(crate) name: String,
     frozen: bool,
     pub(crate) health: Health,
-    /// Nothing yet in the store.
     src: Option<Src>,
-    /// The smallest span its chart autoscales to.
     min_span: f64,
-    /// Smoothed on the screen over this many ms (0: off).
     smooth_ms: u32,
-    /// Its chart's scale (the chart's first channel's rules).
     scale: Scale,
 }
 
 impl Member {
-    /// Its samples over `[from, to)` as the chart draws them: in the display unit, a
-    /// zero-filled signal's padding undone (the hold primed from just before).
     pub(crate) fn values(&self, from: i64, to: i64) -> Vec<(i64, f64)> {
         let Some(src) = &self.src else { return Vec::new() };
         let ring = src.lock();
@@ -83,9 +61,6 @@ impl Member {
     }
 }
 
-/// One channel's cursor readings (G47: on its row, not in a table): its value at A
-/// and at B, in its display unit, and the statistics between them (or of the stretch
-/// in view while both are not placed).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorReading {
     pub a: Option<f64>,
@@ -96,21 +71,13 @@ pub const XY_HOVER: &str = "Plot one channel against another over the stretch in
 
 pub const WINDOWS: [(f64, &str); 9] = [(1.0, "1 s"), (2.0, "2 s"), (5.0, "5 s"), (10.0, "10 s"), (30.0, "30 s"), (60.0, "1 min"), (120.0, "2 min"), (300.0, "5 min"), (600.0, "10 min")];
 
-/// A channel's smoothing choices (G47), ms: a moving average over that long, on the
-/// screen only. Recordings and every saved file keep the samples as they came.
 pub const SMOOTHING: [(u32, &str); 6] = [(0, "off"), (10, "10 ms"), (50, "50 ms"), (100, "100 ms"), (500, "500 ms"), (1000, "1 s")];
 
-/// A chart's vertical scale (G47), shared by everything overlaid on it; in the
-/// chart's display unit.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scale {
-    /// Fit what is in view, never tighter than `floor` (`None`: the unit's own floor,
-    /// [`min_span_for`]), so a still joint's dither does not fill the chart.
     Fit { floor: Option<f64> },
-    /// From `lo` to `hi`.
     Fixed { lo: f64, hi: f64 },
-    /// From `-half` to `half`.
     Centred { half: f64 },
 }
 
@@ -121,7 +88,6 @@ impl Default for Scale {
 }
 
 impl Scale {
-    /// Whether it describes a range a chart can show (a hand-edited settings file).
     pub fn is_valid(&self) -> bool {
         match *self {
             Scale::Fit { floor: None } => true,
@@ -131,8 +97,6 @@ impl Scale {
         }
     }
 
-    /// The range for data spanning `lo..hi` (infinite when there is none in view), the
-    /// unit's own floor being `unit_floor`.
     pub fn range(&self, lo: f64, hi: f64, unit_floor: f64) -> (f64, f64) {
         match *self {
             Scale::Fixed { lo, hi } => (lo, hi),
@@ -143,7 +107,6 @@ impl Scale {
     }
 }
 
-/// Statistics of one channel over a time range, in display units.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RangeStats {
     pub n: usize,
@@ -166,11 +129,6 @@ pub fn range_stats(values: impl Iterator<Item = f64>) -> RangeStats {
     RangeStats { n, mean, min, max, sd: if n > 1 { (m2 / (n - 1) as f64).sqrt() } else { 0.0 } }
 }
 
-/// A channel's trace smoothed for the screen (G47): each sample replaced by the mean
-/// of the samples in the `window_ms` up to it, started afresh after a gap (never
-/// averaged across one), then cut into `columns` as the raw trace is
-/// ([`Ring::decimate_at`]). `transform` is given every sample in order, from
-/// `window_ms` before `from`.
 pub(crate) fn smoothed(ring: &Ring, from: i64, to: i64, columns: usize, window_ms: i64, mut transform: impl FnMut(i64, f64) -> f64) -> Vec<Vec<Column>> {
     let mut segments: Vec<Vec<Column>> = Vec::new();
     if columns == 0 || to <= from {
@@ -183,8 +141,6 @@ pub(crate) fn smoothed(ring: &Ring, from: i64, to: i64, columns: usize, window_m
     let mut window: VecDeque<(i64, f64)> = VecDeque::new();
     let mut sum = 0.0;
     let mut prev_t: Option<i64> = None;
-    // From a window before the stretch, so its first point is a full mean; one sample
-    // past its end, so the line reaches the right edge.
     let first_shown = from - gap.ceil() as i64;
     let after = ring.range(to, i64::MAX).next().map(|(t, _)| t + 1).unwrap_or(to);
     for (t, raw) in ring.range(from.saturating_sub(window_ms), after) {
@@ -231,39 +187,27 @@ pub(crate) fn smoothed(ring: &Ring, from: i64, to: i64, columns: usize, window_m
     segments
 }
 
-/// What a chart's mouse did this frame, acted on after all are drawn.
 #[derive(Default)]
 struct LaneEvents {
-    /// The time stretch it showed (seconds on the chart's axis).
     view: Option<(f64, f64)>,
     clicked_at: Option<f64>,
     secondary_at: Option<f64>,
     double: bool,
-    /// Dragged while live: pause where it is.
     drag_live: bool,
-    /// The wheel while live: the window's length.
     wheel: f32,
-    /// Ctrl + wheel: the vertical range it now holds.
     zoom_y: Option<(f64, f64)>,
-    /// The vertical range it showed.
     y: Option<(f64, f64)>,
 }
 
-/// Steps a time axis ticks at, seconds.
 const TIME_STEPS: [f64; 22] = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0];
 
-/// A labelled tick's least distance from the next, px: a clock's width and some.
 pub const TIME_LABEL_PX: f64 = 92.0;
 
-/// The time axis's ticks: labelled ones at least [`TIME_LABEL_PX`] apart and finer,
-/// unlabelled ones between, all whole steps from `anchor` (the live edge, so they read
-/// "-8 s" ... "now"; or a whole second of the wall clock while paused).
 pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_plot::GridMark> {
     let (lo, hi) = input.bounds;
     if !(input.base_step_size > 0.0 && hi > lo && anchor.is_finite()) {
         return Vec::new();
     }
-    // egui_plot's base step spans its grid's least spacing, GRID_PX.
     let px = f64::from(GRID_PX) / input.base_step_size;
     let last = TIME_STEPS[TIME_STEPS.len() - 1];
     let major = TIME_STEPS.iter().copied().find(|s| s * px >= TIME_LABEL_PX).unwrap_or(last);
@@ -276,7 +220,6 @@ pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_p
         }
         out.extend((k0..=k1).map(|k| egui_plot::GridMark { value: anchor + k as f64 * step, step_size: step }));
     }
-    // One mark to a place, the coarser kept.
     out.sort_by(|a, b| a.value.total_cmp(&b.value));
     out.dedup_by(|later, earlier| {
         let same = (later.value - earlier.value).abs() < minor * 0.1;
@@ -288,11 +231,8 @@ pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_p
     out
 }
 
-/// The grid's least spacing, px, as the charts set it.
 pub const GRID_PX: f32 = 8.0;
 
-/// Where a live chart's ticks start: its right edge; a paused one's, a whole second of
-/// the wall clock (found near the middle of what it shows).
 fn time_anchor(bounds: (f64, f64), live_end: Option<f64>, tl: &Timeline) -> f64 {
     if let Some(end) = live_end {
         return end;
@@ -305,8 +245,6 @@ fn time_anchor(bounds: (f64, f64), live_end: Option<f64>, tl: &Timeline) -> f64 
     }
 }
 
-/// The time axis's words: seconds before now while live (the last tick "now"), the
-/// wall clock while paused.
 fn time_label(mark: egui_plot::GridMark, live_end: Option<f64>, tl: &Timeline) -> String {
     let x = mark.value;
     match live_end {
@@ -315,7 +253,6 @@ fn time_label(mark: egui_plot::GridMark, live_end: Option<f64>, tl: &Timeline) -
             if d.abs() < mark.step_size * 1e-3 { "now".into() } else { format!("{} s", view::fmt_short((d * 1000.0).round() / 1000.0)) }
         }
         None => match tl.wall(tl.origin().unwrap_or(0) + (x * 1000.0).round() as i64) {
-            // Ticks less than a second apart: tenths, or the ticks would repeat the second.
             Some(w) if mark.step_size < 0.999 => {
                 let t = view::local_time(w);
                 t.get(..10).map_or(t.clone(), str::to_string)
@@ -327,8 +264,6 @@ fn time_label(mark: egui_plot::GridMark, live_end: Option<f64>, tl: &Timeline) -
 }
 
 impl SpyApp {
-    /// Whether a channel gets a chart: not a text signal (text is not a number), and
-    /// not one the controller refused (it has nothing to draw; the table says why).
     pub(crate) fn charted(&self, i: usize, st: &spy_core::session::Status) -> bool {
         let c = &self.chans[i];
         if self.catalogue.get(c.key.signal).is_some_and(|s| s.value_type.as_deref() == Some("string")) {
@@ -340,11 +275,6 @@ impl SpyApp {
         !st.channels.iter().any(|s| s.key == c.key && matches!(s.state, spy_core::session::ChannelState::Refused { .. }))
     }
 
-    /// The charts to draw: one per lane and display unit, in the channels' order. A
-    /// lane whose channels show different units (one switched to radians, or a hand-
-    /// edited settings file) becomes one chart per unit: a shared axis in two units
-    /// would mislead. `charted` is decided once per frame, since a channel's record
-    /// type can change under it (its first sample) between two looks.
     pub(crate) fn lanes(&self, charted: &[bool]) -> Vec<(u32, String)> {
         let mut v: Vec<(u32, String)> = Vec::new();
         for (i, c) in self.chans.iter().enumerate() {
@@ -365,7 +295,6 @@ impl SpyApp {
         v
     }
 
-    /// Everything charted, channels first, in the order `lanes` gives their charts.
     pub(crate) fn members(&self, charted: &[bool], st: &Status) -> Vec<Member> {
         let connected = view::session_live(&st.phase);
         let store = self.session.store();
@@ -377,7 +306,6 @@ impl SpyApp {
             let sig = self.catalogue.get(c.key.signal);
             let d = view::display(sig, c.radians);
             let cs = st.channels.iter().find(|s| s.key == c.key);
-            // An overlaid chart's scale is its first channel's.
             let scale = self.chans.iter().enumerate().find(|(j, o)| o.lane == c.lane && charted[*j] && self.units_of(*j) == d.units).map_or(c.scale, |(_, o)| o.scale);
             out.push(Member {
                 id: c.key.id(),
@@ -421,13 +349,10 @@ impl SpyApp {
         view::display(self.catalogue.get(c.key.signal), c.radians).units
     }
 
-    /// The vertical range a chart showed last: where a fixed scale starts from.
     pub fn lane_view_range(&self, lane: u32, units: &str) -> Option<(f64, f64)> {
         self.lane_ranges.get(&(lane, units.to_string())).copied()
     }
 
-    /// Each charted channel's cursor readings, by id: at A, at B, and the statistics
-    /// between them, or of the stretch in view while both are not placed.
     pub(crate) fn cursor_readings(&self, st: &Status) -> HashMap<String, CursorReading> {
         let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, st)).collect();
         let origin = st.timeline.origin().unwrap_or(0);
@@ -474,7 +399,6 @@ impl SpyApp {
         let x_max = tl.seconds(end_ms);
         let x_min = x_max - self.window_s;
         let live = self.paused_at.is_none();
-        // While live, a little room right of "now", so its word is not cut at the edge.
         let x_right = if live { x_max + self.window_s * 18.0 / f64::from((ui.available_width() - 60.0).max(100.0)) } else { x_max };
         let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, &st)).collect();
         let all_lanes = self.lanes(&charted);
@@ -483,7 +407,6 @@ impl SpyApp {
             return;
         }
         let all = self.members(&charted, &st);
-        // One chart filling the middle (G48), while it is still there.
         if self.expanded.as_ref().is_some_and(|e| !all_lanes.contains(e)) {
             self.expanded = None;
         }
@@ -503,19 +426,12 @@ impl SpyApp {
         let axis_h = 26.0;
         let fit = (ui.available_height() - axis_h) / lanes.len() as f32 - title_h - 8.0;
         let lane_h = fit.max(90.0);
-        // More charts than fit, scrolled: each has its own time axis, since the last one's
-        // is out of sight.
         let every_axis = fit < 90.0;
 
-        // Six pixels either side of a mark's line, in the chart's seconds (the stretch the
-        // last frame showed).
         let mark_tol = self.view_ms.map_or(self.window_s, |(a, b)| (b - a) as f64 / 1000.0) * 6.0 / f64::from(ui.available_width().max(100.0));
         let markers: Vec<(f64, String)> = self.markers.iter().map(|m| (tl.seconds(m.t_ms), m.label.clone())).collect();
-        // The controller's own events (RWS), to the second.
         let events: Vec<(f64, egui::Color32, String)> = self.events_on_timeline(&tl).into_iter().map(|(t, e)| (tl.seconds(t), e.color(p), format!("controller: {}", e.text()))).collect();
         let (ca, cb, cursors_on) = (self.cursor_a, self.cursor_b, self.cursors_on);
-        // What each vertical line is, for the hover: the lines have no names, so that they
-        // stay out of the legend (a review's events once covered half of every chart there).
         let mut marks: Vec<(f64, String)> = markers.iter().map(|(x, l)| (*x, format!("marker {l}"))).collect();
         marks.extend(events.iter().map(|(x, _, l)| (*x, l.clone())));
         if cursors_on {
@@ -524,7 +440,6 @@ impl SpyApp {
         }
         let pause_fresh = self.pause_fresh;
         let origin = tl.origin().unwrap_or(0);
-        // The stretch the charts showed last frame: the markers named in the titles.
         let shown_x = match self.view_ms {
             Some((a, b)) if !live => ((a - origin) as f64 / 1000.0, (b - origin) as f64 / 1000.0),
             _ => (x_min, x_max),
@@ -541,7 +456,6 @@ impl SpyApp {
                 let zoomed = self.lane_zoom.get(lane).copied();
                 let top = ui.cursor().top();
                 let in_view: Vec<&str> = markers.iter().filter(|(x, _)| (shown_x.0..=shown_x.1).contains(x)).map(|(_, l)| l.as_str()).collect();
-                // The newest marker in view, named over the top chart only.
                 let act = lane_title(ui, &members, zoomed.is_some(), self.expanded.as_ref() == Some(lane), hovered_before, if k == 0 { in_view.last().copied() } else { None });
                 if act != TitleAct::None {
                     title_acts.push((lane.clone(), act));
@@ -580,12 +494,9 @@ impl SpyApp {
                     let b = pu.plot_bounds();
                     let dragged = pu.response().dragged();
                     let (mut vx0, mut vx1) = if (live && !dragged) || pause_fresh || !b.is_valid_x() { (x_min, x_right) } else { (b.min()[0], b.max()[0]) };
-                    // The wheel over this chart: the window while live, time around the
-                    // pointer while paused; with Ctrl, the vertical scale (G47).
                     let hovered = pu.response().hovered();
                     let (zoom, scroll) = if hovered { pu.ctx().input(|i| (i.zoom_delta(), i.smooth_scroll_delta.y)) } else { (1.0, 0.0) };
                     if hovered && (zoom != 1.0 || scroll != 0.0) {
-                        // Taken here: the charts' scroll area must not move as well.
                         pu.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
                     }
                     if scroll != 0.0 {
@@ -607,9 +518,6 @@ impl SpyApp {
                         let Some(src) = &m.src else { continue };
                         let (factor, hold) = (m.factor, m.hold);
                         let ring = src.lock();
-                        // A zero-filled signal's padding, undone for at most the hold
-                        // time: a longer run of zeros is a stop and is drawn as zero.
-                        // Primed from just before the window, so its left edge is right.
                         let mut zh = view::ZeroHold::new();
                         let smooth = i64::from(m.smooth_ms);
                         if hold && smooth == 0 {
@@ -642,12 +550,10 @@ impl SpyApp {
                                 }
                             }
                             if pts.len() == 1 {
-                                // A lone point would be invisible as a line.
                                 pts.push([pts[0][0] + 0.0005, pts[0][1]]);
                             }
                             pu.line(Line::new(m.name.clone(), PlotPoints::from(pts)).color(m.color).width(2.0).id(egui::Id::new((&m.id, si))));
                         }
-                        // A stale channel: shade from its last sample to the right edge.
                         if matches!(m.health, Health::Stale | Health::NotConnected)
                             && let Some(t) = last
                         {
@@ -734,7 +640,6 @@ impl SpyApp {
                 self.wheel_window(ev.wheel);
             }
             if ev.double {
-                // Back: the chart's own scale, and the stretch where it paused.
                 self.lane_zoom.remove(&lane);
                 if self.paused_at.is_some() {
                     self.pause_fresh = true;
@@ -768,17 +673,13 @@ impl SpyApp {
         self.view_ms = Some((origin + (visible_x.0 * 1000.0).floor() as i64, origin + (visible_x.1 * 1000.0).ceil() as i64 + 1));
     }
 
-    /// The wheel over a live chart (G47): a notch longer or shorter a window.
     fn wheel_window(&mut self, delta: f32) {
         self.wheel_acc += delta;
-        // egui spreads a notch's 40 points over a few frames; their sum can fall a
-        // hair short.
         const NOTCH: f32 = 40.0;
         while self.wheel_acc.abs() >= NOTCH - 0.5 {
             let up = self.wheel_acc > 0.0;
             self.wheel_acc -= NOTCH.copysign(self.wheel_acc);
             let i = WINDOWS.iter().position(|(s, _)| *s >= self.window_s - 1e-9).unwrap_or(WINDOWS.len() - 1);
-            // The wheel turned away from you zooms in: a shorter window.
             let j = if up { i.saturating_sub(1) } else { (i + 1).min(WINDOWS.len() - 1) };
             if WINDOWS[j].0 != self.window_s {
                 self.window_s = WINDOWS[j].0;
@@ -787,8 +688,6 @@ impl SpyApp {
         }
     }
 
-    /// The charts' heading and its tools: the window, pause, cursors, a marker, and
-    /// the files.
     fn chart_toolbar(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let paused = self.paused_at.is_some();
@@ -810,7 +709,6 @@ impl SpyApp {
             if cursors_on && placed {
                 left_texts.push("clear cursors");
             }
-            // The window's chevron, the marker's arrow, and the paused tag.
             let extra = 20.0 + 32.0 + if paused { 80.0 } else { 0.0 };
             let left_w = theme::buttons_width(ui, &left_texts, extra);
             let right_w = theme::buttons_width(ui, &["save csv", "save png", "xy plot"], 0.0);
@@ -865,9 +763,6 @@ impl SpyApp {
         if let Some(s) = window {
             self.window_s = s;
             self.mark_settings_dirty();
-            // Paused, the charts keep the person's view; a length chosen now is shown at
-            // once, ending where the view ends (the charts did not change on the cell,
-            // and the person looked for the change).
             if self.paused_at.is_some() {
                 if let Some((_, end)) = self.view_ms {
                     self.paused_at = Some(end - 1);
@@ -903,7 +798,6 @@ impl SpyApp {
     }
 }
 
-/// What a chart's title row asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitleAct {
     None,
@@ -914,9 +808,6 @@ enum TitleAct {
     Collapse,
 }
 
-/// A chart's title row: its channels' colours and name, its unit, what is done to it
-/// (smoothed, zoomed, frozen), the newest marker in view, and, while the pointer is
-/// over the chart, small buttons at its right (G48).
 fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bool, hovered: bool, marker: Option<&str>) -> TitleAct {
     let p = theme::pal(ui);
     let Some(first) = members.first() else { return TitleAct::None };
@@ -925,7 +816,6 @@ fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bo
     let smoothed = smooth.first().map(|&s| {
         if smooth.iter().all(|&x| x == s) && smooth.len() == members.len() { format!("smoothed {}", SMOOTHING.iter().find(|(ms, _)| *ms == s).map_or_else(|| format!("{s} ms"), |(_, t)| t.to_string())) } else { "partly smoothed".into() }
     });
-    // The buttons and the marker at the right first: the title truncates before them.
     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let size = egui::vec2(32.0, 28.0);
@@ -959,7 +849,6 @@ fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bo
             for m in members.iter().take(6) {
                 theme::square(ui, m.color, 12.0);
             }
-            // Room kept for the unit and the tags after the title.
             let tag_w = |t: &str| egui::WidgetText::from(theme::b(t).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small).size().x + 20.0;
             let mut reserve = egui::WidgetText::from(first.lane.1.as_str()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x + 8.0;
             reserve += smoothed.as_deref().map_or(0.0, tag_w) + if zoomed { tag_w("scale zoomed") } else { 0.0 } + if members.iter().any(|m| m.frozen) { tag_w("FROZEN") } else { 0.0 };
@@ -983,11 +872,6 @@ fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bo
     act
 }
 
-/// The vertical range for data spanning `lo..hi`: an 8% margin; for a constant (or
-/// all but constant) signal a band around it wide enough to read, rather than a range
-/// of 1e-9 whose axis labels are all zeros; and never tighter than `min_span`, so a
-/// still joint's dither of a ten-thousandth of a degree does not fill the chart and
-/// look like violent motion (seen on the cell; decided 2026-09-26).
 pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
     let mag = lo.abs().max(hi.abs());
     let span = hi - lo;
@@ -1004,9 +888,6 @@ pub fn autoscale(lo: f64, hi: f64, min_span: f64) -> (f64, f64) {
     (lo - span * 0.08, hi + span * 0.08)
 }
 
-/// `v` rounded outward (up, or down) to two significant figures: a fixed scale's
-/// starting ends, from the range a chart showed ("-237.9 to 237.98" becomes "-240 to
-/// 240").
 pub fn nice(v: f64, up: bool) -> f64 {
     if !v.is_finite() || v == 0.0 {
         return if v.is_finite() { 0.0 } else { v };
@@ -1015,16 +896,10 @@ pub fn nice(v: f64, up: bool) -> f64 {
     let step = 10f64.powi(exp - 1);
     let k = v / step;
     let r = if up { k.ceil() } else { k.floor() } * step;
-    // Through its decimal digits: not "0.013000000000000001".
     let digits = (1 - exp).max(0) as usize;
     format!("{r:.digits$}").parse().unwrap_or(r)
 }
 
-/// The smallest vertical span a chart autoscales to, per display unit: small enough
-/// for any real motion or change to fill most of the chart, large enough that the
-/// noise of a signal at rest shows as the thin line it is. Unknown units: none. A
-/// still joint's speed dithers by about 0.25 deg/s (the cell, 2026-09-29): 0.5 deg/s
-/// (it was 0.1).
 pub fn min_span(units: &str) -> f64 {
     match units.trim() {
         "deg" => 0.01,
@@ -1043,11 +918,6 @@ pub fn min_span(units: &str) -> f64 {
     }
 }
 
-/// The smallest span for one channel's chart: its unit's, and wider for a motor-side
-/// angle (a resolver's, or the drive's electrical angle), which a still motor dithers
-/// by about 0.02 deg where a still arm joint dithers by 0.0001 deg (the cell,
-/// 2026-09-29). Arm angles keep 0.01 deg (decided 2026-09-29). A signal the
-/// catalogue does not know goes by its unit.
 pub fn min_span_for(units: &str, sig: Option<&spy_core::catalogue::Signal>) -> f64 {
     let motor_angle = sig.is_some_and(|s| s.category == "motor position" || (s.category == "drive / inverter" && matches!(s.units.as_str(), "rad" | "deg")));
     match (units.trim(), motor_angle) {
@@ -1071,7 +941,6 @@ fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str, marks: &[(f6
     Some(with_mark(text, p.x, tol, marks))
 }
 
-/// Keep the hover's text where a test can read it, and pass it on.
 pub fn remember(shown: &std::sync::Mutex<String>, text: Option<String>) -> Option<String> {
     if let (Some(t), Ok(mut s)) = (&text, shown.lock()) {
         s.clone_from(t);
@@ -1079,11 +948,6 @@ pub fn remember(shown: &std::sync::Mutex<String>, text: Option<String>) -> Optio
     text
 }
 
-/// A hover's text, headed by what the vertical lines under the pointer are (markers,
-/// controller events, cursors: `marks`, x and what it is), every one within `tol` of
-/// `x` (a controller often logs several events in one second). The lines carry no
-/// names, so that they stay out of the legend, and egui_plot hovers no vertical line:
-/// this is where their text is shown.
 pub fn with_mark(text: String, x: f64, tol: f64, marks: &[(f64, String)]) -> String {
     let near: Vec<&str> = marks.iter().filter(|m| (m.0 - x).abs() <= tol).map(|m| m.1.as_str()).collect();
     if near.is_empty() { text } else { format!("{}\n{text}", near.join("\n")) }
@@ -1102,17 +966,14 @@ mod tests {
         assert!(at(4.42).starts_with("cursor A\n"), "the nearest: {}", at(4.42));
         assert!(at(0.95).starts_with("marker M1\n"), "{}", at(0.95));
         assert!(at(2.0).starts_with("t = 2.000 s"), "no mark within reach: {}", at(2.0));
-        // Two events in the same second: both.
         let two = vec![(4.0, "controller: 10002 Program pointer has been reset (information)".to_string()), (4.0, "controller: 10011 Motors ON state (information)".to_string())];
         let text = hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(4.01, 1.0) }, &tl, "Nm", &two, 0.1).unwrap();
         assert!(text.starts_with("controller: 10002") && text.contains("\ncontroller: 10011 Motors ON state (information)\nt = "), "{text}");
-        // Over a channel's sample beside a mark: both named, the mark first.
         let near = HoverPosition::NearDataPoint { plot_name: "4002 · Torque", position: egui_plot::PlotPoint::new(3.95, 1.0), index: 0 };
         let text = hover_label(&near, &tl, "Nm", &marks, 0.1).unwrap();
         assert!(text.starts_with("controller: 10010") && text.contains("\n4002 · Torque\n"), "{text}");
     }
 
-    /// A ring of samples every 4 ms from `t0`, as a VC sends them.
     fn ring(t0: i64, values: &[f64]) -> Ring {
         let mut r = Ring::new(4.0);
         for (i, &v) in values.iter().enumerate() {
@@ -1121,22 +982,18 @@ mod tests {
         r
     }
 
-    /// Every point a trace draws, in order: (t, first) and (t, last) of each column.
     fn points(segs: &[Vec<Column>]) -> Vec<(i64, f64)> {
         segs.iter().flatten().flat_map(|c| [(c.t, c.first_v), (c.t, c.last_v)]).collect()
     }
 
     #[test]
     fn smoothing_is_a_trailing_mean_that_never_reaches_across_a_gap() {
-        // 0 and 10 in turn, every 4 ms: 100 ms of it averages to 5.
         let swing: Vec<f64> = (0..200).map(|i| if i % 2 == 0 { 0.0 } else { 10.0 }).collect();
         let r = ring(0, &swing);
         let segs = smoothed(&r, 200, 800, 10_000, 100, |_, v| v);
         let pts = points(&segs);
         assert!(!pts.is_empty());
         assert!(pts.iter().all(|&(_, v)| (v - 5.0).abs() <= 0.21), "the swing is not smoothed: {:?}", &pts[..4]);
-        // Trailing: from 100 ms after a step from 0 to 10, a 100 ms mean has forgotten the
-        // 0s (the stretch drawn starts before the step, so its first means hold them).
         let mut step = vec![0.0; 250];
         step.extend(vec![10.0; 100]);
         let r2 = ring(0, &step);
@@ -1144,11 +1001,8 @@ mod tests {
         assert!(pts.iter().any(|&(t, v)| t < 1000 && v == 0.0), "before the step: {:?}", &pts[..2]);
         let late: Vec<&(i64, f64)> = pts.iter().filter(|&&(t, _)| t >= 1100).collect();
         assert!(!late.is_empty() && late.iter().all(|&&(_, v)| v == 10.0), "the mean still holds samples from before its window: {:?}", &late[..late.len().min(3)]);
-        // Off, a trace keeps the raw swing (the samples themselves are never changed).
         let raw = points(&r.decimate_at(200, 800, 10_000, |_, v| v));
         assert!(raw.iter().any(|&(_, v)| v == 0.0) && raw.iter().any(|&(_, v)| v == 10.0));
-        // A gap of a second: two segments, the second starting afresh from its own
-        // first sample rather than averaging in the samples before the gap.
         let mut r = ring(0, &[0.0; 50]);
         for i in 0..50 {
             r.push(1200 + i * 4, 10.0);
@@ -1156,7 +1010,6 @@ mod tests {
         let segs = smoothed(&r, 0, 1400, 10_000, 500, |_, v| v);
         assert_eq!(segs.len(), 2, "averaged across the gap");
         assert_eq!(segs[1][0].first_v, 10.0, "the first sample after the gap carries the one before it");
-        // The transform sees every sample from a window before the stretch, in order.
         let mut seen = Vec::new();
         let r = ring(0, &swing);
         let _ = smoothed(&r, 400, 600, 100, 100, |t, v| {
@@ -1168,18 +1021,14 @@ mod tests {
 
     #[test]
     fn a_scale_is_fit_with_a_floor_fixed_or_around_zero() {
-        // Fit: what is in view with its margin, never tighter than the floor, the unit's own
-        // unless one was chosen.
         assert_eq!(Scale::default().range(10.0, 20.0, 1.0), (9.2, 20.8));
         let (a, b) = Scale::Fit { floor: None }.range(45.0 - 0.0001, 45.0 + 0.0001, 0.01);
         assert!(b - a >= 0.01, "the unit's floor: {}", b - a);
         let (a, b) = Scale::Fit { floor: Some(4.0) }.range(45.0 - 0.0001, 45.0 + 0.0001, 0.01);
         assert!(b - a >= 4.0 && a < 45.0 && b > 45.0, "a chosen floor: {a} to {b}");
         assert_eq!(Scale::Fit { floor: None }.range(f64::INFINITY, f64::NEG_INFINITY, 1.0), (-1.0, 1.0), "nothing in view");
-        // Fixed and around zero ignore the data.
         assert_eq!(Scale::Fixed { lo: -240.0, hi: 240.0 }.range(0.0, 1000.0, 1.0), (-240.0, 240.0));
         assert_eq!(Scale::Centred { half: 50.0 }.range(10.0, 20.0, 1.0), (-50.0, 50.0));
-        // What a hand edit can spoil.
         assert!(Scale::Fixed { lo: 1.0, hi: 2.0 }.is_valid() && Scale::Centred { half: 0.5 }.is_valid() && Scale::Fit { floor: Some(0.0) }.is_valid());
         for bad in [Scale::Fixed { lo: 2.0, hi: 2.0 }, Scale::Fixed { lo: 3.0, hi: 2.0 }, Scale::Fixed { lo: f64::NAN, hi: 2.0 }, Scale::Centred { half: 0.0 }, Scale::Centred { half: f64::INFINITY }, Scale::Fit { floor: Some(-1.0) }] {
             assert!(!bad.is_valid(), "{bad:?}");
@@ -1188,13 +1037,11 @@ mod tests {
 
     #[test]
     fn the_time_axis_ticks_back_from_now_and_on_whole_seconds_paused() {
-        // A 10 s window 650 px wide: egui_plot's base step spans its grid's 8 px.
         let input = |lo: f64, hi: f64| egui_plot::GridInput { bounds: (lo, hi), base_step_size: (hi - lo) / 650.0 * f64::from(GRID_PX) };
         let px = |step: f64| step * 650.0 / 10.0;
         let marks = time_marks(input(100.37, 110.37), 110.37);
         let labelled: Vec<f64> = marks.iter().filter(|m| px(m.step_size) >= TIME_LABEL_PX).map(|m| m.value).collect();
         assert!(labelled.len() >= 4, "{labelled:?}");
-        // Whole steps back from the live edge: "now", "-2 s", ...
         let step = marks.iter().map(|m| m.step_size).fold(0.0, f64::max);
         assert!(labelled.iter().all(|v| ((110.37 - v) / step).fract().abs() < 1e-9 || ((110.37 - v) / step).fract().abs() > 1.0 - 1e-9), "{labelled:?} by {step}");
         assert!(labelled.iter().any(|v| (v - 110.37).abs() < 1e-9), "the live edge has its tick");
@@ -1202,13 +1049,10 @@ mod tests {
         let now = egui_plot::GridMark { value: 110.37, step_size: step };
         assert_eq!(time_label(now, Some(110.37), &tl), "now");
         assert_eq!(time_label(egui_plot::GridMark { value: 110.37 - 2.0 * step, step_size: step }, Some(110.37), &tl), format!("-{} s", view::fmt_short(2.0 * step)));
-        // Finer ticks between, one mark to a place, the coarser kept.
         assert!(marks.windows(2).all(|w| w[1].value - w[0].value > 1e-6), "two marks in one place");
         assert!(marks.iter().any(|m| m.step_size < step), "no finer grid");
-        // Paused, anchored on a whole second: every labelled tick on one.
         let marks = time_marks(input(100.37, 110.37), 100.0);
         assert!(marks.iter().filter(|m| px(m.step_size) >= TIME_LABEL_PX).all(|m| (m.value - m.value.round()).abs() < 1e-9), "{marks:?}");
-        // Nothing to tick: nothing.
         assert!(time_marks(input(5.0, 5.0), 5.0).is_empty());
     }
 
@@ -1245,9 +1089,6 @@ mod tests {
 
     #[test]
     fn a_still_resolver_and_a_still_speed_do_not_fill_their_charts() {
-        // The cell (2026-09-29): a still resolver (5138) dithered over 0.022 deg and a
-        // still J1 speed (4001) over about 0.25 deg/s, and both filled their charts like
-        // violent motion. Wider spans for them (decided 2026-09-29).
         let cat = spy_core::catalogue::Catalogue::builtin();
         let fill = |lo: f64, hi: f64, span: f64| {
             let (a, b) = autoscale(lo, hi, span);
@@ -1255,8 +1096,6 @@ mod tests {
         };
         assert!(fill(101.860, 101.882, min_span_for("deg", cat.get(5138))) < 0.5, "a still resolver fills its chart");
         assert!(fill(-0.147, 0.103, min_span_for("deg/s", cat.get(4001))) < 0.5, "a still joint's speed fills its chart");
-        // Motor-side angles by their category, electrical ones included, in either unit;
-        // arm angles keep the finer span (a joint's real 0.02 deg move fills its chart).
         assert_eq!(min_span_for("deg", cat.get(5000)), 0.05);
         assert_eq!(min_span_for("deg", cat.get(5028)), 0.05, "an electrical angle is a motor-side angle");
         assert_eq!(min_span_for("rad", cat.get(5138)), 0.05_f64.to_radians());
@@ -1267,17 +1106,13 @@ mod tests {
 
     #[test]
     fn a_still_joints_dither_does_not_fill_its_chart() {
-        // On the cell a joint at rest dithered by about a ten-thousandth of a degree,
-        // and the chart scaled that to its full height.
         let (lo, hi) = (45.0 - 0.0001, 45.0 + 0.0001);
         let (a, b) = autoscale(lo, hi, min_span("deg"));
         assert!(b - a >= 0.01, "a span of {} deg", b - a);
         assert!((hi - lo) / (b - a) < 0.05, "the dither fills {:.0}% of the chart", 100.0 * (hi - lo) / (b - a));
         assert!(a < lo && b > hi, "centred on the data");
-        // Real motion still fills it.
         let (a, b) = autoscale(40.0, 50.0, min_span("deg"));
         assert!((a, b) == (39.2, 50.8));
-        // Every unit the built-in catalogue shows gets a span, bar the unitless.
         let cat = spy_core::catalogue::Catalogue::builtin();
         for s in &cat.signals {
             let u = view::display(Some(s), false).units;

@@ -1,17 +1,3 @@
-//! A recording opened for review: every channel's samples on one time axis,
-//! the wall clock, exact across controller restarts, with a min/max summary so a chart
-//! of hours draws as quickly as one of seconds.
-//!
-//! **Time.** Each row's `controller_ms` is mapped to UTC through the anchor that covers
-//! it: in format 2 the anchor whose `row` is the last at or before the row's; in format
-//! 1 (no rows) by pairing the clock's segments (split where it steps back, a restart)
-//! with the anchors' own segments, and in each the last anchor at or before the row's
-//! clock. A recording with no anchor at all keeps the controller's clock, and says so.
-//!
-//! **Size.** Everything is held in memory: about 16 bytes a sample, a few hundred MB for
-//! an hour of twelve channels at full rate. A data file past [`MAX_FILE_BYTES`] is
-//! refused with a message rather than exhaust the PC.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -19,17 +5,11 @@ use crate::reading::ZeroHold;
 use crate::recording::{self, ChannelEntry, CsvRows, Kind, Meta};
 use crate::store::{ChannelKey, Column};
 
-/// Samples per summary block.
 const BLOCK: usize = 256;
-/// The largest data file opened: about 70 million rows.
 pub const MAX_FILE_BYTES: u64 = 2 << 30;
-/// A clock stepping back further than this is a restart (the timeline's jitter).
 const RESTART_BACK_MS: i64 = 2_000;
-/// No controller's clock reaches this (2^40 ms, 34 years of uptime): the live
-/// timeline's bound on a stamp too.
 const MAX_CONTROLLER_MS: i64 = 1 << 40;
 
-/// Up to [`BLOCK`] consecutive samples of one channel, never across a gap.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Block {
     start: usize,
@@ -44,37 +24,23 @@ struct Block {
 
 #[derive(Debug, Clone)]
 pub struct ReviewChannel {
-    /// As the recording names it, in this program's form (`4002/ROB_1/J2`).
     pub id: String,
     pub key: Option<ChannelKey>,
-    /// Name, units, sample time and type, as recorded.
     pub entry: Option<ChannelEntry>,
-    /// The review's time axis, ascending (see [`Review::wall_clock`]).
     pub t: Vec<i64>,
-    /// The values; a slow log's interval means. A zero-filled signal's padding is
-    /// undone when it was opened with its signal number in `hold`.
     pub v: Vec<f64>,
-    /// The values as recorded, where the padding was undone in `v` (an export writes
-    /// what was recorded, not what the chart draws).
     pub raw: Option<Vec<f64>>,
-    /// A slow log's interval minimum and maximum beside each mean.
     pub band: Option<(Vec<f64>, Vec<f64>)>,
-    /// A slow log's sample count in each interval.
     pub counts: Option<Vec<u64>>,
-    /// A string signal's texts.
     pub text: Vec<(i64, String)>,
-    /// A step longer than this is a gap: 1.5 sample times (a slow log: intervals).
     pub gap_ms: f64,
-    /// A derived channel, computed here from recorded ones (never itself recorded).
     pub derived: Option<crate::derived::Derived>,
     blocks: Vec<Block>,
 }
 
-/// A marker or a connection event on the review's time axis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReviewMark {
     pub t: i64,
-    /// "marker", "connected", "lost", "disconnected", "clock_reset", "defined".
     pub kind: String,
     pub text: String,
 }
@@ -84,38 +50,26 @@ pub struct Review {
     pub dir: PathBuf,
     pub meta: Meta,
     pub channels: Vec<ReviewChannel>,
-    /// Times are UTC milliseconds since 1970. False: the recording has no anchor,
-    /// and times are the controller's own clock.
     pub wall_clock: bool,
-    /// The first and last sample, on the time axis.
     pub start: i64,
     pub end: i64,
-    /// Rows that did not parse, and the lines of the first few.
     pub bad_rows: usize,
     pub bad_lines: Vec<usize>,
-    /// Samples dropped for going back in time within their channel.
     pub out_of_order: usize,
-    /// What the person should know about how it was read.
     pub notes: Vec<String>,
     pub marks: Vec<ReviewMark>,
 }
 
-/// Maps a row to the time axis.
 enum Mapping {
-    /// Format 2: (first row, controller ms, UTC ms), by row.
     ByRow(Vec<(u64, i64, i64)>),
-    /// Format 1: the anchors in segments of their own clock, (controller ms, UTC ms).
     BySegment(Vec<Vec<(i64, i64)>>),
-    /// No anchor: the controller's clock.
     Controller,
 }
 
 struct Mapper {
     mapping: Mapping,
-    /// Format 1: the rows' clock segment, and the highest clock value in it.
     segment: usize,
     seg_max: Option<i64>,
-    /// Format 2: the anchor in use.
     at: usize,
     ran_out: bool,
 }
@@ -161,8 +115,6 @@ fn utc_ms(iso: &str) -> Option<i64> {
     })
 }
 
-/// Open a recording folder for review. `hold`: signal numbers whose zero-filled
-/// padding is undone (the catalogue's zero-filled signals).
 pub fn open(dir: &Path, hold: &[u32]) -> Result<Review, String> {
     open_limited(dir, hold, MAX_FILE_BYTES)
 }
@@ -220,9 +172,6 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
         }
         let this = row;
         row += 1;
-        // A controller clock no controller shows (a garbled row) is a bad row, as the
-        // live timeline drops it: kept, it would pin the time axis and push every later
-        // sample of its channel out as "out of order".
         let parsed = r.ok().filter(|(_, f)| f.len() == want).and_then(|(line, f)| Some((line, f[0].0.parse::<i64>().ok().filter(|c| (0..MAX_CONTROLLER_MS).contains(c))?, f)));
         let Some((_, cms, fields)) = parsed else {
             bad_rows += 1;
@@ -286,7 +235,6 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
         ch.gap_ms = sample_ms * 1.5;
         if !slow && ch.key.as_ref().is_some_and(|k| hold.contains(&k.signal)) {
             ch.raw = Some(ch.v.clone());
-            // By time: the padding never spans a gap longer than the hold.
             let mut h = ZeroHold::new();
             for (t, v) in ch.t.iter().zip(ch.v.iter_mut()) {
                 *v = h.apply_at(*t, *v);
@@ -299,15 +247,9 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     let lasts = channels.iter().filter_map(|c| c.t.last().copied()).chain(channels.iter().filter_map(|c| c.text.last().map(|x| x.0)));
     let (start, end) = (firsts.min().unwrap_or(0), lasts.max().unwrap_or(0));
     let wall_clock = !matches!(mapper.mapping, Mapping::Controller);
-    // Markers carry the controller's clock at the sample they were put on: mapped
-    // through the anchor in effect when they were placed, as that sample's row was,
-    // not placed by the PC's clock (which drifts from the controller's). Events carry
-    // only the wall clock, which is the time axis unless there is no anchor.
     let through_anchor = |c: i64, u: i64| -> i64 {
         let a = anchors.iter().rev().find(|a| a.2 <= u).or(anchors.first());
         match a {
-            // More than a minute from where the PC's clock put it: a restart between the
-            // anchor and the marker; the PC's clock is the better guess then.
             Some(&(_, ac, au)) if ((au + (c - ac)) - u).abs() <= 60_000 => au + (c - ac),
             _ => u,
         }
@@ -335,10 +277,6 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     Ok(Review { dir: dir.to_path_buf(), meta, channels, wall_clock, start, end, bad_rows, bad_lines, out_of_order, notes, marks })
 }
 
-/// The derived channels shown while recording, computed again from the recorded
-/// inputs (as recorded: a held signal's padding kept) and added after the recorded
-/// channels. With the last target or plateau set: a change during the recording
-/// is said, and marked where it happened (its event).
 fn derive(meta: &Meta, channels: &mut Vec<ReviewChannel>, notes: &mut Vec<String>) {
     if meta.derived.is_empty() {
         return;
@@ -390,7 +328,6 @@ fn derive(meta: &Meta, channels: &mut Vec<ReviewChannel>, notes: &mut Vec<String
     channels.extend(out);
 }
 
-/// The summary: blocks of up to [`BLOCK`] samples, split at every gap and NaN.
 fn blocks(t: &[i64], v: &[f64], band: Option<&(Vec<f64>, Vec<f64>)>, gap_ms: f64) -> Vec<Block> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -424,28 +361,21 @@ impl ReviewChannel {
         self.t.partition_point(|&x| x < t)
     }
 
-    /// The samples with `from <= t < to`.
     pub fn range(&self, from: i64, to: i64) -> impl Iterator<Item = (i64, f64)> + '_ {
         let (a, b) = (self.lower_bound(from), self.lower_bound(to));
         (a..b).map(move |i| (self.t[i], self.v[i]))
     }
 
-    /// The newest sample at or before `t`.
     pub fn at_or_before(&self, t: i64) -> Option<(i64, f64)> {
         let i = self.lower_bound(t.saturating_add(1));
         (i > 0).then(|| (self.t[i - 1], self.v[i - 1]))
     }
 
-    /// The value at `t` for a cursor: the newest sample at or before it, but nothing in
-    /// a gap or long after the channel's last sample (the value before it is not the
-    /// value there).
     pub fn value_at(&self, t: i64) -> Option<f64> {
         let (at, v) = self.at_or_before(t)?;
         ((t - at) as f64 <= self.gap_ms).then_some(v)
     }
 
-    /// The smallest and largest value over `[from, to)`: for a slow log, its
-    /// intervals' recorded minimum and maximum, not the extremes of their means.
     pub fn extremes(&self, from: i64, to: i64) -> Option<(f64, f64)> {
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for i in self.lower_bound(from)..self.lower_bound(to) {
@@ -464,18 +394,12 @@ impl ReviewChannel {
         (lo <= hi).then_some((lo, hi))
     }
 
-    /// The samples with `from <= t < to` as recorded (a held signal's padding kept).
     pub fn recorded(&self, from: i64, to: i64) -> impl Iterator<Item = (i64, f64)> + '_ {
         let (a, b) = (self.lower_bound(from), self.lower_bound(to));
         let vals = self.raw.as_ref().unwrap_or(&self.v);
         (a..b).map(move |i| (self.t[i], vals[i]))
     }
 
-    /// Per-pixel-column decimation over `[from, to)`, as `Ring::decimate` does for the
-    /// live history, and with the same rule: a gap (or a NaN) ends a segment, never
-    /// interpolated across. Over a long stretch the summary blocks stand in for their
-    /// samples, so the work follows the pixels, not the length of the recording.
-    /// `scale` multiplies every value (degrees from radians).
     pub fn decimate(&self, from: i64, to: i64, columns: usize, scale: f64) -> Vec<Vec<Column>> {
         let mut segments: Vec<Vec<Column>> = Vec::new();
         if columns == 0 || to <= from || self.t.is_empty() {
@@ -500,7 +424,6 @@ impl ReviewChannel {
             }
         };
         let mut prev: Option<i64> = None;
-        // One sample as it is: a gap or a NaN ends the segment.
         let sample = |i: usize, current: &mut Vec<Column>, col_idx: &mut Option<usize>, segments: &mut Vec<Vec<Column>>, prev: &mut Option<i64>| {
             let (t, x) = (self.t[i], self.v[i] * scale);
             if prev.is_some_and(|p| (t - p) as f64 > self.gap_ms) && !current.is_empty() {
@@ -526,12 +449,6 @@ impl ReviewChannel {
                 sample(i, &mut current, &mut col_idx, &mut segments, &mut prev);
             }
         } else {
-            // A summary block stands in for its samples only where it lies wholly inside
-            // the view and inside one pixel column. Drawn whole at the view's edge or
-            // across columns, it would put a spike from outside the view inside it,
-            // leave one inside out, or draw it up to a block early. Any other block's
-            // samples are drawn one by one: the work stays that of the samples in view
-            // at most, and of the columns once blocks are narrower than a column.
             let (inside_a, inside_b) = (self.lower_bound(from), self.lower_bound(to));
             let first_block = self.blocks.partition_point(|bl| bl.end <= a);
             for bl in &self.blocks[first_block..] {
@@ -576,8 +493,6 @@ mod tests {
         TestDir::new(&format!("review-{tag}"))
     }
 
-    /// A recording folder: its description (with these anchors, markers, events and
-    /// channel ids) and its data file, as given.
     fn folder(tag: &str, kind: &str, anchors: &str, extra: &str, csv: &str) -> TestDir {
         let d = temp(tag);
         let file = if kind == "slow" { "slow.csv" } else { "data.csv" };
@@ -597,8 +512,6 @@ mod tests {
 
     #[test]
     fn derived_channels_are_computed_again_from_the_recording() {
-        // Three duty legs at 10000-10008 and, after a restart, at 10002-10006; the
-        // second leg is missing at 10004. A sag and a turn with no input recorded.
         let mut csv = String::from("controller_ms,channel,value\n");
         for (c, legs) in [(10000, [0.5, 0.5, 0.5]), (10004, [0.5, f64::NAN, 0.6]), (10008, [0.4, 0.6, 0.5]), (10002, [0.5, 0.5, 0.4]), (10006, [0.5, 0.5, 0.5])] {
             for (n, v) in [5020, 5021, 5022].iter().zip(legs) {
@@ -631,7 +544,6 @@ mod tests {
         assert!(r.notes.iter().any(|n| n.contains("Turn to target") && n.contains("not in the recording")), "{:?}", r.notes);
         assert!(r.notes.iter().any(|n| n.contains("computed with the last one")), "a setting changed while recording: {:?}", r.notes);
 
-        // A slow log's averages are not a sample-by-sample input.
         let slow = folder("derived-slow", "slow", r#"{"controller_ms": 10000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#, derived, "controller_ms,channel,count,mean,min,max\n10000,5027/ROB_1/J1,25,350,349,351\n");
         let r = open(&slow, &[]).unwrap();
         assert!(r.channel("sag:5027/ROB_1/J1").is_none());
@@ -640,8 +552,6 @@ mod tests {
 
     #[test]
     fn rows_on_both_sides_of_a_restart_map_to_their_own_anchor() {
-        // A restart after a short uptime: the new clock's values (10002, 10006) lie
-        // inside the old one's range, so only the rows can say which anchor applies.
         let csv = "controller_ms,channel,value\n10000,4002/ROB_1/J1,1\n10004,4002/ROB_1/J1,2\n10008,4002/ROB_1/J1,3\n10002,4002/ROB_1/J1,4\n10006,4002/ROB_1/J1,5\n";
         let anchors = r#"{"controller_ms": 10000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}, {"controller_ms": 10002, "utc": "2026-09-27T10:01:00.000Z", "row": 3}"#;
         let d = folder("rows", "full", anchors, "", csv);
@@ -656,9 +566,6 @@ mod tests {
 
     #[test]
     fn a_format_1_recording_maps_by_its_clock_segments() {
-        // Format 1 anchors have no row: the clock stepping back is the restart, on the
-        // rows' side and on the anchors' (and an anchor at a reconnect, same clock,
-        // takes over within its segment). The old channel id is read under the new one.
         let csv = "controller_ms,channel,value\n900000,4002/ROB_1/1,1\n900004,4002/ROB_1/1,2\n960000,4002/ROB_1/1,3\n5000,4002/ROB_1/1,4\n5004,4002/ROB_1/1,5\n";
         let anchors = r#"{"controller_ms": 900000, "utc": "2026-09-27T10:00:00.000Z"}, {"controller_ms": 960000, "utc": "2026-09-27T10:01:00.500Z"}, {"controller_ms": 5000, "utc": "2026-09-27T10:05:00.000Z"}"#;
         let d = folder("v1", "full", anchors, "", csv);
@@ -747,15 +654,12 @@ mod tests {
 
     #[test]
     fn a_zoomed_out_view_keeps_its_spikes_where_they_are() {
-        // 80 s at 4 ms, flat but for three spikes; the view 10 s to 50 s on 800
-        // columns: 12.5 samples a column, where whole summary blocks (256 samples,
-        // 1 s) span many columns.
         let n = 20_000usize;
         let t: Vec<i64> = (0..n as i64).map(|i| i * 4).collect();
         let mut v = vec![0.0; n];
-        v[2530] = 1000.0; // 10.12 s: in view, in a block that starts before it
-        v[5100] = 500.0; // 20.4 s: in view, in the middle of a block
-        v[12530] = 800.0; // 50.12 s: out of view, in a block that starts inside it
+        v[2530] = 1000.0;
+        v[5100] = 500.0;
+        v[12530] = 800.0;
         let ch = channel(t, v);
         let (from, to) = (10_000, 50_000);
         let cols: Vec<Column> = ch.decimate(from, to, 800, 1.0).into_iter().flatten().collect();
@@ -765,11 +669,8 @@ mod tests {
         assert!((mid.t - 20_400).abs() <= width, "drawn at {} ms, {} ms from where it is", mid.t, mid.t - 20_400);
         assert!(!cols.iter().any(|c| c.max == 800.0), "a spike from outside the view drawn in it");
         assert!(cols.iter().all(|c| c.t >= from - 4 && c.t <= to + 4), "a column from outside the view (beyond the one sample either side a line enters by)");
-        // Columns wider than a block (4 s each): the block that straddles the view's
-        // left edge fits inside its first column, and still must not bring in the
-        // samples it holds from before the view.
         let mut v = vec![0.0; n];
-        v[2400] = 700.0; // 9.6 s: before the view, in the block that straddles 10 s
+        v[2400] = 700.0;
         let ch = channel((0..n as i64).map(|i| i * 4).collect(), v);
         let wide: Vec<Column> = ch.decimate(from, to, 10, 1.0).into_iter().flatten().collect();
         assert!(!wide.iter().any(|c| c.max == 700.0), "a spike from before the view drawn at its edge");
@@ -778,9 +679,6 @@ mod tests {
 
     #[test]
     fn a_gap_between_two_whole_summary_blocks_still_breaks_the_line() {
-        // 4 s of samples, a gap of a second, then one block's worth: on 4 s columns the
-        // last block before the gap and the one after it each fit in a column, drawn
-        // whole, and the gap between them must still end the segment.
         let t: Vec<i64> = (0..1000).map(|i| i * 4).chain((0..256).map(|i| 5000 + i * 4)).collect();
         let v = vec![1.0; t.len()];
         let ch = channel(t, v);
@@ -800,8 +698,6 @@ mod tests {
 
     #[test]
     fn a_marker_sits_on_the_sample_it_was_put_on() {
-        // An hour in, the PC's clock 400 ms ahead of the controller's: the marker is
-        // where its controller time says, not where the PC's clock put it.
         let anchors = r#"{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#;
         let extra = r#", "markers": [{"utc": "2026-09-27T11:00:00.400Z", "kind": "marker", "text": "M1", "controller_ms": 3601000}]"#;
         let d = folder("marker-drift", "full", anchors, extra, "controller_ms,channel,value\n1000,4002/ROB_1/J1,1\n3601000,4002/ROB_1/J1,2\n");
@@ -823,9 +719,6 @@ mod tests {
 
     #[test]
     fn a_row_cut_off_at_the_end_of_an_unfinished_recording_is_left_out() {
-        // A power cut mid-row: "356.7" written as "35". The recorder ends every row
-        // with a newline, so a last line without one is cut short, in a recording
-        // that never finished. (A hand-made complete file may lack the last newline.)
         let anchors = r#"{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#;
         let csv = "controller_ms,channel,value\n1000,4002/ROB_1/J1,356.7\n1004,4002/ROB_1/J1,35";
         let d = folder("cut", "full", anchors, "", csv);
@@ -840,7 +733,6 @@ mod tests {
 
     #[test]
     fn hours_decimate_through_the_summary_keeping_every_spike_and_gap() {
-        // A million samples (67 minutes at 4 ms), one spike, one gap in the middle.
         let n = 1_000_000usize;
         let t: Vec<i64> = (0..n as i64).map(|i| i * 4 + if i >= 600_000 { 10_000 } else { 0 }).collect();
         let mut v: Vec<f64> = (0..n).map(|i| (i % 7) as f64).collect();
@@ -854,7 +746,6 @@ mod tests {
         assert!(cols <= 810, "{cols} columns for 800 pixels");
         assert!(segs.iter().flatten().any(|c| c.max == 1000.0), "the spike survives");
         assert!(segs.iter().flatten().all(|c| c.min == 0.0), "each column spans the full swing");
-        // Close up, the samples themselves.
         let close = ch.decimate(t[123_450], t[123_465], 800, 2.0);
         assert_eq!(close.len(), 1);
         assert_eq!(close[0].iter().map(|c| c.max).fold(f64::MIN, f64::max), 2000.0, "scaled");

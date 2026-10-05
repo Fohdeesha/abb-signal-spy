@@ -1,11 +1,3 @@
-//! The phone view: a read-only page on the LAN, off until switched on.
-//!
-//! It listens only while enabled, serves two things (the page and a JSON snapshot
-//! the window builds), and accepts no commands: GET and HEAD only, a bounded request,
-//! short timeouts and a cap on concurrent connections. It never touches the session;
-//! it only reads the last snapshot. The page says it is read-only, and when its data
-//! stops updating it freezes, dims and says so, never showing a stale number as live.
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,18 +8,10 @@ use std::time::{Duration, Instant};
 const MAX_REQUEST: usize = 8 * 1024;
 const MAX_CONNECTIONS: usize = 16;
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
-/// The whole request must arrive within this, however slowly its bytes trickle in:
-/// sixteen clients sending a byte every few seconds must not hold the view shut.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
-/// Ports tried after the one asked for, when it is taken by another program.
 const PORT_TRIES: u16 = 10;
-/// A snapshot older than this is not current: the window builds one every 250 ms,
-/// minimised too, and one that stopped (the window busy or hung) must not go on
-/// showing its values as live.
 const FROZEN_MS: u64 = 1000;
 
-/// A snapshot the window stopped updating: every value in it NOT CURRENT, and a turn
-/// shown by its number, never ON TARGET.
 fn frozen(body: &str) -> String {
     let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(body) else { return body.to_string() };
     if let Some(chans) = doc["channels"].as_array_mut() {
@@ -44,7 +28,6 @@ fn frozen(body: &str) -> String {
     doc.to_string()
 }
 
-/// The snapshot the window publishes: a JSON body and when it was built.
 #[derive(Default)]
 pub struct Snapshot {
     pub body: String,
@@ -53,16 +36,12 @@ pub struct Snapshot {
 
 pub struct PhoneServer {
     pub addr: SocketAddr,
-    /// Where a phone reaches it, worked out once when it starts (a name lookup is
-    /// too slow to repeat every frame).
     pub urls: Vec<String>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl PhoneServer {
-    /// Listen on every interface on `port`, or, if another program has it, on the
-    /// first free one of the next few (0 picks any; the tests use that).
     pub fn start(port: u16, snapshot: Arc<Mutex<Snapshot>>) -> Result<PhoneServer, String> {
         let tries = if port == 0 { 1 } else { PORT_TRIES };
         let mut last = String::new();
@@ -110,7 +89,6 @@ fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<
         match listener.accept() {
             Ok((stream, _)) => {
                 if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                    // Busy: close at once rather than queue without bound.
                     drop(stream);
                     continue;
                 }
@@ -142,10 +120,6 @@ fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8], head_only:
     s.flush()
 }
 
-/// The names this PC answers to: its computer name, which a person might type, and
-/// `localhost`. With IP literals, the only `Host` a request may carry: a page on
-/// another site that gets a browser to resolve its own name to this PC (DNS
-/// rebinding) sends that site's name, and is turned away.
 fn own_names() -> Arc<Vec<String>> {
     let mut v = vec!["localhost".to_string()];
     if let Ok(n) = std::env::var("COMPUTERNAME") {
@@ -154,11 +128,9 @@ fn own_names() -> Arc<Vec<String>> {
     Arc::new(v)
 }
 
-/// Whether a request's `Host` names this PC. Absent (HTTP/1.0) is accepted.
 fn host_ok(host: Option<&str>, names: &[String]) -> bool {
     let Some(h) = host else { return true };
     let h = h.trim();
-    // An IPv6 literal is bracketed, with the port after: "[fe80::1]:8090".
     let name = if let Some(rest) = h.strip_prefix('[') {
         match rest.split_once(']') {
             Some((ip, _)) => return ip.parse::<std::net::Ipv6Addr>().is_ok(),
@@ -167,7 +139,6 @@ fn host_ok(host: Option<&str>, names: &[String]) -> bool {
     } else {
         h.rsplit_once(':').map_or(h, |(n, port)| if port.bytes().all(|b| b.is_ascii_digit()) { n } else { h })
     };
-    // The computer name alone or with a local suffix ("mypc.lan", "mypc.local").
     let name = name.to_ascii_lowercase();
     name.parse::<std::net::Ipv4Addr>().is_ok() || names.iter().any(|n| name == *n || name.strip_prefix(n.as_str()).is_some_and(|rest| rest.starts_with('.')))
 }
@@ -209,7 +180,6 @@ fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &[String], deadlin
     };
     let head = method == "HEAD";
     if method != "GET" && !head {
-        // Read-only: there is nothing to POST to.
         return respond(&mut s, "405 Method Not Allowed", "text/plain", b"read-only\n", false);
     }
     let text = String::from_utf8_lossy(&req);
@@ -235,7 +205,6 @@ fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &[String], deadlin
     }
 }
 
-/// This PC's LAN addresses, for showing the phone view's address.
 pub fn local_addresses() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Ok(name) = std::env::var("COMPUTERNAME")
@@ -247,7 +216,6 @@ pub fn local_addresses() -> Vec<String> {
                     }
             }
         }
-    // The address of the default route, if any (a UDP connect sends nothing).
     if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0")
         && sock.connect("192.0.2.1:9").is_ok()
             && let Ok(a) = sock.local_addr() {
@@ -349,9 +317,6 @@ mod tests {
 
     #[test]
     fn a_taken_port_moves_to_the_next_free_one() {
-        // Below Windows' ephemeral range (49152 up), where the other tests' sockets
-        // and connections are given ports at this very moment: a port and the next
-        // one, both free, then the first taken.
         let start = 20_000 + (std::process::id() % 10_000) as u16;
         let (taken, p) = (start..start + 2_000)
             .step_by(3)
@@ -369,8 +334,6 @@ mod tests {
 
     #[test]
     fn only_this_pcs_names_are_answered() {
-        // A page elsewhere that gets a browser to resolve its own name to this PC
-        // (DNS rebinding) sends its own name as the Host.
         let names = vec!["localhost".to_string(), "mypc".to_string()];
         for ok in [None, Some("127.0.0.1:8090"), Some("192.168.1.5"), Some("[fe80::1]:8090"), Some("localhost:8090"), Some("MYPC:8090"), Some("mypc.lan"), Some("mypc.local:8090")] {
             assert!(host_ok(ok, &names), "{ok:?}");
@@ -400,7 +363,6 @@ mod tests {
         };
         let fresh = fetch(0);
         assert_eq!(fresh["data"]["channels"][0]["value"], "ON TARGET", "a fresh snapshot as the window built it");
-        // The window stopped building it (busy, hung): nothing in it is current.
         let old = fetch(1500);
         let ch = &old["data"]["channels"];
         assert_eq!(ch[0]["value"], "+0.100", "ON TARGET shown from a frozen snapshot");
@@ -417,10 +379,6 @@ mod tests {
         let mut s = TcpStream::connect(("127.0.0.1", srv.port())).unwrap();
         s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
         let t0 = Instant::now();
-        // One byte every 300 ms: each read alone is well inside the per-read timeout,
-        // which used to be all there was. The server must cut it off at its deadline.
-        // (Windows discards the 408 reply when the client's unread bytes make the
-        // close a reset, so what is measured is when the connection ends.)
         let mut ended = None;
         for b in b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n".iter().cycle() {
             if s.write_all(&[*b]).is_err() || probe_closed(&mut s) {
@@ -436,9 +394,6 @@ mod tests {
         assert!(ended < Duration::from_millis(2500), "held for {ended:?}; the deadline is 0.8 s");
     }
 
-    /// The server has answered or closed (end of stream or reset), as far as a short
-    /// read can tell; still waiting for more of the request otherwise. How much a read
-    /// got does not matter: any answer, or the end, means it is done with this client.
     #[allow(clippy::unused_io_amount)]
     fn probe_closed(s: &mut TcpStream) -> bool {
         let mut b = [0u8; 64];

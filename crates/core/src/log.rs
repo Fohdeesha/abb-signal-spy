@@ -1,7 +1,3 @@
-//! The session log: every define and its answer, refusals, reconnects, stale and
-//! resumed readings. Kept in memory for the window (bounded) and, when a file is
-//! attached, written line by line as it happens.
-
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
@@ -43,7 +39,6 @@ impl LogBook {
         LogBook::default()
     }
 
-    /// Mirror every entry to a file from now on (appending).
     pub fn attach_file(&self, file: File) {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).file = Some(file);
     }
@@ -56,8 +51,6 @@ impl LogBook {
         let wall = SystemTime::now();
         if let Some(f) = g.file.as_mut() {
             let line = format!("{} {:5} {}\n", crate::util::wall_iso(wall), format!("{level:?}").to_uppercase(), text);
-            // A log file that stops accepting writes must not take the session with
-            // it; the in-memory log carries on.
             if f.write_all(line.as_bytes()).is_err() {
                 g.file = None;
             }
@@ -78,7 +71,6 @@ impl LogBook {
         self.push(Level::Error, text)
     }
 
-    /// Entries with `seq >= from`, oldest first.
     pub fn since(&self, from: u64) -> Vec<Entry> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.entries.iter().filter(|e| e.seq >= from).cloned().collect()

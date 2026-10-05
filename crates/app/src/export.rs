@@ -1,16 +1,3 @@
-//! Saving what is in view: the samples of the charted stretch as one CSV
-//! file, and the charts as a PNG. Both go to the recordings folder, named for the
-//! local time, and the person is told where.
-//!
-//! The CSV describes itself, one row per sample: `time_utc,t_s,channel,name,units,
-//! value`. Values are as sent, in the unit the row names (degrees where the window
-//! shows degrees); a zero-filled signal keeps its padding zeros, as a recording does.
-//! Text signals' values are quoted, as in a recording.
-//!
-//! A view can hold millions of samples (ten minutes of twelve channels live, or a
-//! long recording), so the file is written in the background, under a `.part` name
-//! that becomes the real one only once every row is on disk.
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -23,21 +10,17 @@ use spy_core::util::{local_stamp, wall_iso};
 use crate::app::SpyApp;
 use crate::view;
 
-/// Above this many samples the person is told the save has started.
 const TELL_FROM: usize = 200_000;
 
-/// A CSV being written: the file it becomes, and the rows written.
 pub type ExportJob = JoinHandle<Result<(PathBuf, usize), String>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
     Text(String),
-    /// A slow log's interval: its mean, minimum, maximum and sample count.
     Interval { mean: f64, min: f64, max: f64, count: u64 },
 }
 
-/// One channel's samples in the stretch, in time order.
 pub struct Series<'a> {
     pub id: String,
     pub name: String,
@@ -49,8 +32,6 @@ fn quoted(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// A field as it is where it is safe, quoted where it would break its row (a comma,
-/// a quote, a line break) or read as a formula in a spreadsheet.
 fn csv_field(s: &str) -> String {
     if s.contains([',', '"', '\r', '\n']) || s.starts_with(['=', '+', '-', '@', '\t']) { quoted(s) } else { s.to_string() }
 }
@@ -59,27 +40,19 @@ fn number(v: f64) -> String {
     if v.is_nan() { "NaN".to_string() } else { format!("{v}") }
 }
 
-/// Write the series to `out`, merged into time order (ties in id order). `from` is
-/// the stretch's start (`t_s` counts from it); `utc_offset` turns a sample's time
-/// into UTC ms since 1970, where the wall clock is known. Returns the rows written.
 #[cfg(test)]
 pub fn write_rows(out: &mut impl Write, from: i64, utc_offset: Option<i64>, series: Vec<Series>) -> std::io::Result<usize> {
     write_rows_until(out, from, utc_offset, series, &std::sync::atomic::AtomicBool::new(false))
 }
 
-/// [`write_rows`], stopping with an error once `stop` is set (the window closing).
-/// A slow log's intervals get their minimum, maximum and count beside their mean.
 fn write_rows_until(out: &mut impl Write, from: i64, utc_offset: Option<i64>, mut series: Vec<Series>, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<usize> {
     series.sort_by(|a, b| a.id.cmp(&b.id));
     let mut heads: Vec<Option<(i64, Value)>> = series.iter_mut().map(|s| s.samples.next()).collect();
     let intervals = heads.iter().flatten().any(|(_, v)| matches!(v, Value::Interval { .. }));
     out.write_all(if intervals { b"time_utc,t_s,channel,name,units,mean,min,max,count\n" } else { b"time_utc,t_s,channel,name,units,value\n" })?;
-    // Written once per series, not once per row. The window's labels space their
-    // parts widely; a file gets single spaces.
     let tidy = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let fixed: Vec<String> = series.iter().map(|s| format!("{},{},{}", csv_field(&s.id), quoted(&tidy(&s.name)), quoted(&s.units))).collect();
     let mut rows = 0;
-    // At most a couple of dozen series: the earliest head by a straight look.
     while let Some(i) = (0..heads.len()).filter(|&i| heads[i].is_some()).min_by_key(|&i| heads[i].as_ref().map(|h| h.0)) {
         if rows % 4096 == 0 && stop.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(std::io::Error::other("stopped: the window was closing"));
@@ -98,22 +71,17 @@ fn write_rows_until(out: &mut impl Write, from: i64, utc_offset: Option<i64>, mu
     Ok(rows)
 }
 
-/// UTC ms since 1970 as text; `None` for a time no clock shows (Windows' starts in
-/// 1601 and ends in 30827: past either, SystemTime arithmetic panics).
 fn utc_text(ms: i64) -> Option<String> {
     let d = std::time::Duration::from_millis(ms.unsigned_abs());
     let t = if ms >= 0 { std::time::UNIX_EPOCH.checked_add(d) } else { std::time::UNIX_EPOCH.checked_sub(d) }?;
     Some(wall_iso(t))
 }
 
-/// Write the series to `path` through `path.part`: the finished name appears only
-/// once the file is complete, and a failed save leaves nothing behind.
 #[cfg(test)]
 pub fn write_csv(path: &Path, from: i64, utc_offset: Option<i64>, series: Vec<Series>) -> Result<usize, String> {
     write_csv_until(path, from, utc_offset, series, &std::sync::atomic::AtomicBool::new(false))
 }
 
-/// [`write_csv`], stopped once `stop` is set: nothing is left behind then either.
 pub fn write_csv_until(path: &Path, from: i64, utc_offset: Option<i64>, series: Vec<Series>, stop: &std::sync::atomic::AtomicBool) -> Result<usize, String> {
     let part = part_name(path);
     let io = |e: std::io::Error| format!("writing {} failed: {e}", part.display());
@@ -139,7 +107,6 @@ fn part_name(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// What a picture is of: the charts, or the XY plot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Picture {
     Charts,
@@ -147,7 +114,6 @@ pub enum Picture {
 }
 
 impl Picture {
-    /// For messages.
     fn name(self) -> &'static str {
         match self {
             Picture::Charts => "charts",
@@ -155,7 +121,6 @@ impl Picture {
         }
     }
 
-    /// For its file's name.
     fn file_word(self) -> &'static str {
         match self {
             Picture::Charts => "charts",
@@ -166,13 +131,11 @@ impl Picture {
     fn not_shown(self) -> &'static str {
         match self {
             Picture::Charts => "The charts are not on screen.",
-            // Its Save PNG is in its own window, which is open: what is missing is a plot.
             Picture::Xy => "Nothing is plotted to save: the XY window says why (it needs two charted channels, with pairs in the stretch in view).",
         }
     }
 }
 
-/// The part of a screenshot inside `rect` (in points), as PNG bytes.
 pub fn crop_png(image: &egui::ColorImage, rect: egui::Rect, pixels_per_point: f32) -> Result<Vec<u8>, String> {
     let [w, h] = image.size;
     let x0 = ((rect.min.x * pixels_per_point).floor().max(0.0) as usize).min(w);
@@ -200,9 +163,6 @@ pub fn crop_png(image: &egui::ColorImage, rect: egui::Rect, pixels_per_point: f3
 }
 
 impl SpyApp {
-    /// A new file in the recordings folder, named for now, the label and what it is:
-    /// a reviewed recording's own label while one is open (its rows carry no
-    /// controller or system id to tell them apart), the recording name otherwise.
     fn export_path(&self, what: &str, ext: &str) -> Result<PathBuf, String> {
         let dir = self.record_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -226,7 +186,6 @@ impl SpyApp {
         self.export_job.is_some()
     }
 
-    /// The live charts' stretch in view, every channel's samples, to a CSV.
     pub fn export_live_csv(&mut self) {
         if self.export_busy() {
             return;
@@ -243,7 +202,6 @@ impl SpyApp {
             let Some(ch) = self.session.store().get(&c.key) else { continue };
             let sig = self.catalogue.get(c.key.signal);
             let d = view::display(sig, c.radians);
-            // Copied out under the lock, briefly: the worker files samples into it.
             let samples: Vec<(i64, f64)> = {
                 let r = ch.lock();
                 if r.kind == Some(spy_core::sample::ValueKind::String) {
@@ -256,7 +214,6 @@ impl SpyApp {
             let factor = d.factor;
             series.push(Series { id: c.key.id(), name: view::label(&self.catalogue, &c.key), units: d.units.clone(), samples: Box::new(samples.into_iter().map(move |(t, v)| (t, Value::Number(v * factor)))) });
         }
-        // Derived channels, as computed here; their ids say what from.
         for d in &self.derived {
             let def = d.live.def();
             let samples: Vec<(i64, f64)> = d.live.lock().range(from, to).collect();
@@ -267,7 +224,6 @@ impl SpyApp {
         self.start_export(total, note, move |p, stop| write_csv_until(p, from, utc_offset, series, stop));
     }
 
-    /// The reviewed recording's stretch in view, to a CSV.
     pub fn export_review_csv(&mut self) {
         if self.export_busy() {
             return;
@@ -280,7 +236,6 @@ impl SpyApp {
             .iter()
             .map(|ch| {
                 let (units, factor) = crate::review_view::display_of(ch);
-                // A derived channel with the setting it was computed with.
                 let name = ch.derived.as_ref().map_or_else(|| crate::review_view::name_of(&self.catalogue, ch), crate::derived_view::file_name);
                 (units, factor, name)
             })
@@ -288,7 +243,6 @@ impl SpyApp {
         let within = |t: &[i64]| t.partition_point(|&x| x < to) - t.partition_point(|&x| x < from);
         let total = r.channels.iter().map(|ch| within(&ch.t) + ch.text.iter().filter(|(t, _)| (from..to).contains(t)).count()).sum();
         let utc_offset = r.wall_clock.then_some(0);
-        // The recording is shared, not copied: the thread reads it where it is.
         self.start_export(total, "", move |p, stop| {
             let series = r
                 .channels
@@ -296,7 +250,6 @@ impl SpyApp {
                 .zip(names)
                 .map(|(ch, (units, factor, name))| {
                     let mut text: Vec<(i64, Value)> = ch.text.iter().filter(|(t, _)| (from..to).contains(t)).map(|(t, s)| (*t, Value::Text(s.clone()))).collect();
-                    // Text rows are kept as they came; the merge needs them in order.
                     text.sort_by_key(|(t, _)| *t);
                     let numbers = recorded_values(ch, from, to, factor);
                     let units = if ch.text.is_empty() { units } else { String::new() };
@@ -352,7 +305,6 @@ impl SpyApp {
         }
     }
 
-    /// Ask the window for a screenshot; the part showing `what` is saved when it arrives.
     pub fn request_png(&mut self, what: Picture) {
         if self.picture_rect(what).is_none() {
             self.toast(Level::Warn, what.not_shown());
@@ -362,7 +314,6 @@ impl SpyApp {
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
     }
 
-    /// A screenshot arrived: crop it to what was asked for and save it.
     pub fn take_screenshot(&mut self, ctx: &egui::Context) {
         let Some(what) = self.png_pending else { return };
         let shot = ctx.input(|i| {
@@ -388,9 +339,6 @@ impl SpyApp {
     }
 }
 
-/// A recorded channel's values over `[from, to)` as recorded (a held signal's padding
-/// kept), in its display unit: a slow log's intervals with their minimum, maximum and
-/// count beside the mean.
 fn recorded_values<'a>(ch: &'a spy_core::review::ReviewChannel, from: i64, to: i64, factor: f64) -> Box<dyn Iterator<Item = (i64, Value)> + Send + 'a> {
     match (&ch.band, &ch.counts) {
         (Some((lo, hi)), Some(counts)) => {
@@ -402,7 +350,6 @@ fn recorded_values<'a>(ch: &'a spy_core::review::ReviewChannel, from: i64, to: i
     }
 }
 
-/// Two time-ordered streams as one.
 fn merge_two<'a>(a: impl Iterator<Item = (i64, Value)> + Send + 'a, b: impl Iterator<Item = (i64, Value)> + Send + 'a) -> impl Iterator<Item = (i64, Value)> + Send + 'a {
     let (mut a, mut b) = (a.peekable(), b.peekable());
     std::iter::from_fn(move || match (a.peek(), b.peek()) {
@@ -439,7 +386,6 @@ mod tests {
         assert_eq!(lines[5], "2026-09-26T08:47:20.508Z,0.008,6000/ROB_1/J1,\"Joint reference (EGM) ROB_1 J1\",\"deg\",NaN");
         assert_eq!(lines.len(), 6);
 
-        // No wall clock: no time_utc.
         let mut out = Vec::new();
         write_rows(&mut out, 1000, None, vec![Series { id: "4002/ROB_1/J1".into(), name: String::new(), units: String::new(), samples: numbers(vec![(1250, 1.0)]) }]).unwrap();
         assert_eq!(String::from_utf8(out).unwrap().lines().nth(1), Some(",0.250,4002/ROB_1/J1,\"\",\"\",1"));
@@ -447,7 +393,6 @@ mod tests {
 
     #[test]
     fn an_id_that_needs_quotes_gets_them_and_times_past_any_clock_do_not_crash() {
-        // A damaged recording can name a channel anything; a row keeps its six fields.
         let mut out = Vec::new();
         write_rows(&mut out, 0, None, vec![Series { id: "x,y\n\"z\"".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(0, 1.0)]) }]).unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -456,7 +401,6 @@ mod tests {
         let mut out = Vec::new();
         write_rows(&mut out, 0, None, vec![Series { id: "=HYPERLINK(1)".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(0, 1.0)]) }]).unwrap();
         assert!(String::from_utf8(out).unwrap().contains(",\"=HYPERLINK(1)\","), "a formula-like id quoted");
-        // Before 1601 (Windows' clock starts there) and past its range: no time, no panic.
         for offset in [-20_000_000_000_000i64, i64::MAX - 5, i64::MIN / 2] {
             let mut out = Vec::new();
             write_rows(&mut out, 0, Some(offset), vec![Series { id: "a".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(1, 1.0)]) }]).unwrap();
@@ -476,7 +420,6 @@ mod tests {
 
     #[test]
     fn a_save_stopped_partway_leaves_nothing() {
-        // The window closing while a long save runs: it stops, and no part file stays.
         let dir = spy_core::testdir::TestDir::new("export-stop");
         let p = dir.join("x view.csv");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -508,7 +451,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 3);
         assert!(!part_name(&p).exists());
 
-        // A failing series (a disk that fills, say): no file, no part left behind.
         struct Failing;
         impl Write for Failing {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -524,7 +466,6 @@ mod tests {
         assert!(write_csv(&q, 0, None, vec![]).is_err(), "an existing part file is not overwritten");
         assert!(!q.exists());
         assert_eq!(std::fs::read(part_name(&q)).unwrap(), b"someone else's");
-        // Written but not renamed (the name taken meanwhile by a folder): the part goes.
         let r = dir.join("z view.csv");
         std::fs::create_dir(&r).unwrap();
         assert!(write_csv(&r, 0, None, vec![Series { id: "4002/ROB_1/J1".into(), name: "n".into(), units: "Nm".into(), samples: numbers(vec![(0, 1.0)]) }]).is_err());
@@ -535,7 +476,6 @@ mod tests {
     fn a_screenshot_is_cropped_to_the_charts() {
         let mut img = egui::ColorImage::filled([20, 10], egui::Color32::BLACK);
         img.pixels[3 * 20 + 5] = egui::Color32::RED;
-        // The charts at (2.5, 1.5)-(5, 4) points on a 2x display: pixels (5, 3)-(10, 8).
         let png = crop_png(&img, egui::Rect::from_min_max(egui::pos2(2.5, 1.5), egui::pos2(5.0, 4.0)), 2.0).unwrap();
         let dec = png::Decoder::new(std::io::Cursor::new(png));
         let mut r = dec.read_info().unwrap();

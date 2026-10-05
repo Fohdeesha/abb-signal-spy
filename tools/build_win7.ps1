@@ -1,14 +1,3 @@
-# Build the Windows 7 (x64) exe and check its imports.
-#
-# Rust's own Windows targets need Windows 10 since Rust 1.78, so Windows 7 is built for
-# the tier-3 target x86_64-win7-windows-msvc: a nightly compiler that rebuilds the
-# standard library for it. No DirectX 12 there and no screen-reader layer (it needs
-# combase.dll), so the app's default features are off: OpenGL only.
-#
-# The nightly is pinned: a tier-3 target has no guarantee of building on the next one.
-# Change NIGHTLY deliberately, then run this and tools/check_win7_imports.py again.
-#
-# usage: powershell -File tools\build_win7.ps1        (from the repository's root)
 $ErrorActionPreference = "Stop"
 $NIGHTLY = "nightly-2026-09-25"
 $TARGET = "x86_64-win7-windows-msvc"

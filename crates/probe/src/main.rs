@@ -1,9 +1,3 @@
-//! signal-spy-probe: the console side of ABB Signal Spy.
-//!
-//! Read-only against controllers: it sends InfoStream commands only, and never
-//! StreamUndefineAll. Every exit path (the end of a run, an error, Ctrl+C) tears down
-//! the streams it defined.
-
 use std::collections::BTreeMap;
 use std::net::ToSocketAddrs;
 use std::process::ExitCode;
@@ -57,7 +51,6 @@ fn install_ctrl_c() {
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
     unsafe extern "system" fn handler(_ctrl: u32) -> windows_sys::core::BOOL {
         INTERRUPTED.store(true, Ordering::SeqCst);
-        // Handled: the main loop sees the flag and tears the session down.
         1
     }
     unsafe {
@@ -159,7 +152,6 @@ fn new_session(ask: AskPolicy) -> (Session, Arc<LogBook>) {
     (Session::spawn(opts, log.clone(), Arc::new(Store::new()), Arc::new(|| {})), log)
 }
 
-/// Print log entries as they come.
 struct LogTail {
     next: u64,
     tag: &'static str,
@@ -174,12 +166,8 @@ impl LogTail {
     }
 }
 
-/// Wait until streaming, stopped, or asked about other clients. Returns false if the
-/// session did not get to streaming.
 fn wait_streaming(s: &Session, log: &LogBook, tail: &mut LogTail, take: bool, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
-    // The list last answered for: a reconnect that brings a different list is asked
-    // about again.
     let mut answered: Option<Vec<String>> = None;
     while Instant::now() < end && !interrupted() {
         tail.pump(log);
@@ -245,7 +233,6 @@ fn cmd_list() -> ExitCode {
     }
 }
 
-/// Read-only RWS: what the window's RWS extras would read.
 fn cmd_rws(host: &str, port: u16, user: &str, password: &str) -> ExitCode {
     use spy_core::rws::{calib_instance, Client, EventPoll};
     let run = || -> Result<(), spy_core::rws::RwsError> {
@@ -309,8 +296,6 @@ fn cmd_hello(t: &Target) -> ExitCode {
     }
 }
 
-/// The newest value as text: the string itself for a string-typed signal (they are
-/// stored as holes in the numeric history), the number otherwise.
 fn last_text(s: &Session, k: &ChannelKey) -> Option<String> {
     let ch = s.store().get(k)?;
     let r = ch.lock();
@@ -320,16 +305,10 @@ fn last_text(s: &Session, k: &ChannelKey) -> Option<String> {
     r.last().map(|(_, v)| format!("{v}"))
 }
 
-/// Stamp steps and arrival waits over a whole run, from a tap that sees every sample.
-/// (Read from the store, as it was, they covered only its last ten minutes of history:
-/// a 20-minute cell run reported half its steps as if they were all.)
 #[derive(Default)]
 struct RunStats {
-    /// Per channel: the previous timeline stamp, and step (ms) -> count.
     steps: BTreeMap<ChannelKey, (Option<i64>, BTreeMap<i64, usize>)>,
     last_arrival: Option<SystemTime>,
-    /// The longest wait between sample frames, and how many waits passed 100 ms: what
-    /// the session's liveness check (300 ms of silence) has to stay clear of.
     max_wait: Duration,
     waits_over_100ms: u64,
 }
@@ -371,8 +350,6 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
     let seconds = if a.seconds > 0.0 { a.seconds } else { 5.0 };
     let (s, log) = new_session(AskPolicy::Remote);
     let mut tail = LogTail { next: 0, tag: "log" };
-    // Every sample, for the summary's step and wait counts (a 12-channel run at 250/s
-    // drained every 20 ms needs about 60 places).
     let tap = s.tap(1 << 16);
     let mut run = RunStats::default();
     s.set_channels(keys.clone());
@@ -405,9 +382,6 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
     if interrupted() {
         println!("interrupted; tearing down");
     }
-    // Tear down first, so the counts and the history below describe the same
-    // moment (read while samples still arrive, the history runs ahead of the
-    // counts). A stopped session keeps its reason.
     let live = s.status().clone();
     let stopped = matches!(live.phase, Phase::Stopped { .. });
     if !stopped {
@@ -423,14 +397,12 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
     println!();
     println!("summary ({:.1} s):", start.elapsed().as_secs_f64());
     for c in &st.channels {
-        // The state as it was while streaming (after the teardown every channel waits).
         let was = live.channels.iter().find(|l| l.key == c.key).map(|l| &l.state).unwrap_or(&c.state);
         let state = match was {
             ChannelState::Defined { stream } => format!("stream {stream}"),
             ChannelState::Refused { text, .. } => format!("REFUSED: {text}"),
             other => format!("{other:?}"),
         };
-        // A string signal is an event, sent now and then: its spacing says nothing.
         let spacing = if c.kind == Some(ValueKind::String) {
             format!("events {}", c.samples)
         } else {
@@ -456,7 +428,6 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
         "  frames {}  sample frames {}  samples {}  AYA answered {}  foreign records {}  foreign subscription {}  liveness checks {}  defects {:?}  no-trailer {}",
         k.frames, k.sample_frames, k.samples, k.ayas, k.foreign_records, k.foreign_subscription, k.liveness_checks, k.defects, k.no_trailer
     );
-    // Where the samples came (service 8, the marker at offset 16, on the RW6 VC and an IRC5).
     println!("  sample frames by service {:?}  protobuf marker at offset {:?}  unexpected frames {}", k.sample_services, k.marker_offsets, k.unexpected_frames);
     if let Phase::Stopped { reason } = &st.phase {
         println!("  STOPPED: {reason}");
@@ -483,7 +454,6 @@ fn cmd_typed(t: Target, a: &Args, nums: Vec<u32>, unit: MechUnit) -> ExitCode {
         }
         let keys: Vec<ChannelKey> = batch.iter().map(|&n| ChannelKey { signal: n, unit: unit.clone(), axis: Axis::new(1).unwrap() }).collect();
         s.set_channels(keys.clone());
-        // Wait for every define to be answered, then dwell.
         let end = Instant::now() + Duration::from_secs(5);
         while Instant::now() < end && !interrupted() {
             let st = s.status();
@@ -556,8 +526,6 @@ fn cmd_tenancy(t: Target, a: &Args, unit: MechUnit) -> ExitCode {
     sb.connect(t);
     let b_up = wait_streaming(&sb, &lb, &mut tb, true, Duration::from_secs(15));
     println!("B's session {}", if b_up { "was set up like A's: no refusal, no busy signal" } else { "did not get to streaming" });
-    // A, the first subscriber, gets B's samples too: it should see B arrive and stop
-    // at once, quietly, handing InfoStream over rather than fighting for it.
     let end = Instant::now() + Duration::from_secs(5);
     while Instant::now() < end && !matches!(sa.status().phase, Phase::Stopped { .. }) && !interrupted() {
         ta.pump(&la);
@@ -577,8 +545,6 @@ fn cmd_tenancy(t: Target, a: &Args, unit: MechUnit) -> ExitCode {
     tb.pump(&lb);
     let sb_st = sb.status().clone();
     let b1 = sb_st.channels.first().map(|c| c.samples).unwrap_or(0);
-    // Measured on the RW6 VC: the controller does not pass InfoStream on to a client
-    // that was already connected; it has to connect again.
     println!("B then: {} samples in 2 s{}", b1 - b0, if b1 > b0 { ", now that A has gone" } else { " (not handed on to a client already connected)" });
     println!("subscription ids: A {:?}, B {:?}", sa_st.subscription, sb_st.subscription);
     let ok_a = sa.shutdown(Duration::from_secs(5));
@@ -700,8 +666,6 @@ mod tests {
         let k = ChannelKey { signal: 6000, unit: MechUnit::new("ROB_1").unwrap(), axis: Axis::new(1).unwrap() };
         let mut r = RunStats::default();
         r.feed(&batch(&k, &[0, 4], 1000));
-        // A 5 ms step across a batch boundary (the IRC5's 4.032 ms tick), then a frame
-        // that waited 246 ms.
         r.feed(&batch(&k, &[8, 13], 1004));
         r.feed(&batch(&k, &[17], 1250));
         assert_eq!(r.steps_of(&k), BTreeMap::from([(4, 3), (5, 1)]));

@@ -1,11 +1,3 @@
-//! The out-of-memory note (src/oom.rs), end to end: the program asks its global
-//! allocator for more memory than any PC has, and the note must be in crash.txt and
-//! the log. (On the cell, 2026-09-29, the window vanished with neither.)
-//!
-//! Run it on the release build too: `cargo test --release -p abb-signal-spy --test
-//! out_of_memory`. There the optimiser once removed the test switch's allocation (its
-//! pointer was only compared with null), and the switch proved nothing.
-
 #[test]
 fn a_refused_allocation_leaves_a_note() {
     let dir = spy_core::testdir::TestDir::new("oom");

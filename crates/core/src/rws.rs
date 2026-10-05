@@ -1,42 +1,21 @@
-//! Read-only RWS 1.0 (IRC5, RobotWare 6) for the extras: the controller's name and
-//! RobotWare version, its event log on the chart timeline, and a motor's calibration
-//! values. **GETs only**: nothing here writes, and no request body is ever sent.
-//!
-//! What it rests on, measured on the RW6 VC 2026-09-27 and on an IRC5 2026-09-29: a
-//! Digest login (RFC 2617, qop auth) answered with a session cookie that
-//! carries later requests; JSON documents (`?json=1`) whose items are in
-//! `_embedded._state`; times as the controller's local clock in whole seconds with no
-//! zone (`2026-09-27 T 22:26:09`); the event log newest first, `limit` a page and
-//! `start` the page number; and a `/logout` the VC refuses, so one session is kept.
-//!
-//! Credentials are never stored: the caller holds them for the session.
-
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use serde_json::Value;
 
-/// RWS 1.0's port on an IRC5 (a virtual controller's may differ).
 pub const DEFAULT_PORT: u16 = 80;
-/// RobotWare's default login, which most cells keep.
 pub const DEFAULT_USER: &str = "Default User";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-/// The largest answer read: an event-log page of 50 is about 32 KB.
 const MAX_RESPONSE: usize = 4 << 20;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RwsError {
-    /// No connection, or it broke.
     Connect(String),
-    /// The login was refused.
     Login,
-    /// An HTTP status other than 200, with the controller's message where it gave one.
     Status(u16, String),
-    /// An answer this client could not read.
     Format(String),
-    /// RWS answered for another controller than the one expected (system ids).
     OtherController { found: String, expected: String },
 }
 
@@ -53,9 +32,6 @@ impl std::fmt::Display for RwsError {
     }
 }
 
-// ------------------------------------------------------------------ MD5 (RFC 1321)
-
-/// MD5, for the Digest login only (RFC 2617 needs it; nothing else here does).
 pub fn md5(data: &[u8]) -> [u8; 16] {
     const S: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6,
@@ -106,9 +82,6 @@ fn md5_hex(s: &str) -> String {
     hex(&md5(s.as_bytes()))
 }
 
-// ------------------------------------------------------------------ Digest (RFC 2617)
-
-/// A Digest challenge (`WWW-Authenticate: Digest realm=..., nonce=..., qop=...`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Challenge {
     pub realm: String,
@@ -117,8 +90,6 @@ pub struct Challenge {
     pub opaque: Option<String>,
 }
 
-/// The parameters of a `Digest` header, quoted or not; commas inside quotes kept. The
-/// scheme in any case, and spaces around `=` (RFC 7235 allows both).
 pub fn digest_params(header: &str) -> Option<Vec<(String, String)>> {
     let h = header.trim();
     let scheme = h.get(..6)?;
@@ -168,7 +139,6 @@ impl Challenge {
         if get("algorithm").is_some_and(|a| !a.eq_ignore_ascii_case("MD5")) {
             return None;
         }
-        // qop "auth" (possibly listed with others); none: RFC 2069's form.
         let qop = get("qop").map(|q| if q.split(',').any(|x| x.trim() == "auth") { Some("auth".to_string()) } else { None });
         let qop = match qop {
             Some(None) => return None,
@@ -178,7 +148,6 @@ impl Challenge {
         Some(Challenge { realm: get("realm")?, nonce: get("nonce")?, qop, opaque: get("opaque") })
     }
 
-    /// The `Authorization` header for a GET of `uri`.
     pub fn answer(&self, user: &str, password: &str, uri: &str, nc: u32, cnonce: &str) -> String {
         let ha1 = md5_hex(&format!("{user}:{}:{password}", self.realm));
         let ha2 = md5_hex(&format!("GET:{uri}"));
@@ -201,12 +170,9 @@ impl Challenge {
     }
 }
 
-// ------------------------------------------------------------------ HTTP
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Response {
     pub status: u16,
-    /// Names lower-cased, in the order sent.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
@@ -217,14 +183,10 @@ impl Response {
     }
 }
 
-/// A whole HTTP/1.1 response: the body by Content-Length, chunks, or to the end.
 pub fn parse_response(raw: &[u8]) -> Result<Response, RwsError> {
     parse_prefix(raw, true)?.ok_or_else(|| RwsError::Format("an answer cut short".into()))
 }
 
-/// The response in `raw` once it is whole by its own framing (Content-Length, or the
-/// last chunk), `None` while more is due. One framed by the close only (neither) is
-/// whole at `at_end`.
 fn parse_prefix(raw: &[u8], at_end: bool) -> Result<Option<Response>, RwsError> {
     let bad = |m: &str| RwsError::Format(m.to_string());
     let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else { return Ok(None) };
@@ -243,7 +205,6 @@ fn parse_prefix(raw: &[u8], at_end: bool) -> Result<Option<Response>, RwsError> 
         let mut body = Vec::new();
         let mut at = 0;
         loop {
-            // Every index checked: a connection dropped mid-answer cuts anywhere.
             let Some(line_end) = rest.get(at..).and_then(|r| r.windows(2).position(|w| w == b"\r\n")).map(|p| p + at) else { return Ok(None) };
             let size_text = std::str::from_utf8(&rest[at..line_end]).map_err(|_| bad("a chunk size not text"))?;
             let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16).map_err(|_| bad("a chunk size not a number"))?;
@@ -267,27 +228,14 @@ fn parse_prefix(raw: &[u8], at_end: bool) -> Result<Option<Response>, RwsError> 
     Ok(Some(Response { status, headers, body }))
 }
 
-/// The Digest challenge among an answer's `WWW-Authenticate` headers (a server may
-/// offer Basic first).
 pub fn challenge_of(r: &Response) -> Option<Challenge> {
     r.headers.iter().filter(|(n, _)| n == "www-authenticate").find_map(|(_, v)| Challenge::parse(v))
 }
 
-// ------------------------------------------------------------------ the controller's clock
-
-/// How far before a recording's start a controller event is still kept: more than
-/// the placing error of [`event_utc_ms`] (under a second either way, plus half a clock
-/// read's round trip, at most [`MAX_CLOCK_RTT_MS`]).
 pub const EVENT_SLACK_MS: i64 = 2000;
 
-/// A clock read whose round trip took longer than this cannot say when the controller
-/// read its clock closely enough to place events within the slack: not used.
 pub const MAX_CLOCK_RTT_MS: i64 = 1000;
 
-/// The controller's clock minus this PC's UTC, in ms, from a clock read of `ctrl_s`
-/// (whole seconds, as the controller gives it) between two PC times. Its seconds cut
-/// the true time down by up to a second: the middle of that second is taken, and the
-/// middle of the request. `None` for a read that took longer than [`MAX_CLOCK_RTT_MS`].
 pub fn clock_offset_ms(ctrl_s: i64, pc_before_ms: i64, pc_after_ms: i64) -> Option<i64> {
     let rtt = pc_after_ms.checked_sub(pc_before_ms)?;
     if !(0..=MAX_CLOCK_RTT_MS).contains(&rtt) {
@@ -297,20 +245,12 @@ pub fn clock_offset_ms(ctrl_s: i64, pc_before_ms: i64, pc_after_ms: i64) -> Opti
     Some(ctrl_s.saturating_mul(1000).saturating_add(500).saturating_sub(pc_mid))
 }
 
-/// When an event stamped `stamp_s` on the controller's clock happened, in UTC ms: the
-/// middle of its whole second, through the offset. Never more than a second (and half
-/// the clock read's round trip) from when it happened.
 pub fn event_utc_ms(stamp_s: i64, offset_ms: i64) -> i64 {
     stamp_s.saturating_mul(1000).saturating_add(500).saturating_sub(offset_ms)
 }
 
-/// The longest one request may take, however its bytes trickle in (each read has its
-/// own timeout too).
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 
-/// One GET on a connection of its own (`Connection: close`), read until whole: the
-/// VC closes as asked (measured 2026-09-28), but one that kept the connection open would
-/// otherwise cost every request its timeout, and then the answer.
 fn get_raw(host: &str, port: u16, path: &str, cookies: &str, auth: Option<&str>) -> Result<Response, RwsError> {
     get_raw_within(host, port, path, cookies, auth, REQUEST_DEADLINE)
 }
@@ -354,9 +294,6 @@ fn get_raw_within(host: &str, port: u16, path: &str, cookies: &str, auth: Option
     }
 }
 
-// ------------------------------------------------------------------ the client
-
-/// A read-only RWS session with one controller.
 pub struct Client {
     host: String,
     port: u16,
@@ -365,7 +302,6 @@ pub struct Client {
     cookies: Vec<(String, String)>,
     logins: u32,
     expect: Option<String>,
-    /// The session the cookies carry has been checked against `expect`.
     checked: bool,
 }
 
@@ -376,13 +312,6 @@ impl Client {
         Client { host: host.to_string(), port, user: user.to_string(), password: password.to_string(), cookies: Vec::new(), logins: 0, expect: None, checked: false }
     }
 
-    /// Read only from the controller with this system id. Nothing is returned from a
-    /// session until `/rw/system` has been read in it and matched: at the start, after
-    /// any new login (the controller forgot the session), and after a check that
-    /// failed, whatever the reason. Another controller behind the same address (every
-    /// IRC5's service port is 192.168.125.1) takes the same default login, and would
-    /// otherwise be read as this one until the InfoStream side noticed. A session that
-    /// failed its check stays unchecked, so every request after it fails too.
     pub fn expect_system(mut self, system_id: &str) -> Client {
         self.expect = Some(system_id.to_string());
         self
@@ -405,9 +334,6 @@ impl Client {
         }
     }
 
-    /// One GET, the JSON document. Logs in when the controller asks (a first request,
-    /// or a session that expired), once per request, and then checks the controller
-    /// (see [`Client::expect_system`]).
     pub fn get(&mut self, path: &str) -> Result<Value, RwsError> {
         if self.expect.is_none() {
             return self.fetch(path).map(|(doc, _)| doc);
@@ -420,15 +346,11 @@ impl Client {
         }
         let (doc, logged_in) = self.fetch(path)?;
         if logged_in {
-            // A new session began with this very request (the login left it unchecked):
-            // what it read waits for the check.
             self.check()?;
         }
         Ok(doc)
     }
 
-    /// Read `/rw/system` in the current session (logging in if asked) and match it
-    /// against the expected system id; the document when it matches.
     fn check(&mut self) -> Result<Value, RwsError> {
         let expected = self.expect.clone().unwrap_or_default();
         let (sys, _) = self.fetch(SYSTEM_PATH)?;
@@ -440,7 +362,6 @@ impl Client {
         Ok(sys)
     }
 
-    /// One GET, and whether it took a login.
     fn fetch(&mut self, path: &str) -> Result<(Value, bool), RwsError> {
         let mut auth: Option<String> = None;
         for _ in 0..2 {
@@ -450,14 +371,11 @@ impl Client {
                 200 => return serde_json::from_slice(&r.body).map(|d| (d, auth.is_some())).map_err(|e| RwsError::Format(e.to_string())),
                 401 if auth.is_none() => {
                     let challenge = challenge_of(&r).ok_or_else(|| RwsError::Format("a login it asks for in a way this client does not speak".into()))?;
-                    // An expired session's cookie would only confuse the new login;
-                    // whatever this answer set is kept for it.
                     self.cookies.clear();
                     self.keep_cookies(&r);
                     self.checked = false;
                     self.logins += 1;
                     let cnonce = format!("{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0) ^ (u64::from(self.logins) << 48));
-                    // A fresh nonce, answered once: its count is 1 (RFC 2617).
                     auth = Some(challenge.answer(&self.user, &self.password, path, 1, &cnonce));
                 }
                 401 => return Err(RwsError::Login),
@@ -478,8 +396,6 @@ impl Client {
         Ok(Identity { name: text(s, "ctrl-name"), kind: text(s, "ctrl-type") })
     }
 
-    /// The controller's clock, as seconds since 1970 read as if it were UTC (it has no
-    /// zone: compare it with this PC's clock for the offset).
     pub fn clock(&mut self) -> Result<i64, RwsError> {
         let doc = self.get("/ctrl/clock?json=1")?;
         let s = items(&doc).first().ok_or_else(|| RwsError::Format("no clock".into()))?;
@@ -487,9 +403,6 @@ impl Client {
         controller_time(&t).ok_or_else(|| RwsError::Format(format!("the clock \"{t}\"")))
     }
 
-    /// One page of the event log (domain 0: every event), newest first. An entry that
-    /// cannot be read (an odd stamp or name) is counted and left out, not allowed to
-    /// hide the rest of the page for as long as it stays on it.
     pub fn events(&mut self, limit: u32, page: u32) -> Result<Page, RwsError> {
         let doc = self.get(&format!("/rw/elog/0?lang=en&json=1&limit={limit}&start={page}"))?;
         let mut p = Page::default();
@@ -502,7 +415,6 @@ impl Client {
         Ok(p)
     }
 
-    /// A motor's calibration (`MOC/MOTOR_CALIB`), by instance name (`rob1_2`).
     pub fn motor_calib(&mut self, instance: &str) -> Result<MotorCalib, RwsError> {
         if instance.is_empty() || !instance.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             return Err(RwsError::Format(format!("\"{instance}\" is not a configuration instance name")));
@@ -526,7 +438,6 @@ fn system_in(doc: &Value) -> Result<System, RwsError> {
     Ok(System { name: text(s, "name"), rw_version: text(s, "rwversion"), system_id: text(s, "sysid") })
 }
 
-/// The controller's message in an error document, where it gave one.
 fn status_message(body: &[u8]) -> String {
     serde_json::from_slice::<Value>(body).ok().and_then(|v| v["_embedded"]["status"]["msg"].as_str().map(str::to_string)).unwrap_or_else(|| String::from_utf8_lossy(body).trim().chars().take(200).collect())
 }
@@ -543,8 +454,6 @@ fn text(v: &Value, key: &str) -> String {
     }
 }
 
-/// `2026-09-27 T 22:26:09` (the controller's clock and its event stamps) as seconds
-/// since 1970 read as if UTC.
 pub fn controller_time(s: &str) -> Option<i64> {
     let s = s.trim();
     let (date, time) = s.split_once('T')?;
@@ -556,8 +465,6 @@ pub fn controller_time(s: &str) -> Option<i64> {
     };
     let (y, mo, da) = (num(&mut d)?, num(&mut d)?, num(&mut d)?);
     let (h, mi, se) = (num(&mut t)?, num(&mut t)?, num(&mut t)?);
-    // A year no controller's clock shows is refused before any arithmetic: SystemTime
-    // panics past year 30827 on Windows, and a huge year overflows the day count.
     if d.next().is_some() || t.next().is_some() || !(1970..=9999).contains(&y) || !(1..=12).contains(&mo) || !(1..=31).contains(&da) || h > 23 || mi > 59 || se > 60 {
         return None;
     }
@@ -569,25 +476,20 @@ pub fn controller_time(s: &str) -> Option<i64> {
 pub struct System {
     pub name: String,
     pub rw_version: String,
-    /// The same form as the InfoStream handshake's system id (measured).
     pub system_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Identity {
     pub name: String,
-    /// "Virtual Controller" for a VC.
     pub kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
-    /// Rises with time (the last part of its `_title`).
     pub id: u64,
     pub code: u32,
-    /// 1 information, 2 warning, 3 error.
     pub severity: u8,
-    /// The controller's clock, as [`controller_time`] reads it.
     pub time: i64,
     pub title: String,
 }
@@ -611,7 +513,6 @@ impl Event {
     }
 }
 
-/// An event log entry's `msgtype` for people.
 pub fn severity_word(severity: u8) -> &'static str {
     match severity {
         1 => "information",
@@ -624,37 +525,26 @@ pub fn severity_word(severity: u8) -> &'static str {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MotorCalib {
     pub instance: String,
-    /// Commutator Offset (rad): what the resolver reads at the commutation position.
     pub com_offset: f64,
     pub com_valid: bool,
     pub cal_offset: f64,
     pub cal_valid: bool,
 }
 
-/// The `MOTOR_CALIB` instance of a robot's joint: `rob1_2` for ROB_1 axis 2. `None` for
-/// a unit not named `ROB_<n>` (an additional axis's instance is named otherwise).
 pub fn calib_instance(unit: &str, axis: u8) -> Option<String> {
     let n = unit.strip_prefix("ROB_")?;
     (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| format!("rob{n}_{axis}"))
 }
 
-// ------------------------------------------------------------------ the event log, polled
-
-/// Pages read at most per look: a burst larger than this in one look is said, not read.
 pub const POLL_PAGES: u32 = 5;
-/// Events a page, per look.
 pub const POLL_LIMIT: u32 = 10;
 
-/// One page of the event log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Page {
-    /// Newest first.
     pub events: Vec<Event>,
-    /// Entries that could not be read, left out.
     pub unreadable: usize,
 }
 
-/// What is new in the event log since the last look.
 #[derive(Debug, Default)]
 pub struct EventPoll {
     newest: Option<u64>,
@@ -662,38 +552,25 @@ pub struct EventPoll {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewEvents {
-    /// Oldest first.
     pub events: Vec<Event>,
-    /// More arrived than one look reads: the oldest of them were not read.
     pub skipped: bool,
-    /// Entries that could not be read, left out.
     pub unreadable: usize,
-    /// The log's newest entry is older than the newest seen: it was cleared or
-    /// renumbered, and this look read it afresh.
     pub renumbered: bool,
 }
 
 impl EventPoll {
-    /// A poll that has seen up to `newest` already (a login again: what happened
-    /// meanwhile is read back to it, not just the newest page).
     pub fn after(newest: u64) -> EventPoll {
         EventPoll { newest: Some(newest) }
     }
 
-    /// Where the poll stands, to go back to (a look whose events cannot be used).
     pub fn mark(&self) -> Option<u64> {
         self.newest
     }
 
-    /// Back to a mark: the next look reads again what was read since.
     pub fn restore(&mut self, mark: Option<u64>) {
         self.newest = mark;
     }
 
-    /// The first look takes the newest page as it stands; later ones read back until
-    /// an event already seen. A log whose newest entry is older than the newest seen
-    /// was cleared or renumbered (its ids start again): read afresh, and said, rather
-    /// than every later event taken for one already seen.
     pub fn look(&mut self, c: &mut Client) -> Result<NewEvents, RwsError> {
         let mut fresh: Vec<Event> = Vec::new();
         let mut reached = false;
@@ -715,15 +592,11 @@ impl EventPoll {
                     reached = true;
                     break;
                 }
-                // An event logged between two pages' reads shifts the next page down
-                // by one: its first entry is then the last one already read.
                 if fresh.iter().any(|f| f.id == e.id) {
                     continue;
                 }
                 fresh.push(e);
             }
-            // Reached what was seen, a first look's page, or the log's end. Read afresh
-            // after a clear, a full page may have had more behind it.
             if reached || self.newest.is_none() || n < POLL_LIMIT as usize {
                 reached = !(renumbered && n >= POLL_LIMIT as usize);
                 break;
@@ -758,13 +631,11 @@ mod tests {
 
     #[test]
     fn a_digest_answer_as_rfc_2617_gives_it() {
-        // The RFC's own example.
         let c = Challenge::parse(r#"Digest realm="testrealm@host.com", qop="auth,auth-int", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", opaque="5ccc069c403ebaf9f0171e9517f40e41""#).unwrap();
         assert_eq!(c.qop.as_deref(), Some("auth"));
         let h = c.answer("Mufasa", "Circle Of Life", "/dir/index.html", 1, "0a4f113b");
         assert!(h.contains("response=\"6629fae49393a05397450978507c4ef1\""), "{h}");
         assert!(h.contains("nc=00000001") && h.contains("cnonce=\"0a4f113b\"") && h.contains("opaque=\"5ccc069c403ebaf9f0171e9517f40e41\""), "{h}");
-        // Unquoted values, a comma inside quotes, and what is not Digest.
         let p = digest_params(r#"Digest realm="a, b", nonce=xyz, qop=auth"#).unwrap();
         assert_eq!(p, vec![("realm".into(), "a, b".into()), ("nonce".into(), "xyz".into()), ("qop".into(), "auth".into())]);
         assert!(Challenge::parse("Basic realm=\"x\"").is_none());
@@ -787,14 +658,11 @@ mod tests {
 
     #[test]
     fn a_chunked_answer_cut_after_a_chunk_is_refused_not_a_panic() {
-        // What a connection dropped mid-answer leaves.
         for cut in [&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab"[..], b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n"] {
             assert!(parse_response(cut).is_err(), "{}", String::from_utf8_lossy(cut));
         }
     }
 
-    /// One answer to one request, written in parts 150 ms apart, then the connection
-    /// kept open for 8 s (a server that ignores `Connection: close`) or closed; its port.
     fn one_answer_server(parts: &'static [&'static [u8]], hold: bool) -> u16 {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
@@ -826,7 +694,6 @@ mod tests {
             assert_eq!(r.body, b"{}");
             assert!(t0.elapsed() < Duration::from_secs(2), "waited {:?} for a close that never came", t0.elapsed());
         }
-        // No length and no chunks: the body runs to the close, not to the first read.
         let port = one_answer_server(&[b"HTTP/1.0 200 OK\r\n\r\n{\"a\"", b": 1}"], false);
         assert_eq!(get_raw("127.0.0.1", port, "/", "", None).unwrap().body, b"{\"a\": 1}");
     }
@@ -843,8 +710,6 @@ mod tests {
     fn the_controllers_clock_reads_as_it_writes_it() {
         assert_eq!(controller_time("2026-09-27 T 22:26:09"), Some(1_790_547_969));
         assert_eq!(controller_time("1970-01-01 T 00:00:00"), Some(0));
-        // A year no clock shows: refused, not carried into time arithmetic that panics
-        // (SystemTime past year 30827 on Windows) or overflows.
         for bad in ["2026-02-30 T 10:00:00", "2026-09-27 22:26:09", "2026-09-27 T 25:00:00", "2026-09-27 T 22:26", "x", "40000-01-01 T 00:00:00", "99999999999999999-01-01 T 00:00:00", "1969-12-31 T 23:59:59"] {
             assert_eq!(controller_time(bad), None, "{bad}");
         }
@@ -860,7 +725,6 @@ mod tests {
 
     #[test]
     fn a_trickling_answer_ends_at_the_deadline() {
-        // A byte every 300 ms, for ever: each read is inside the read timeout.
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -885,9 +749,6 @@ mod tests {
 
     #[test]
     fn an_event_is_placed_within_a_second_of_when_it_happened() {
-        // The controller's clock and its stamps are whole seconds; the true offset can
-        // be any fraction. Over every phase, the placing is never more than a second
-        // (and the clock read's half round trip) out, which the recordings' slack covers.
         let mut worst = 0i64;
         for true_offset_ms in [-14_400_900i64, -14_400_000, -14_400_001, -14_399_999, 3_600_500, 0, 999] {
             for phase in (0..1000).step_by(37) {
@@ -902,8 +763,6 @@ mod tests {
             }
         }
         assert!(worst <= 1012, "placed up to {worst} ms out");
-        // Where in its round trip the controller read its clock is unknown: up to half
-        // the round trip more, and a slower read is not used.
         assert!(EVENT_SLACK_MS >= worst + MAX_CLOCK_RTT_MS / 2, "a recording's slack ({EVENT_SLACK_MS} ms) is less than the placing error ({worst} ms and half a round trip)");
         assert_eq!(clock_offset_ms(1_790_000_000, 1_790_000_000_000, 1_790_000_000_000 + MAX_CLOCK_RTT_MS + 1), None, "a slow clock read is not used");
         assert_eq!(clock_offset_ms(1_790_000_000, 1_790_000_000_000, 1_789_999_999_000), None, "nor one whose PC clock stepped back");

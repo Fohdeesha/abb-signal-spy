@@ -12,8 +12,6 @@ name = "signal-spy-probe"
 path = "src/main.rs"
 
 [dependencies]
-# The fake controller is for the self-test only; it binds loopback, on a port the
-# OS picks, and never runs unless asked for.
 signal-spy-core = { path = "../core", features = ["fake"] }
 
 [target.'cfg(windows)'.dependencies]

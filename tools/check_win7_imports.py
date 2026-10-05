@@ -1,31 +1,12 @@
 #!/usr/bin/env python3
-"""Check a built .exe's import table for anything Windows 7 SP1 (x64) does not have.
-
-A Windows 7 build that imports one function Windows 7 lacks does not start at all
-("entry point not found"), and a dependency update can bring one in silently. This
-reads the import table with dumpbin (Visual Studio's) and refuses:
-
-  * DLLs Windows 7 does not have (combase.dll, shcore.dll, dcomp.dll, ...) and any
-    API-set import ("api-ms-win-*"): Windows 7 has only a few API sets, as stubs, and
-    with the C runtime linked statically none should be imported;
-  * functions that arrived in Windows 8 or later, from a list of the ones Rust's
-    standard library and the window libraries are known to use;
-  * with --verified FILE: any function not in that file, the import set of a build
-    seen running on a real Windows 7 PC (made with --write-verified after such a test).
-
-usage: check_win7_imports.py EXE [--verified FILE] [--write-verified FILE]
-Exit 0: nothing refused. 1: refused imports (listed). 2: could not read the exe.
-"""
 import os, re, subprocess, sys
 
-# Present in Windows 7 SP1 with no Windows 7-era updates needed, or absent there.
+USAGE = "usage: check_win7_imports.py EXE [--verified FILE] [--write-verified FILE]"
 NOT_ON_WIN7_DLLS = {
     "combase.dll", "shcore.dll", "dcomp.dll", "d3d12.dll", "dxcore.dll", "bcryptprimitives.dll",
     "windows.storage.dll", "twinapi.appcore.dll", "coremessaging.dll", "vcruntime140.dll",
     "vcruntime140_1.dll", "msvcp140.dll", "ucrtbase.dll",
 }
-# Windows 8 or later; the ones known to be imported by Rust's std (for its Windows 10
-# target), winit, wgpu, accesskit and friends when not loaded at run time.
 WIN8_PLUS_FUNCTIONS = {
     "GetSystemTimePreciseAsFileTime", "WaitOnAddress", "WakeByAddressSingle", "WakeByAddressAll",
     "SetThreadDescription", "GetThreadDescription", "ProcessPrng", "CreateFile2",
@@ -57,8 +38,6 @@ def imports(exe):
     out = subprocess.run([dumpbin(), "/nologo", "/imports", exe], capture_output=True, text=True, errors="replace").stdout
     table, dll = {}, None
     for line in out.splitlines():
-        # The section sizes after the imports ("  Summary", "  1000 .data") are not
-        # functions.
         if line.strip() == "Summary":
             break
         m = re.match(r"^\s{4}(\S+\.(?:dll|DLL|drv))$", line)
@@ -78,7 +57,7 @@ def imports(exe):
 def main():
     args = sys.argv[1:]
     if not args or not os.path.isfile(args[0]):
-        print(__doc__)
+        print(USAGE)
         return 2
     exe = args[0]
     verified = None

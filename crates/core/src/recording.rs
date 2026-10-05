@@ -1,37 +1,3 @@
-//! Recording to disk.
-//!
-//! A recording is a folder:
-//!
-//! ```text
-//! 2026-09-25_14-03-07 dc link dip/
-//!   data.csv         controller_ms,channel,value        one row per sample (full rate,
-//!                                                       and "save the last N seconds")
-//!   slow.csv         controller_ms,channel,count,mean,min,max   one row per channel per
-//!                                                       interval (slow logging)
-//!   recording.json   what was recorded, from where, and what happened meanwhile
-//! ```
-//!
-//! `controller_ms` is the controller's own clock in milliseconds (its uptime on a
-//! virtual controller). It only goes backwards if the controller restarted during
-//! the recording, and `recording.json` lists every such reset. `channel` is an id
-//! like `4002/ROB_1/2` (signal / mechanical unit / one-based axis) that
-//! `recording.json` expands into a name, units and a description.
-//!
-//! Loading one in Python:
-//!
-//! ```python
-//! import json, pandas as pd
-//! meta = json.load(open("recording.json"))
-//! df = pd.read_csv("data.csv")
-//! wide = df.pivot_table(index="controller_ms", columns="channel", values="value")
-//! ```
-//!
-//! The recorder writes from its own thread off a bounded queue: a slow disk can
-//! lose samples (counted, shown, and written into `recording.json`), but it can
-//! never stall the socket. `recording.json` is rewritten atomically every few
-//! seconds, so a recording cut short by a crash is still described; `complete`
-//! says whether it was closed properly.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufWriter, Read, Write};
@@ -49,10 +15,7 @@ use crate::timeline::Timeline;
 use crate::util::{local_stamp, wall_iso};
 
 pub const FORMAT: &str = "abb-signal-spy-recording";
-/// 2 (2026-09-27): channel ids name the joint (`4002/ROB_1/J2`, was `4002/ROB_1/2`),
-/// and every anchor says the first row it maps.
 pub const VERSION: u32 = 2;
-/// Events the recorder may fall behind by before samples are lost.
 pub const QUEUE: usize = 65_536;
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 const SIDECAR_EVERY: Duration = Duration::from_secs(5);
@@ -60,15 +23,11 @@ const SIDECAR_EVERY: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    /// Every sample.
     Full,
-    /// Count, mean, min and max per interval.
     Slow,
-    /// The live history's last N seconds.
     Snapshot,
 }
 
-/// What the window knows about a channel, beyond its key.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChannelInfo {
     pub name: String,
@@ -113,8 +72,6 @@ pub struct EventEntry {
 pub struct Anchor {
     pub controller_ms: i64,
     pub utc: String,
-    /// The first data row (counted from 0, header not counted) this anchor maps; it
-    /// applies until the next anchor's row. Absent in format 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<u64>,
 }
@@ -140,8 +97,6 @@ pub struct Meta {
     #[serde(default)]
     pub label: String,
     pub channels: Vec<ChannelEntry>,
-    /// The wall clock at controller times, one per connection: `controller_ms` to
-    /// UTC is `utc + (t - controller_ms)` from the nearest earlier anchor.
     #[serde(default)]
     pub anchors: Vec<Anchor>,
     #[serde(default)]
@@ -149,16 +104,11 @@ pub struct Meta {
     #[serde(default)]
     pub markers: Vec<EventEntry>,
     pub rows_written: u64,
-    /// Samples the recorder could not keep up with. Nonzero means the data has holes.
     pub samples_lost: u64,
-    /// Connection events (connected, lost, clock resets) lost the same way: the
-    /// `events` list is then incomplete. Every loss re-anchors the wall clock.
     #[serde(default)]
     pub events_lost: u64,
     #[serde(default)]
     pub notes: String,
-    /// The derived channels shown while recording, as last set (a review computes
-    /// them again from the recorded inputs; their changes are in `events`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub derived: Vec<crate::derived::Derived>,
 }
@@ -210,15 +160,9 @@ fn entry(key: &ChannelKey, info: Option<&ChannelInfo>) -> ChannelEntry {
     }
 }
 
-/// A new, unused folder under `base` named for now and the label.
 pub fn new_folder(base: &Path, label: &str) -> Result<PathBuf, String> {
-    // Cut to length first, then trimmed: Windows drops a trailing space or dot when
-    // it creates a folder, and the files would then be written under a name that
-    // does not exist.
     let label: String = label.chars().map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' }).take(60).collect();
     let label = label.trim_matches(|c: char| c == ' ' || c == '.').to_string();
-    // The local clock: the one the window shows and a person looks for a recording by
-    // (recording.json keeps exact UTC).
     let now = local_stamp(SystemTime::now());
     let stem = if label.is_empty() { now } else { format!("{now} {label}") };
     std::fs::create_dir_all(base).map_err(|e| format!("cannot create {}: {e}", base.display()))?;
@@ -242,8 +186,6 @@ fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
 fn write_meta_text(dir: &Path, body: &str) -> Result<(), String> {
     let tmp = dir.join("recording.json.tmp");
     let fin = dir.join("recording.json");
-    // On disk before the rename: after a power cut the renamed file could otherwise
-    // be empty, and the whole recording then unreadable.
     let write = || -> std::io::Result<()> {
         let mut f = File::create(&tmp)?;
         f.write_all(body.as_bytes())?;
@@ -253,9 +195,6 @@ fn write_meta_text(dir: &Path, body: &str) -> Result<(), String> {
     std::fs::rename(&tmp, &fin).map_err(|e| format!("cannot replace {}: {e}", fin.display()))
 }
 
-/// `write_meta`, tried a few times over about `patience`: on Windows the replace
-/// fails while another program (a sync client such as OneDrive, a virus scanner, a
-/// previewer) has the file open, which is usually brief.
 fn write_meta_patiently(dir: &Path, meta: &Meta, patience: Duration) -> Result<(), String> {
     let end = Instant::now() + patience;
     loop {
@@ -267,13 +206,10 @@ fn write_meta_patiently(dir: &Path, meta: &Meta, patience: Duration) -> Result<(
     }
 }
 
-/// CSV text for a string sample: always quoted, quotes doubled.
 fn csv_text(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// A number as the controller sent it: an f32 prints in its shortest exact form, an
-/// int as an integer.
 fn csv_number(v: f64, kind: ValueKind) -> String {
     match kind {
         ValueKind::Int if v.is_finite() => format!("{}", v as i64),
@@ -294,8 +230,6 @@ fn csv_number(v: f64, kind: ValueKind) -> String {
 pub enum RecState {
     Recording,
     Finished,
-    /// Closed properly by the recorder itself, for the reason given (the controller
-    /// behind the address changed).
     Ended(String),
     Failed(String),
 }
@@ -309,8 +243,6 @@ pub struct RecStatus {
     pub lost: u64,
     pub started: Instant,
     pub bytes: u64,
-    /// Something the person should know that has not stopped the recording (the
-    /// description file could not be rewritten just now).
     pub warning: Option<String>,
 }
 
@@ -322,8 +254,6 @@ enum Cmd {
     Stop,
 }
 
-/// A running recording (full rate or slow). Stop it to close it properly; dropping
-/// it also closes it.
 pub struct Recorder {
     tx: Sender<Cmd>,
     status: Arc<Mutex<RecStatus>>,
@@ -331,8 +261,6 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Start recording every sample the session receives from now on, into a new
-    /// folder under `base`. `interval_ms` makes it a slow log instead.
     pub fn start(
         session: &Session,
         base: &Path,
@@ -373,8 +301,6 @@ impl Recorder {
         out.write_all(header.as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         let mut meta = Meta::new(kind, label, controller, system_id);
         meta.interval_ms = interval_ms;
-        // Channels already streaming when the recording starts are listed up front,
-        // with what the controller said about them.
         for (key, stream, ms, vt) in defined {
             let mut e = entry(&key, infos.get(&key));
             e.stream_id = stream;
@@ -397,24 +323,18 @@ impl Recorder {
         Ok(Recorder { tx, status, thread: Some(thread) })
     }
 
-    /// A marker at `controller_ms` (the controller's clock at the moment it was
-    /// placed; the newest sample written so far if `None`).
     pub fn marker(&self, label: &str, controller_ms: Option<i64>) {
         let _ = self.tx.send(Cmd::Marker { label: label.to_string(), controller_ms, wall: SystemTime::now() });
     }
 
-    /// Name, units and description for a channel added after the recording began.
     pub fn info(&self, key: ChannelKey, info: ChannelInfo) {
         let _ = self.tx.send(Cmd::Info(key, info));
     }
 
-    /// The derived channels now shown, and what changed (kept as an event).
     pub fn derived(&self, defs: Vec<crate::derived::Derived>, change: Option<String>) {
         let _ = self.tx.send(Cmd::Derived { defs, change, wall: SystemTime::now() });
     }
 
-    /// Something that happened at `wall` (an entry of the controller's event log), kept
-    /// among the recording's events.
     pub fn event(&self, kind: &str, text: &str, wall: SystemTime) {
         let _ = self.tx.send(Cmd::Event { kind: kind.to_string(), text: text.to_string(), wall });
     }
@@ -427,7 +347,6 @@ impl Recorder {
         self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Close the recording and wait for the files to be written.
     pub fn stop(mut self) -> RecStatus {
         self.finish();
         self.status()
@@ -447,8 +366,6 @@ impl Drop for Recorder {
     }
 }
 
-/// A channel already streaming when a recording starts: key, stream id, sample time
-/// and record type, as the controller reported them.
 type Defined = (ChannelKey, Option<u32>, Option<f64>, Option<ValueKind>);
 
 fn session_defined(session: &Session) -> Vec<Defined> {
@@ -483,18 +400,9 @@ struct Writer {
     slow: HashMap<String, Bucket>,
     interval: Option<i64>,
     bytes: u64,
-    /// The next sample anchors controller time to the wall clock: the first one,
-    /// the first after every reconnect (a restarted controller's clock is new), and
-    /// the first after any loss (the lost events may have included a reconnect).
     need_anchor: bool,
-    /// The clock the open slow-log intervals were counted on has ended (a reconnect
-    /// or a reset): they are written before the next anchor, so its row does not
-    /// claim them.
     segment_break: bool,
-    /// Why the recorder closed itself: the controller behind the address changed, and
-    /// nothing more may be filed as this recording's.
     ended: Option<String>,
-    /// The tap's loss counters (samples, events) last looked at.
     seen_lost: (u64, u64),
 }
 
@@ -521,9 +429,6 @@ impl Writer {
                         self.infos.insert(key, info);
                     }
                     Ok(Cmd::Derived { defs, change, wall }) => {
-                        // A target or plateau changed (not a derived channel added or
-                        // removed): a review computes everything with the last one,
-                        // and says so.
                         let setting = defs.iter().any(|d| self.meta.derived.iter().any(|o| o.same(d) && o != d));
                         self.meta.derived = defs;
                         if let Some(text) = change {
@@ -548,7 +453,6 @@ impl Writer {
                     }
                     Ok(TapEvent::Mark { wall, mark }) => self.mark(wall, mark),
                     Err(RecvTimeoutError::Timeout) => {}
-                    // The session is gone; nothing more will come.
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
                 if self.ended.is_some() {
@@ -568,10 +472,6 @@ impl Writer {
                     self.save_meta();
                 }
             }
-            // Write what was already queued when the stop came, and no more: the
-            // session keeps feeding the tap until this thread lets go of it, so
-            // "until empty" could chase a live feed for as long as it runs. After
-            // the controller changed, what is queued is the other one's.
             for _ in 0..QUEUE {
                 if self.ended.is_some() {
                     break;
@@ -607,17 +507,12 @@ impl Writer {
         };
     }
 
-    /// Rewrite recording.json. A failure does not end the recording (the CSV file
-    /// is the data; the description is rewritten every few seconds anyway): it is
-    /// shown, and cleared by the next write that works.
     fn save_meta(&mut self) {
         let r = write_meta_patiently(&self.dir, &self.meta, Duration::from_millis(200));
         let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
         s.warning = r.err().map(|e| format!("{e}; still recording, and trying again"));
     }
 
-    /// Take in the tap's loss counters. Lost events may have included a reconnect,
-    /// so the next sample anchors the wall clock afresh.
     fn note_losses(&mut self) {
         let now = (self.tap.dropped.load(Ordering::Relaxed), self.tap.dropped_events.load(Ordering::Relaxed));
         if now != self.seen_lost {
@@ -645,11 +540,6 @@ impl Writer {
                 self.need_anchor = true;
                 self.segment_break = true;
                 let target = target.to_string();
-                // Another controller: a cable moved to the next robot at the same
-                // service address, or a reconnect that reached a different one. Its
-                // samples must not continue this recording under the same channel ids.
-                // The same system at another address is the same controller: a virtual
-                // controller takes a new port at every start, and the session follows it.
                 let other = match (&self.meta.system_id, &system_id) {
                     (Some(was), Some(now)) if was != now => Some(format!("the controller at {target} is a different one (system {now}; this recording is of system {was})")),
                     (Some(_), Some(_)) => None,
@@ -677,7 +567,6 @@ impl Writer {
             Mark::Lost { reason } => ("lost", reason),
             Mark::Disconnected => ("disconnected", "disconnected".into()),
             Mark::ClockReset { from_raw, to_raw } => {
-                // A clock that restarted or jumped: the old anchor no longer maps it.
                 self.need_anchor = true;
                 self.segment_break = true;
                 if to_raw < from_raw {
@@ -709,8 +598,6 @@ impl Writer {
             c.first_controller_ms.get_or_insert(first);
             if self.need_anchor {
                 self.need_anchor = false;
-                // When the frame arrived, not when this thread got to it: with a
-                // backlog those differ by the backlog.
                 self.meta.anchors.push(Anchor { controller_ms: first, utc: wall_iso(b.arrived), row: Some(self.meta.rows_written) });
             }
         }
@@ -724,7 +611,6 @@ impl Writer {
                 let start = t - t.rem_euclid(interval);
                 let bucket = self.slow.entry(id.clone()).or_insert_with(|| Bucket { start, count: 0, sum: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY });
                 if bucket.start != start {
-                    // A new interval (or a controller restart): the old one is done.
                     let done = std::mem::replace(bucket, Bucket { start, count: 0, sum: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY });
                     write_bucket(&mut self.out, &id, &done, &mut self.bytes, &mut self.meta.rows_written)?;
                 }
@@ -779,9 +665,6 @@ fn write_bucket(out: &mut BufWriter<File>, id: &str, b: &Bucket, bytes: &mut u64
     Ok(())
 }
 
-/// "Save the last N seconds": write the live history's last `seconds` for these
-/// channels into a new folder, with the derived channels shown. Rows are in time
-/// order across channels.
 #[allow(clippy::too_many_arguments)]
 pub fn write_snapshot(
     base: &Path,
@@ -800,7 +683,6 @@ pub fn write_snapshot(
     }
     let newest = keys.iter().filter_map(|k| store.get(k)).filter_map(|c| c.lock().last().map(|(t, _)| t)).max().ok_or("there is no history to save yet")?;
     let from = newest - (seconds * 1000.0).round() as i64;
-    // Copy out under each channel's lock briefly, then write without holding any.
     let mut rows: Vec<(i64, usize, f64)> = Vec::new();
     let mut meta = Meta::new(Kind::Snapshot, label, controller, system_id);
     meta.derived = derived.to_vec();
@@ -811,7 +693,6 @@ pub fn write_snapshot(
             e.sample_ms = Some(r.sample_ms);
             e.value_type = r.kind;
             if r.kind == Some(ValueKind::String) {
-                // The live history keeps only when a string event came, not its text.
                 meta.notes = "String signals are not kept in the live history; use record to keep their text.".into();
                 meta.channels.push(e);
                 continue;
@@ -834,9 +715,6 @@ pub fn write_snapshot(
     for (row, &(t, idx, v)) in rows.iter().enumerate() {
         let kind = meta.channels[idx].value_type.unwrap_or(ValueKind::Float);
         let c = timeline.controller_ms(t);
-        // One anchor per clock segment, at its first row: across a restart the
-        // controller's clock starts again, and each side needs its own mapping. The
-        // chart timeline runs on with the wall clock across the gap, so it gives both.
         let seg = timeline.segment_start(t);
         if segment != Some(seg) {
             segment = Some(seg);
@@ -857,20 +735,14 @@ pub fn write_snapshot(
     Ok((dir, rows.len() as u64))
 }
 
-/// A recording read back: its description and every channel's samples.
 #[derive(Debug, Clone)]
 pub struct Loaded {
     pub meta: Meta,
-    /// channel id -> (controller_ms, value); for a slow log, the mean.
     pub data: BTreeMap<String, Vec<(i64, f64)>>,
-    /// channel id -> (controller_ms, text), for string signals.
     pub text: BTreeMap<String, Vec<(i64, String)>>,
-    /// Rows that did not parse, with the line each started on (the first 20).
     pub bad_rows: Vec<usize>,
 }
 
-/// The recordings in `base`'s subfolders, newest first (by when they started). A
-/// folder without a readable description is not a recording and is left out.
 pub fn list(base: &Path) -> Vec<(PathBuf, Meta)> {
     let Ok(entries) = std::fs::read_dir(base) else { return Vec::new() };
     let mut out: Vec<(PathBuf, Meta)> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).filter_map(|p| read_meta(&p).ok().map(|m| (p, m))).collect();
@@ -878,9 +750,6 @@ pub fn list(base: &Path) -> Vec<(PathBuf, Meta)> {
     out
 }
 
-/// A recording's description, checked, with every channel under the id this program
-/// writes now, whichever form the file has (format 1 wrote the bare axis number); an
-/// id that does not parse stays as it is.
 pub fn read_meta(dir: &Path) -> Result<Meta, String> {
     let meta_text = std::fs::read_to_string(dir.join("recording.json")).map_err(|e| format!("cannot read recording.json: {e}"))?;
     let mut meta: Meta = serde_json::from_str(crate::util::strip_bom(&meta_text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
@@ -896,10 +765,6 @@ pub fn read_meta(dir: &Path) -> Result<Meta, String> {
     Ok(meta)
 }
 
-/// Add events to a recording already written: the controller's event log is looked
-/// at every few seconds, so an event from its last moments can arrive after it
-/// closed. One already there is not added again; the events stay in time order, and
-/// the rest of the file is kept exactly as it is. How many were added.
 pub fn append_events(dir: &Path, add: &[EventEntry]) -> Result<usize, String> {
     let text = std::fs::read_to_string(dir.join("recording.json")).map_err(|e| format!("cannot read recording.json: {e}"))?;
     let mut doc: serde_json::Value = serde_json::from_str(crate::util::strip_bom(&text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
@@ -930,10 +795,6 @@ pub fn append_events(dir: &Path, add: &[EventEntry]) -> Result<usize, String> {
     }
 }
 
-/// Read a recording folder. Rows that do not parse are skipped and reported, not
-/// fatal: a recording cut short by a crash ends in a partial line. The CSV is read
-/// as CSV (a quoted string may hold commas, quotes and line breaks), a row at a
-/// time.
 pub fn read(dir: &Path) -> Result<Loaded, String> {
     let meta = read_meta(dir)?;
     let mut ids: HashMap<String, String> = HashMap::new();
@@ -982,28 +843,18 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
     Ok(Loaded { meta, data, text, bad_rows: bad })
 }
 
-/// RFC 4180 rows from a reader: fields split on commas, a quoted field may hold
-/// commas, doubled quotes and line breaks.
 pub(crate) struct CsvRows<R: std::io::BufRead> {
     pub(crate) r: R,
     pub(crate) line: usize,
-    /// A read failed (a share gone, a bad sector): the rows end there, and the
-    /// reason is kept for the caller rather than retried forever.
     pub(crate) error: Option<String>,
-    /// A last line with no newline is cut short (the recorder ends every row with
-    /// one): for a recording that never finished. A hand-made file may lack it.
     pub(crate) strict_end: bool,
 }
 
-/// Longer than any row this program writes by far; bounds what an unterminated
-/// quote can make it gather.
 const MAX_ROW: usize = 1 << 20;
 
-/// A row: the line it started on, and each field with whether it was quoted.
 pub(crate) type CsvRow = (usize, Vec<(String, bool)>);
 
 impl<R: std::io::BufRead> CsvRows<R> {
-    /// The next row, `Err(line)` for one that is malformed, `None` at the end.
     pub(crate) fn next_row(&mut self) -> Option<Result<CsvRow, usize>> {
         if self.error.is_some() {
             return None;
@@ -1017,12 +868,9 @@ impl<R: std::io::BufRead> CsvRows<R> {
         let mut row_bytes = 0usize;
         loop {
             bytes.clear();
-            // Bounded: a line with no end (a damaged or foreign file) is read no
-            // further than MAX_ROW, then skipped to its end.
             let room = (MAX_ROW + 1).saturating_sub(row_bytes);
             match (&mut self.r).take(room as u64).read_until(b'\n', &mut bytes) {
                 Ok(0) if self.line + 1 == start => return None,
-                // The file ends inside a row: cut short.
                 Ok(0) => return Some(Err(start)),
                 Ok(_) => self.line += 1,
                 Err(e) => {
@@ -1037,7 +885,6 @@ impl<R: std::io::BufRead> CsvRows<R> {
                 }
                 return Some(Err(start));
             }
-            // A line short of MAX_ROW with no newline ends the file.
             if self.strict_end && bytes.last() != Some(&b'\n') {
                 return Some(Err(start));
             }
@@ -1075,7 +922,6 @@ impl<R: std::io::BufRead> CsvRows<R> {
         }
     }
 
-    /// Discard the rest of an over-long line, a buffer at a time.
     fn skip_line(&mut self) {
         loop {
             let (n, done) = match self.r.fill_buf() {
@@ -1104,7 +950,6 @@ mod tests {
 
     #[test]
     fn numbers_print_as_sent() {
-        // The shortest text that reads back as the same f32: exact, and no longer.
         assert_eq!(csv_number(f64::from(0.942_707_96_f32), ValueKind::Float), "0.94270796");
         assert_eq!("0.94270796".parse::<f32>().unwrap(), 0.942_707_96_f32);
         assert_eq!(csv_number(356.7_f32 as f64, ValueKind::Float), "356.7");
@@ -1121,15 +966,11 @@ mod tests {
         assert_ne!(a, b);
         let name = a.file_name().unwrap().to_string_lossy().to_string();
         assert!(name.ends_with("dc link_ dip_1_"), "{name}");
-        // Cut at 60 characters right after a space: Windows would drop the space
-        // from the folder and the files would go to a name that does not exist.
         let long = format!("{} b", "a".repeat(59));
         let c = new_folder(&base, &long).unwrap();
         let name = c.file_name().unwrap().to_string_lossy().to_string();
         assert!(!name.ends_with(' ') && !name.ends_with('.'), "{name:?}");
         std::fs::write(c.join("data.csv"), "x").unwrap();
-        // Named on the local clock, the one the window shows and a person looks for
-        // the recording by (discriminating only off UTC).
         let before = crate::util::local_stamp(SystemTime::now());
         let d = new_folder(&base, "").unwrap();
         let after = crate::util::local_stamp(SystemTime::now());
@@ -1163,7 +1004,6 @@ mod tests {
         let base = temp("chase");
         let (tx, tap) = manual_tap(QUEUE);
         let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "test", None, Vec::new()).unwrap();
-        // A feed that keeps coming faster than the disk takes it.
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let feeder = {
             let running = running.clone();
@@ -1184,7 +1024,6 @@ mod tests {
             let _ = done_tx.send(st);
         });
         let st = done_rx.recv_timeout(Duration::from_secs(10));
-        // Unstick the old behaviour either way, so a failure does not hang the run.
         running.store(false, Ordering::Relaxed);
         let st = st.expect("stop() was still chasing the live feed after 10 s");
         stopper.join().unwrap();
@@ -1199,7 +1038,6 @@ mod tests {
         let dropped = tap.dropped.clone();
         let dropped_events = tap.dropped_events.clone();
         let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "test", None, Vec::new()).unwrap();
-        // Anchored at when the frame arrived, not when the writer got to it.
         let mut first = batch(1000, 3);
         let arrived = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
         if let TapEvent::Samples(b) = &mut first {
@@ -1207,7 +1045,6 @@ mod tests {
         }
         tx.send(first).unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        // The session lost 5 samples and a mark to this recorder meanwhile.
         dropped.fetch_add(5, Ordering::Relaxed);
         dropped_events.fetch_add(1, Ordering::Relaxed);
         tx.send(batch(2000, 3)).unwrap();
@@ -1229,8 +1066,6 @@ mod tests {
         let (tx, tap) = manual_tap(64);
         let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "test", None, Vec::new()).unwrap();
         let dir = rec.status().dir;
-        // Open without delete sharing, as some sync clients and scanners hold files:
-        // replacing it fails until they let go.
         const FILE_SHARE_READ: u32 = 1;
         let lock = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(dir.join("recording.json")).unwrap();
         rec.marker("while locked", Some(1));
@@ -1287,8 +1122,6 @@ mod tests {
 
     #[test]
     fn a_different_controller_behind_the_address_ends_the_recording() {
-        // Every IRC5's service port is 192.168.125.1: a cable moved from one robot to
-        // the next reconnects to a different controller at the same address.
         let base = temp("other");
         let (tx, tap) = manual_tap(64);
         let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "192.168.125.1:5515", Some("{A}".into()), Vec::new()).unwrap();
@@ -1333,7 +1166,6 @@ mod tests {
         meta.version = 1;
         meta.events.push(EventEntry { utc: "2026-09-28T10:00:02.000Z".into(), kind: "connected".into(), text: "c".into(), controller_ms: Some(5) });
         write_meta(&dir, &meta).unwrap();
-        // A format 1 channel id, as the cell's recordings of 2026-09-26 have it.
         let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("recording.json")).unwrap()).unwrap();
         doc["channels"] = serde_json::json!([{"id": "4002/ROB_1/2", "signal": 4002, "unit": "ROB_1", "axis": 2, "name": "Torque", "units": "Nm"}]);
         std::fs::write(dir.join("recording.json"), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
@@ -1350,9 +1182,6 @@ mod tests {
 
     #[test]
     fn anchors_say_which_rows_they_map() {
-        // After a restart the controller's clock starts again, so the same
-        // controller_ms can occur on both sides: the anchor that applies to a row is
-        // the last one at or before it in the file, not the nearest in value.
         let base = temp("rows");
         let (tx, tap) = manual_tap(64);
         let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "t", None, Vec::new()).unwrap();
@@ -1367,8 +1196,6 @@ mod tests {
 
     #[test]
     fn a_slow_log_closes_its_open_intervals_at_a_restart() {
-        // The interval open when the clock restarted belongs to the old clock: it is
-        // written before the new anchor, so the anchor's row does not claim it.
         let base = temp("slowreset");
         let (tx, tap) = manual_tap(64);
         let rec = Recorder::start_with(tap, &base, "", Some(100), &HashMap::new(), "t", None, Vec::new()).unwrap();
@@ -1387,8 +1214,6 @@ mod tests {
 
     #[test]
     fn a_recording_from_before_the_joint_ids_reads_back_under_them() {
-        // The cell's recordings of 2026-09-26 wrote 4002/ROB_1/2; this program now
-        // writes 4002/ROB_1/J2. Both read back the same.
         let dir = temp("v1");
         let mut meta = Meta::new(Kind::Full, "", "192.0.2.77:5515", None);
         meta.version = 1;
@@ -1423,9 +1248,6 @@ mod tests {
 
     #[test]
     fn a_line_without_an_end_is_one_bad_row() {
-        // 50 MB with no newline (a crash can leave a run of zero bytes in a file):
-        // one bad row, read a bounded piece at a time and skipped to its end, and the
-        // rows after it read as usual.
         struct Runaway {
             left: usize,
             tail: std::io::Cursor<&'static [u8]>,
@@ -1451,9 +1273,6 @@ mod tests {
 
     #[test]
     fn a_snapshot_across_a_restart_anchors_each_clock() {
-        // "Save the last N seconds" right after a controller restart: the rows before
-        // it are on the old clock and those after on the new one, each with its own
-        // anchor at its first row.
         let store = Store::new();
         let key = ChannelKey::parse_id("4002/ROB_1/J1").unwrap();
         let ch = store.channel(&key, 4.0);

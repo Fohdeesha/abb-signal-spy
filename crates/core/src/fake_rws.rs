@@ -1,9 +1,3 @@
-//! An in-process stand-in for an IRC5's RWS 1.0, the resources the RWS extras read,
-//! answered as the RW6 VC answered them (measured 2026-09-27): a
-//! Digest login then a session cookie, JSON documents, the event log newest first by
-//! `limit` and `start`. It records every request, so a test can check that nothing but
-//! GETs was ever sent. Loopback only.
-
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,7 +13,6 @@ pub struct FakeEvent {
     pub id: u64,
     pub code: u32,
     pub severity: u8,
-    /// The controller's clock, seconds since 1970 read as if UTC.
     pub time: i64,
     pub title: String,
 }
@@ -33,28 +26,14 @@ pub struct RwsBehaviour {
     pub system_id: String,
     pub ctrl_name: String,
     pub ctrl_type: String,
-    /// The controller's clock minus this PC's UTC, seconds.
     pub clock_offset_s: i64,
-    /// Oldest first.
     pub events: Vec<FakeEvent>,
-    /// `MOTOR_CALIB` instances: name, com_offset, valid, cal_offset, valid.
     pub calib: Vec<(String, f64, bool, f64, bool)>,
-    /// Log an event right after serving the event log's first page: one logged
-    /// between two page reads of a client.
     pub log_between_pages: bool,
-    /// Answer this many of the next `/rw/system` requests with 503 (a controller busy
-    /// or a request lost), then normally again.
     pub fail_system: u32,
-    /// The login challenge (401) sets a cookie of its own, as a server may.
     pub challenge_cookie: bool,
-    /// Serve `/ctrl/identity` (a RobotWare without it answers 404).
     pub identity: bool,
-    /// Answer this many of the next requests that logged in with 503 (the login taken,
-    /// its session given, the answer itself lost).
     pub fail_after_login: u32,
-    /// Set the clock on by this many seconds just before the event log's next first
-    /// page is served, and log event 99998 on the new clock: a clock set between a
-    /// client's clock read and its events read.
     pub clock_step_at_events: i64,
 }
 
@@ -86,12 +65,9 @@ struct State {
     b: RwsBehaviour,
     sessions: HashSet<String>,
     nonces: HashSet<String>,
-    /// (method, path) of every request.
     requests: Vec<(String, String)>,
     logins: u32,
-    /// The nonce count (`nc`) of every Digest answer.
     nonce_counts: Vec<String>,
-    /// The Cookie header of every request ("" for none).
     cookies_sent: Vec<String>,
 }
 
@@ -144,7 +120,6 @@ impl FakeRws {
         f(&mut lock(&self.state).b)
     }
 
-    /// A new event, stamped now on the controller's clock; its id.
     pub fn push_event(&self, code: u32, severity: u8, title: &str) -> u64 {
         let mut s = lock(&self.state);
         let id = s.b.events.last().map_or(1000, |e| e.id + 1);
@@ -153,7 +128,6 @@ impl FakeRws {
         id
     }
 
-    /// Every request so far, (method, path).
     pub fn requests(&self) -> Vec<(String, String)> {
         lock(&self.state).requests.clone()
     }
@@ -162,13 +136,10 @@ impl FakeRws {
         lock(&self.state).logins
     }
 
-    /// Forget every session, as a controller does when one times out.
     pub fn expire_sessions(&self) {
         lock(&self.state).sessions.clear();
     }
 
-    /// Another controller behind the same address (a cable moved between two IRC5s'
-    /// service ports, both 192.168.125.1): its own system id and event log, no session.
     pub fn replace_controller(&self, system_id: &str) {
         let mut s = lock(&self.state);
         s.b.system_id = system_id.into();
@@ -176,12 +147,10 @@ impl FakeRws {
         s.sessions.clear();
     }
 
-    /// The nonce count of every Digest answer so far.
     pub fn nonce_counts(&self) -> Vec<String> {
         lock(&self.state).nonce_counts.clone()
     }
 
-    /// The Cookie header of every request so far ("" for none).
     pub fn cookies_sent(&self) -> Vec<String> {
         lock(&self.state).cookies_sent.clone()
     }
@@ -224,7 +193,6 @@ fn serve(mut s: TcpStream, st: &Mutex<State>) {
     let (method, path) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
     let header = |name: &str| text.split("\r\n").skip(1).filter_map(|l| l.split_once(':')).find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string());
     let mut g = lock(st);
-    // A request that says it carries a body is marked: the client never sends one.
     let method = if header("content-length").is_some() || header("transfer-encoding").is_some() { format!("{method}+body") } else { method };
     g.requests.push((method.clone(), path.clone()));
     g.cookies_sent.push(header("cookie").unwrap_or_default());
@@ -237,7 +205,6 @@ fn serve(mut s: TcpStream, st: &Mutex<State>) {
         g.nonce_counts.push(nc);
     }
     if !session.is_some_and(|v| g.sessions.contains(&v)) {
-        // Not in a session: a Digest answer to a nonce it gave, or a challenge.
         let answered = header("authorization").and_then(|a| digest_params(&a)).is_some_and(|p| {
             let get = |k: &str| p.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
             let hex = |b: [u8; 16]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
@@ -341,20 +308,15 @@ mod tests {
         assert!(f.requests().iter().all(|(m, _)| m == "GET"));
         assert!(!f.requests().iter().any(|(_, p)| p.contains("..")));
 
-        // A session the controller forgot: logged in again, once.
         f.expire_sessions();
         c.system().unwrap();
         assert_eq!(f.logins(), 2);
-        // A wrong password: refused, and said so.
         let mut bad = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "nope");
         assert_eq!(bad.system(), Err(RwsError::Login));
     }
 
     #[test]
     fn every_login_counts_its_nonce_from_one() {
-        // RFC 2617 counts requests per nonce, and each login answers a fresh one. (The RW6
-        // VC accepted any count, measured 2026-09-28; a stricter server
-        // would refuse a second login's 2 and blame the password.)
         let f = FakeRws::start(RwsBehaviour::default()).unwrap();
         let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
         c.system().unwrap();
@@ -375,18 +337,15 @@ mod tests {
         let mut poll = EventPoll::default();
         f.push_event(10000, 1, "this controller's");
         assert_eq!(poll.look(&mut c).unwrap().events.len(), 1);
-        // The session forgotten by the same controller: logged in again, carrying on.
         f.expire_sessions();
         f.push_event(10001, 1, "this controller's, later");
         assert_eq!(poll.look(&mut c).unwrap().events.iter().map(|e| e.code).collect::<Vec<_>>(), [10001]);
         assert_eq!(f.logins(), 2);
 
-        // Another controller at the same address, with the same default login.
         f.replace_controller("{22222222-2222-4222-8222-222222222222}");
         f.push_event(20205, 3, "the other controller's");
         let other = |r: Result<(), RwsError>| matches!(r, Err(RwsError::OtherController { found, .. }) if found.starts_with("{2222"));
         assert!(other(poll.look(&mut c).map(|_| ())), "its event log read");
-        // Nor anything after, though the new session would carry every request.
         assert!(other(c.clock().map(|_| ())));
         assert!(other(c.events(10, 1).map(|_| ())));
         assert!(other(c.motor_calib("rob1_1").map(|_| ())));
@@ -394,8 +353,6 @@ mod tests {
 
     #[test]
     fn the_request_that_logs_in_at_another_controller_returns_nothing_of_it() {
-        // The first login again after the check lands on another controller: what that
-        // very request read is not returned.
         let f = FakeRws::start(RwsBehaviour::default()).unwrap();
         let id = f.with(|b| b.system_id.clone());
         let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics").expect_system(&id);
@@ -414,8 +371,6 @@ mod tests {
         c.system().unwrap();
         let mut poll = EventPoll::default();
         poll.look(&mut c).unwrap();
-        // Another controller at the address, whose /rw/system fails the first time it
-        // is asked: that look fails, and its new session is still unchecked.
         f.replace_controller("{22222222-2222-4222-8222-222222222222}");
         f.with(|b| b.fail_system = 1);
         f.push_event(20205, 3, "the other controller's");
@@ -431,8 +386,6 @@ mod tests {
         let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics").expect_system(&id);
         let mut poll = EventPoll::default();
         poll.look(&mut c).unwrap();
-        // Another controller at the address: a look logs in there, gets its session,
-        // and the answer is lost. That session must be checked before it is used.
         f.replace_controller("{22222222-2222-4222-8222-222222222222}");
         f.with(|b| b.fail_after_login = 1);
         f.push_event(20205, 3, "the other controller's");
@@ -465,7 +418,6 @@ mod tests {
         let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
         let mut poll = EventPoll::default();
         poll.look(&mut c).unwrap();
-        // Cleared on the FlexPendant: ids start again below the newest seen.
         f.with(|b| b.events.clear());
         f.push_event(20000, 2, "after the clear");
         let got = poll.look(&mut c).unwrap();
@@ -477,8 +429,6 @@ mod tests {
 
     #[test]
     fn a_poll_that_knows_an_event_reads_back_to_it() {
-        // Logged in again: what happened meanwhile is read back to the newest event
-        // already known, not just the newest page.
         let f = FakeRws::start(RwsBehaviour::default()).unwrap();
         let ids: Vec<u64> = (0..30).map(|i| f.push_event(10000 + i, 1, "e")).collect();
         let mut c = Client::new("127.0.0.1", f.port(), crate::rws::DEFAULT_USER, "robotics");
@@ -519,7 +469,6 @@ mod tests {
         assert_eq!(first.events.len(), crate::rws::POLL_LIMIT as usize, "the first look: the newest page");
         assert_eq!(first.events.last().unwrap().title, "old 24", "oldest first");
         assert!(poll.look(&mut c).unwrap().events.is_empty(), "nothing new");
-        // 13 new: across two pages, oldest first, each once.
         for i in 0..13 {
             f.push_event(20000 + i, if i == 5 { 3 } else { 1 }, &format!("new {i}"));
         }
@@ -527,7 +476,6 @@ mod tests {
         assert_eq!(got.events.iter().map(|e| e.code).collect::<Vec<_>>(), (20000..20013).collect::<Vec<_>>());
         assert!(!got.skipped);
         assert_eq!(got.events[5].severity, 3);
-        // More than a look reads: said.
         for i in 0..(crate::rws::POLL_LIMIT * crate::rws::POLL_PAGES + 3) {
             f.push_event(30000 + i, 2, "burst");
         }
@@ -535,7 +483,6 @@ mod tests {
         assert!(burst.skipped && burst.events.len() == (crate::rws::POLL_LIMIT * crate::rws::POLL_PAGES) as usize);
         assert!(poll.look(&mut c).unwrap().events.is_empty(), "and none twice");
 
-        // An event logged between two page reads: nothing read twice, nothing lost.
         for i in 0..13 {
             f.push_event(40000 + i, 1, "paged");
         }

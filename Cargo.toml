@@ -18,6 +18,4 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-# Unwinding stays on: a panic in the UI must still run the drop guard that tears
-# the controller session down.
 panic = "unwind"

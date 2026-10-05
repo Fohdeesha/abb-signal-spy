@@ -1,40 +1,15 @@
-//! What the controller says back: command replies, the SUBSCRIBE reply, and the
-//! handshake announce with its connected-client list.
-//!
-//! Measured on the RW6 VC (2026-09-25):
-//!
-//! ```text
-//! command reply  RAD kind 0x20, format 2: u32 status, then NUL-terminated text
-//!                  0x00048000 "" / "-StreamId 215 -SampleTime 4.032"      (accepted)
-//!                  0x00000000 ""                                          (StreamConnect)
-//!                  0xC004FFFE "ERROR: ...rdh_infostream.cpp[379]: code: 0xc004fffe
-//!                              Failed to define moc signal, status -50228 streamId -1; "
-//! SUBSCRIBE      RAD kind 0x23, format 2: 0x00000000 "TRUE 0 155974524"
-//! handshake      service 6, two RADs: kind 0x21 "{system id}", then kind 0x23 format 1
-//!                  "<i><cs><c a=127.0.0.1/><c a=127.0.0.1/></cs></i>"
-//! ```
-//!
-//! The status word's top bit marks a failure, the way an HRESULT does. The
-//! controller's own reason is the `status` number inside the text.
-
 use crate::wire::{rad_format, rad_kind, Rad};
 
-/// Longest reply text kept. A real reply is one line; this bounds what a flood of
-/// frames echoing one transaction id can make us hold.
 pub const MAX_REPLY_TEXT: usize = 1024;
-/// Most client entries read from a handshake. ABB documents three LAN clients.
 pub const MAX_CLIENTS: usize = 64;
 
-/// Latin-1 text up to the first NUL, capped.
 pub fn latin1(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     b[..end.min(MAX_REPLY_TEXT)].iter().map(|&c| c as char).collect()
 }
 
-/// A reply to one request, from its RAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
-    /// The u32 at the front of a format-2 RAD; `None` for any other format.
     pub status: Option<u32>,
     pub text: String,
 }
@@ -51,13 +26,10 @@ impl Reply {
         }
     }
 
-    /// The controller said no. Either the status word's failure bit, or the text
-    /// itself: a define refusal always carries "streamId -1" and a status.
     pub fn is_failure(&self) -> bool {
         self.status.is_some_and(|s| s & 0x8000_0000 != 0) || self.text.starts_with("ERROR")
     }
 
-    /// The controller's reason code (`status -50228`), if the text carries one.
     pub fn controller_status(&self) -> Option<i64> {
         find_signed_after(&self.text, "status")
     }
@@ -66,7 +38,6 @@ impl Reply {
         parse_stream_id(&self.text)
     }
 
-    /// The native sample time the controller reported, in milliseconds.
     pub fn sample_time_ms(&self) -> Option<f64> {
         let key = "-SampleTime";
         let mut from = 0;
@@ -86,8 +57,6 @@ impl Reply {
         None
     }
 
-    /// Text safe to show a person: the build-machine path ABB puts in front of
-    /// every error is noise to a user and is cut down to the message.
     pub fn summary(&self) -> String {
         let t = self.text.trim();
         if let Some(p) = t.find("]: ")
@@ -98,10 +67,6 @@ impl Reply {
     }
 }
 
-/// "-StreamId" + whitespace + decimal digits, within u32: a working client's
-/// `-StreamId\s+(\d+)`, first occurrence that parses. A garbled reply maps nothing
-/// (a lenient `strtol` would map "-StreamId abc" to stream 0), and a refusal's
-/// "streamId -1" is not a stream.
 pub fn parse_stream_id(text: &str) -> Option<u32> {
     let key = "-StreamId";
     let mut from = 0;
@@ -111,7 +76,7 @@ pub fn parse_stream_id(text: &str) -> Option<u32> {
         let rest = &text[after..];
         let trimmed = rest.trim_start();
         if trimmed.len() == rest.len() {
-            continue; // "-StreamIdX": another word
+            continue;
         }
         let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
         if digits.is_empty() || digits.len() > 10 {
@@ -125,8 +90,6 @@ pub fn parse_stream_id(text: &str) -> Option<u32> {
     None
 }
 
-/// The signed integer after `word` (case-insensitive, whole word), e.g. the -50228
-/// in "... status -50228 streamId -1".
 fn find_signed_after(text: &str, word: &str) -> Option<i64> {
     let lower = text.to_ascii_lowercase();
     let word = word.to_ascii_lowercase();
@@ -163,8 +126,6 @@ fn find_signed_after(text: &str, word: &str) -> Option<i64> {
     None
 }
 
-/// What a controller status code means, for a person. The -50xxx codes are MOC
-/// errors offset by 50000 (ABB's TestSignalLogger), the -30x ones the log server's.
 pub fn describe_status(code: i64) -> Option<&'static str> {
     Some(match code {
         -50228 => "unknown signal number: this controller does not produce it (robot axes use the 4-digit numbers)",
@@ -181,12 +142,8 @@ pub fn describe_status(code: i64) -> Option<&'static str> {
     })
 }
 
-/// A refused define costs an entry in the controller's event log (for an unknown
-/// signal number, 50228 "Unknown log signal number"). Said wherever a refusal is
-/// shown, so the entries are not a mystery to whoever reads that log next.
 pub const EVENT_LOG_NOTE: &str = "a refused define writes an entry into the controller's event log (50228 for an unknown signal number)";
 
-/// The SUBSCRIBE reply: "TRUE 0 <subscription id>".
 pub fn parse_subscription(text: &str) -> Option<u32> {
     let mut it = text.split_whitespace();
     if !it.next()?.eq_ignore_ascii_case("TRUE") {
@@ -196,22 +153,16 @@ pub fn parse_subscription(text: &str) -> Option<u32> {
     it.next()?.parse::<u32>().ok()
 }
 
-/// One entry of the handshake's connected-client list.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClientEntry {
-    /// The `a` attribute: the client's address as the controller sees it.
     pub address: String,
-    /// Every attribute, in order, so a controller that reports more than the VC's
-    /// address (a name, a client type) shows it rather than losing it.
     pub attributes: Vec<(String, String)>,
 }
 
-/// The handshake reply.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Announce {
     pub system_id: Option<String>,
     pub clients: Vec<ClientEntry>,
-    /// The client-list text as received, for the diagnostics.
     pub raw_client_list: Option<String>,
     pub ctrl1: u32,
 }
@@ -235,8 +186,6 @@ impl Announce {
     }
 }
 
-/// `<i><cs><c a=127.0.0.1/>...</cs></i>`. Attribute values may be unquoted (the VC)
-/// or quoted; anything malformed ends the list rather than guessing.
 pub fn parse_client_list(text: &str) -> Vec<ClientEntry> {
     let mut out = Vec::new();
     let Some(start) = text.find("<cs") else { return out };
@@ -244,7 +193,6 @@ pub fn parse_client_list(text: &str) -> Vec<ClientEntry> {
     while out.len() < MAX_CLIENTS {
         let Some(p) = rest.find("<c") else { break };
         let after = &rest[p + 2..];
-        // "<cs" again, or "<cx": not a client element.
         match after.chars().next() {
             Some(c) if c.is_whitespace() || c == '/' || c == '>' => {}
             _ => {
@@ -369,9 +317,7 @@ mod tests {
         assert_eq!(c[1].attributes, vec![("a".into(), "10.0.0.5".into()), ("t".into(), "2".into())]);
         assert!(parse_client_list("").is_empty());
         assert!(parse_client_list("<i><cs></cs></i>").is_empty());
-        // Unterminated: stops, does not panic.
         assert!(parse_client_list("<cs><c a=1.2.3.4").is_empty());
-        // A flood is capped.
         let many = format!("<cs>{}</cs>", "<c a=1.1.1.1/>".repeat(1000));
         assert_eq!(parse_client_list(&many).len(), MAX_CLIENTS);
     }

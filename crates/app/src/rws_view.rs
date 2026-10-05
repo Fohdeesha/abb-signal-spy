@@ -1,10 +1,3 @@
-//! The read-only RWS extras: the controller's name and
-//! RobotWare version, its event log on the charts and in recordings (every 5 s, a
-//! setting turns it off), and a motor's commutator offset as a turn's target. GETs
-//! only, on a thread of their own. The login is typed each session and never stored;
-//! RWS is used only while connected over InfoStream to the same controller,
-//! checked by its system id.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -24,60 +17,41 @@ use crate::fields;
 use crate::theme;
 use crate::view;
 
-/// How often the event log is looked at.
 pub const POLL: Duration = Duration::from_secs(5);
-/// With the event log off, the controller's clock is read every this many looks
-/// (with it on, at every look): often enough to notice a refused login too.
 const CLOCK_LOOKS: u32 = 12;
-/// Controller events kept for the charts.
 const KEEP_EVENTS: usize = 500;
-/// How long a recording just closed (or a "Save last" just written) still takes in
-/// controller events that arrive late: a look's interval and its longest request.
 const LATE_FOR: Duration = Duration::from_secs(20);
 
 pub enum RwsCmd {
     Calib { derived: String, instance: String },
-    /// Look at the event log now (a recording just stopped).
     LookNow,
     Stop,
-    /// An internal error in the thread, for a test.
     #[cfg(test)]
     Crash,
 }
 
 pub enum RwsMsg {
     Up { system: System, identity: Option<Identity>, offset_ms: i64 },
-    /// New events, and the controller's clock minus this PC's UTC (ms) when read.
     Events(NewEvents, i64),
-    /// The controller's clock minus this PC's UTC (ms), read again and changed.
     Clock(i64),
     Calib { derived: String, result: Result<MotorCalib, String> },
-    /// A look that failed; the next one is tried.
     Trouble(String),
-    /// Stopped, and why.
     Failed(String),
 }
 
-/// A logged-in RWS session, on its thread.
 pub struct RwsLink {
     pub target: Target,
     pub port: u16,
     pub system: Option<System>,
-    /// A display name only: `None` where this RobotWare does not give it.
     pub identity: Option<Identity>,
-    /// The controller's clock minus this PC's UTC, ms (its local time zone and its
-    /// drift), as last read.
     pub offset_ms: i64,
     pub trouble: Option<String>,
     pub events_on: Arc<AtomicBool>,
-    /// Unreadable entries of the event log have been said once.
     told_unreadable: bool,
     tx: Sender<RwsCmd>,
     rx: Receiver<RwsMsg>,
 }
 
-/// A recording closed a moment ago, or a "Save last" just written: controller events
-/// still on their way whose time falls within it go into its recording.json.
 pub struct LateWindow {
     pub dir: PathBuf,
     pub from_ms: i64,
@@ -87,15 +61,12 @@ pub struct LateWindow {
 
 impl Drop for RwsLink {
     fn drop(&mut self) {
-        // Not waited for: a request under way ends within its timeout.
         let _ = self.tx.send(RwsCmd::Stop);
     }
 }
 
-/// An entry of the controller's event log, on this PC's clock.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControllerEvent {
-    /// The log's own id (rises with time).
     pub id: u64,
     pub utc_ms: i64,
     pub code: u32,
@@ -107,12 +78,10 @@ impl ControllerEvent {
     pub fn text(&self) -> String {
         format!("{} {}", self.code, self.title)
     }
-    /// As a recording keeps it, or `None` for a time no clock can show.
     pub fn entry(&self) -> Option<EventEntry> {
         let wall = UNIX_EPOCH.checked_add(Duration::from_millis(u64::try_from(self.utc_ms).ok()?))?;
         Some(EventEntry { utc: spy_core::util::wall_iso(wall), kind: "controller-event".into(), text: format!("{} ({})", self.text(), rws::severity_word(self.severity)), controller_ms: None })
     }
-    /// Its line's colour on a chart: red for an error, amber for a warning.
     pub fn color(&self, p: &theme::Pal) -> egui::Color32 {
         match self.severity {
             3 => p.red,
@@ -122,7 +91,6 @@ impl ControllerEvent {
     }
 }
 
-/// The login form: never saved (the port is, in the settings).
 #[derive(Debug, Clone)]
 pub struct RwsForm {
     pub user: String,
@@ -139,8 +107,6 @@ fn pc_now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// The controller's clock minus this PC's UTC, ms, read now: a read that took too
-/// long to place events by is tried again, three times at most.
 fn read_offset(c: &mut Client) -> Result<i64, RwsError> {
     for _ in 0..3 {
         let before = pc_now_ms();
@@ -152,7 +118,6 @@ fn read_offset(c: &mut Client) -> Result<i64, RwsError> {
     Err(RwsError::Format(format!("the controller's clock answered too slowly (over {} ms, three times) to place its events to the second", rws::MAX_CLOCK_RTT_MS)))
 }
 
-/// Whether an RWS error ends the session: the login refused, or another controller.
 fn ends_session(e: &RwsError) -> bool {
     matches!(e, RwsError::Login | RwsError::OtherController { .. })
 }
@@ -163,8 +128,6 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
         let _ = tx.send(m);
         ctx.request_repaint();
     };
-    // Only the controller streaming: RWS on another port could be another (a second
-    // virtual one), and another behind the same address answers a later login.
     let mut c = Client::new(&host, port, &user, &password).expect_system(&expect);
     let why = |e: RwsError| match e {
         RwsError::OtherController { found, expected } => format!("RWS at {host}:{port} is a different controller (system id {found}) from the one streaming ({expected})"),
@@ -172,7 +135,6 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
     };
     let up = (|| -> Result<(System, Option<Identity>, i64), RwsError> {
         let s = c.system()?;
-        // A display name only: a RobotWare without it still gives everything else.
         let i = match c.identity() {
             Ok(i) => Some(i),
             Err(e) if ends_session(&e) => return Err(e),
@@ -186,7 +148,6 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
         Err(e) => return send(RwsMsg::Failed(why(e))),
     };
     send(RwsMsg::Up { system, identity, offset_ms: offset });
-    // A login again reads back to the newest event already known.
     let mut events = seed.map_or_else(EventPoll::default, EventPoll::after);
     let mut next_look = Instant::now();
     let mut looks = 0u32;
@@ -209,14 +170,9 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
         next_look = Instant::now() + poll;
         let on = events_on.load(Ordering::SeqCst);
         looks += 1;
-        // The clock at every look while the event log is read, whose whole-second
-        // stamps are placed through it (a clock set on is followed within a look);
-        // otherwise every CLOCK_LOOKS looks, which also keeps the login checked.
         if on || looks >= CLOCK_LOOKS {
             looks = 0;
             match read_offset(&mut c) {
-                // Two reads of an unchanged clock differ by less than a second (its
-                // whole seconds); a second or more is the clock itself set on or back.
                 Ok(o) if (o - offset).abs() >= 1000 => {
                     offset = o;
                     send(RwsMsg::Clock(o));
@@ -236,9 +192,6 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
         match events.look(&mut c) {
             Ok(n) if n.events.is_empty() && !n.skipped && n.unreadable == 0 && !n.renumbered => {}
             Ok(n) => {
-                // The clock read again: set on or back during the look, it leaves these
-                // events stamped on either clock, placed by neither reading for sure.
-                // Read again at the next look, with the clock settled.
                 match read_offset(&mut c) {
                     Ok(o) if (o - offset).abs() >= 1000 => {
                         events.restore(mark);
@@ -257,12 +210,10 @@ fn worker(host: String, port: u16, user: String, password: String, expect: Strin
 }
 
 impl SpyApp {
-    /// Logged in, and the controller known.
     pub fn rws_ready(&self) -> bool {
         self.rws.as_ref().is_some_and(|l| l.system.is_some())
     }
 
-    /// Log in to the connected controller's RWS with the form's login.
     pub fn rws_login(&mut self) {
         let st = self.session.status().clone();
         let (Some(target), Some(expect)) = (st.target.clone(), st.announce.as_ref().and_then(|a| a.system_id.clone())) else {
@@ -274,8 +225,6 @@ impl SpyApp {
         let port = self.settings.rws_port;
         let events_on = Arc::new(AtomicBool::new(self.settings.rws_events));
         let (ctx, host, user, password, poll) = (self.ctx.clone(), target.host.clone(), self.rws_form.user.clone(), self.rws_form.password.clone(), self.rws_poll);
-        // The events already shown are this controller's (they go when another's
-        // history starts): a login again reads back to the newest of them.
         let seed = self.controller_events.iter().map(|e| e.id).max();
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::channel();
@@ -283,8 +232,6 @@ impl SpyApp {
         let started = std::thread::Builder::new()
             .name("rws".into())
             .spawn(move || {
-                // An internal error ends RWS and says so, rather than leave it shown
-                // logged in with nothing arriving.
                 let (tx, repaint) = (msg_tx.clone(), ctx.clone());
                 if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || worker(host, port, user, password, expect, seed, on, poll, cmd_rx, msg_tx, ctx))) {
                     let what = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown".into());
@@ -295,12 +242,10 @@ impl SpyApp {
         if let Err(e) = started {
             return self.toast(Level::Error, format!("RWS: its thread could not be started ({e})."));
         }
-        // No login in the log file: not even the user name.
         self.log.info(format!("Logging in to RWS at {}:{port}.", target.host));
         self.rws = Some(RwsLink { target, port, system: None, identity: None, offset_ms: 0, trouble: None, events_on, told_unreadable: false, tx: cmd_tx, rx: msg_rx });
     }
 
-    /// End the RWS session, whatever the reason; its password goes with it.
     fn close_rws(&mut self) {
         self.rws = None;
         self.rws_form.password.clear();
@@ -320,8 +265,6 @@ impl SpyApp {
         self.close_rws();
     }
 
-    /// Each frame: what the RWS thread sent, and whether it still belongs to the
-    /// controller connected.
     pub fn poll_rws(&mut self) {
         self.late_windows.retain(|w| w.until > Instant::now());
         let (same_target, active) = {
@@ -329,8 +272,6 @@ impl SpyApp {
             let st = self.session.status();
             (st.target.as_ref() == Some(&link.target), st.phase.is_active())
         };
-        // What the thread already sent from this controller is taken in first, even
-        // when the session has just ended: an event received is not dropped.
         if same_target {
             let msgs: Vec<RwsMsg> = self.rws.as_ref().map(|l| l.rx.try_iter().collect()).unwrap_or_default();
             for m in msgs {
@@ -390,14 +331,9 @@ impl SpyApp {
                 self.log.warn(text);
             }
         }
-        // Recorders keep those since they started, with the slack the whole-second
-        // stamps need; recordings just closed, those of their stretch.
         let now = SystemTime::now();
         let starts: Vec<Option<i64>> = [&self.recorder, &self.slow].iter().map(|r| r.as_ref().map(|r| now.checked_sub(r.status().started.elapsed()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64))).collect();
         let mut late: Vec<(PathBuf, EventEntry)> = Vec::new();
-        // A login again reads on from the newest event already shown (the poll's seed),
-        // so none comes twice; a cleared log starts its ids again, so an id here says
-        // nothing about one already shown.
         for e in n.events {
             let ev = ControllerEvent { id: e.id, utc_ms: rws::event_utc_ms(e.time, offset_ms), code: e.code, severity: e.severity, title: e.title.clone() };
             let Some(entry) = ev.entry() else { continue };
@@ -431,9 +367,6 @@ impl SpyApp {
         }
     }
 
-    /// A recording just closed, or a "Save last" just written, covering `from_ms` to
-    /// `to_ms` (UTC): controller events of that stretch still on their way go into it,
-    /// and the event log is looked at straight away. Those already shown go in now.
     pub fn rws_after_recording(&mut self, dir: PathBuf, from_ms: i64, to_ms: i64) {
         let known: Vec<EventEntry> = self.controller_events.iter().filter(|e| e.utc_ms >= from_ms - rws::EVENT_SLACK_MS && e.utc_ms <= to_ms + rws::EVENT_SLACK_MS).filter_map(ControllerEvent::entry).collect();
         if !known.is_empty()
@@ -450,7 +383,6 @@ impl SpyApp {
         }
     }
 
-    /// Ask the controller for a turn's target: its motor's commutator offset.
     pub fn request_com_offset(&mut self, i: usize) {
         let Derived::Turn { angle, .. } = self.derived[i].live.def().clone() else { return };
         let instance = match crate::derived_view::commutator_instance(&angle) {
@@ -470,8 +402,6 @@ impl SpyApp {
                 let deg = m.com_offset.to_degrees();
                 self.derived[i].target_text = view::fmt(deg);
                 self.set_target(i);
-                // This controller's value: it goes when another is streaming, and is
-                // not saved (a typed target is the person's).
                 self.derived[i].target_from = self.session.status().announce.as_ref().and_then(|a| a.system_id.clone());
                 let text = format!("Target from the controller: MOTOR_CALIB {} com_offset (Commutator Offset) {} rad = {} deg.", m.instance, m.com_offset, view::fmt(deg));
                 if m.com_valid {
@@ -484,7 +414,6 @@ impl SpyApp {
         }
     }
 
-    /// The controller events on the live timeline: (timeline ms, event).
     pub fn events_on_timeline(&self, tl: &spy_core::timeline::Timeline) -> Vec<(i64, ControllerEvent)> {
         let Some((at, wall)) = tl.anchor() else { return Vec::new() };
         let Ok(w) = wall.duration_since(UNIX_EPOCH) else { return Vec::new() };
@@ -500,7 +429,6 @@ impl SpyApp {
         let mut login = false;
         let mut logout = false;
         let mut dirty = false;
-        // Centred: in the corner it covered the controller bar and its Disconnect.
         egui::Window::new("Controller details (RWS)").open(&mut open).collapsible(false).default_width(460.0).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
             ui.label(RichText::new("Read-only: the controller's name and RobotWare version, its event log on the charts, and a motor's commutator offset. The login is not stored anywhere.").small().weak());
             let st = self.session.status().clone();
@@ -534,8 +462,6 @@ impl SpyApp {
                 Some(l) => match &l.system {
                     Some(s) => {
                         if !st.phase.is_connected() {
-                            // The link stays through a reconnect to the same address;
-                            // every login checks it is still the same controller.
                             ui.colored_label(theme::pal(ui).hold, "InfoStream is reconnecting. RWS carries on with the same controller (checked by its system id at every login).");
                         }
                         egui::Grid::new("rws-info").num_columns(2).show(ui, |ui| {
@@ -587,7 +513,6 @@ impl SpyApp {
     }
 }
 
-/// A clock offset in ms, to the second: `+4 h 00 min`, `-0 min 12 s`.
 pub fn offset_text(ms: i64) -> String {
     let s = (ms as f64 / 1000.0).round() as i64;
     let sign = if s < 0 { "-" } else { "+" };
@@ -595,7 +520,6 @@ pub fn offset_text(ms: i64) -> String {
     if a >= 3600 { format!("{sign}{} h {:02} min", a / 3600, a / 60 % 60) } else { format!("{sign}{} min {:02} s", a / 60, a % 60) }
 }
 
-/// A UTC time in ms as this PC's local clock, to the second.
 fn local_hms(utc_ms: i64) -> String {
     u64::try_from(utc_ms).ok().and_then(|ms| UNIX_EPOCH.checked_add(Duration::from_millis(ms))).and_then(spy_core::util::local_parts).map_or_else(|| "an unknown time".into(), |(_, _, _, h, m, s, _)| format!("{h:02}:{m:02}:{s:02}"))
 }
