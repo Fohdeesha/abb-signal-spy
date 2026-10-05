@@ -2,7 +2,6 @@
 //! fake controller, read back and checked value for value.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +12,7 @@ use spy_core::request::{Axis, MechUnit};
 use spy_core::sample::ValueKind;
 use spy_core::session::{AskPolicy, Options, Phase, Session, Target};
 use spy_core::store::{ChannelKey, Store};
+use spy_core::testdir::TestDir;
 
 fn key(signal: u32, axis: u8) -> ChannelKey {
     ChannelKey { signal, unit: MechUnit::new("ROB_1").unwrap(), axis: Axis::new(axis).unwrap() }
@@ -29,10 +29,8 @@ fn wait_for(ms: u64, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("spy-rec-{tag}-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
-    let _ = std::fs::remove_dir_all(&p);
-    p
+fn temp_dir(tag: &str) -> TestDir {
+    TestDir::new(&format!("rec-{tag}"))
 }
 
 fn streaming(keys: &[ChannelKey]) -> (FakeController, Session) {
@@ -99,7 +97,6 @@ fn a_full_recording_reads_back_exactly() {
     // The string event is written as quoted text.
     let csv = std::fs::read_to_string(st.dir.join("data.csv")).unwrap();
     assert!(csv.starts_with("controller_ms,channel,value\n"));
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -125,7 +122,6 @@ fn the_slow_log_aggregates_per_interval() {
     // 4000 ramps (t % 1000 * 0.001 + 10): its min and max differ within an interval.
     let ramp: Vec<Vec<f64>> = text.lines().skip(1).filter(|l| l.contains("4000/ROB_1/J1")).map(|l| l.split(',').skip(3).map(|x| x.parse().unwrap()).collect()).collect();
     assert!(ramp.iter().any(|r| r[2] > r[1]), "min/max must span the interval");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -149,7 +145,6 @@ fn a_recording_keeps_the_derived_definitions_and_when_their_settings_changed() {
     let kinds: Vec<(&str, &str)> = back.meta.events.iter().filter(|e| e.kind.starts_with("derived")).map(|e| (e.kind.as_str(), e.text.as_str())).collect();
     assert_eq!(kinds, [("derived", "added a turn"), ("derived-setting", "plateau"), ("derived", "removed the turn")], "a setting's change told from an addition or removal");
     assert!(back.meta.events.iter().filter(|e| e.kind.starts_with("derived")).all(|e| e.controller_ms.is_some()));
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -179,7 +174,6 @@ fn save_the_last_seconds_from_history() {
     let ts: Vec<i64> = csv.lines().skip(1).map(|l| l.split(',').next().unwrap().parse().unwrap()).collect();
     assert!(ts.windows(2).all(|w| w[1] >= w[0]));
     assert!(recording::write_snapshot(&base, "x", s.store(), &timeline, &keys, &infos(&keys), -1.0, "", None, &[]).is_err());
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -204,7 +198,6 @@ fn a_recording_carries_on_across_a_reconnect() {
     let d = &back.data["4002/ROB_1/J1"];
     // The outage is a hole in controller time, not filled in.
     assert!(d.windows(2).any(|w| w[1].0 - w[0].0 > 20));
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -228,7 +221,6 @@ fn strings_with_commas_quotes_and_line_breaks_read_back_whole() {
     assert!(torque.len() > 200 && torque.iter().all(|&(_, v)| v == 101.0), "a string row bled into the numbers");
     assert!(!back.data.contains_key("9873/ROB_1/J1"));
     assert_eq!((texts.len() + torque.len()) as u64, back.meta.rows_written);
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]

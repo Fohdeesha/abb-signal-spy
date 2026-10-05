@@ -5,7 +5,7 @@
 //! cursors, switch the phone view on, reset InfoStream, and come back to the same
 //! channels next time.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -15,23 +15,24 @@ use egui_kittest::Harness;
 use spy_core::discovery::VcFinder;
 use spy_core::fake::{Behaviour, FakeController, SignalDef, SignalSource};
 use spy_core::session::{AskPolicy, Options, Phase};
+use spy_core::testdir::TestDir;
 
 use crate::app::SpyApp;
 use crate::view;
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("spy-ui-{tag}-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p
+/// The folder a test's window keeps its settings and recordings in. Declared before
+/// the window, so it goes after it: locals drop in reverse order.
+fn temp_dir(tag: &str) -> TestDir {
+    TestDir::new(&format!("ui-{tag}"))
 }
 
-fn harness(dir: PathBuf, ask: AskPolicy) -> Harness<'static, SpyApp> {
+fn harness(dir: &Path, ask: AskPolicy) -> Harness<'static, SpyApp> {
     // Never this PC's own virtual controllers.
     harness_with(dir, Options { ask, find_vc: VcFinder::none(), ..Options::default() })
 }
 
-fn harness_with(dir: PathBuf, opts: Options) -> Harness<'static, SpyApp> {
+fn harness_with(dir: &Path, opts: Options) -> Harness<'static, SpyApp> {
+    let dir = dir.to_path_buf();
     Harness::builder().with_size((1400.0, 900.0)).with_max_steps(20).build_eframe(move |cc| {
         let mut app = SpyApp::with_options(cc, dir.clone(), false, opts.clone());
         app.settings.record_dir = Some(dir.join("recordings"));
@@ -79,7 +80,8 @@ fn add_via_dialog(h: &mut Harness<'static, SpyApp>, signal: u32, button: &str) {
 #[test]
 fn connect_add_a_channel_and_read_it_live() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("connect"), AskPolicy::Remote);
+    let dir = temp_dir("connect");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
 
@@ -126,7 +128,8 @@ fn a_starved_session_says_what_to_do_where_it_is_seen() {
     let mut other = std::net::TcpStream::connect(("127.0.0.1", fake.port())).unwrap();
     std::io::Write::write_all(&mut other, &spy_core::request::subscribe(1, "127.0.0.1")).unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    let mut h = harness(temp_dir("starved"), AskPolicy::Remote);
+    let dir = temp_dir("starved");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -140,7 +143,8 @@ fn a_starved_session_says_what_to_do_where_it_is_seen() {
 fn the_other_clients_question_is_asked_and_answered() {
     let b = Behaviour { extra_clients: vec!["192.0.2.27".into()], ..Behaviour::default() };
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("ask"), AskPolicy::Always);
+    let dir = temp_dir("ask");
+    let mut h = harness(&dir, AskPolicy::Always);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::AwaitingApproval));
     assert!(h.query_by_label("Other programs are connected to this controller").is_some());
@@ -162,7 +166,8 @@ fn a_real_controllers_flexpendant_alone_asks_nothing() {
     // about (decided 2026-09-26).
     let b = Behaviour { extra_clients: vec!["192.168.126.10".into()], ..Behaviour::default() };
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("pendant"), AskPolicy::Always);
+    let dir = temp_dir("pendant");
+    let mut h = harness(&dir, AskPolicy::Always);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
     assert!(h.query_by_label("Other programs are connected to this controller").is_none());
@@ -173,7 +178,7 @@ fn a_real_controllers_flexpendant_alone_asks_nothing() {
 fn record_save_last_and_slow_log_write_their_folders() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("rec");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -223,7 +228,8 @@ fn legend(h: &Harness<'static, SpyApp>) -> Vec<String> {
 #[test]
 fn pause_cursors_and_markers() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("pause"), AskPolicy::Remote);
+    let dir = temp_dir("pause");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4000, "Add");
@@ -274,7 +280,7 @@ fn a_still_resolvers_dither_does_not_fill_its_chart_live_or_reviewed() {
     b.signals.insert(5138, SignalDef { source: SignalSource::float(move |(t, _, _)| 1.7779 + if t / 4 % 2 == 0 { dither } else { -dither }), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("resolver-span");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5138, "Add");
@@ -303,7 +309,8 @@ fn the_xy_windows_save_png_with_nothing_plotted_says_so() {
     // One channel charted: the XY window is open with nothing to plot, and its Save PNG
     // said "The XY plot is not open."
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("xy-nothing"), AskPolicy::Remote);
+    let dir = temp_dir("xy-nothing");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4001, "Add");
@@ -322,7 +329,8 @@ fn a_window_length_chosen_while_paused_is_shown() {
     // On the cell a person paused, then chose a longer window to find what had just
     // happened, and the charts did not change.
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("paused-window"), AskPolicy::Remote);
+    let dir = temp_dir("paused-window");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4000, "Add");
@@ -367,7 +375,8 @@ fn a_window_length_chosen_while_paused_is_shown() {
 #[test]
 fn the_phone_view_serves_what_the_window_shows() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("phone"), AskPolicy::Remote);
+    let dir = temp_dir("phone");
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().settings.phone_port = 0; // any free port
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
@@ -394,7 +403,8 @@ fn the_phone_view_serves_what_the_window_shows() {
 #[test]
 fn reset_infostream_asks_first() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("reset"), AskPolicy::Remote);
+    let dir = temp_dir("reset");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     // "Controller" is both the menu and the label on the address bar; the menu comes first.
@@ -414,7 +424,7 @@ fn connecting_to_another_controller_finishes_the_recording() {
     let first = FakeController::start(Behaviour::default()).unwrap();
     let second = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("elsewhere");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &first);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -450,7 +460,7 @@ fn a_restarted_virtual_controller_is_followed_and_the_recording_carries_on() {
         found.lock().unwrap().iter().filter_map(|&p| spy_core::discovery::hello(std::net::SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect()
     });
     let dir = temp_dir("vcmoved");
-    let mut h = harness_with(dir.clone(), Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
+    let mut h = harness_with(&dir, Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
     connect(&mut h, &old);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -497,7 +507,8 @@ fn statistics_since_reset_start_afresh_on_another_controller() {
     let mut b = Behaviour::default();
     b.signals.insert(4002, SignalDef { source: SignalSource::float(|_| 555.0), sample_ms: 4.032 });
     let second = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("stats"), AskPolicy::Remote);
+    let dir = temp_dir("stats");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &first);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -517,7 +528,7 @@ fn a_recording_closes_itself_on_a_different_controller_behind_the_address() {
     // on with the second controller's samples under the same channel ids.
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("otherbox");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -538,7 +549,8 @@ fn a_recording_closes_itself_on_a_different_controller_behind_the_address() {
 #[test]
 fn connect_works_again_after_the_worker_hit_an_internal_error() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("respawn"), AskPolicy::Remote);
+    let dir = temp_dir("respawn");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -553,12 +565,12 @@ fn connect_works_again_after_the_worker_hit_an_internal_error() {
 fn an_internal_error_last_time_is_said_once_at_the_next_start() {
     let dir = temp_dir("crash");
     std::fs::write(dir.join("crash.txt"), "ABB Signal Spy crashed at ...").unwrap();
-    let h = harness(dir.clone(), AskPolicy::Remote);
+    let h = harness(&dir, AskPolicy::Remote);
     assert!(h.state().toasts.iter().any(|t| t.text.contains("internal error last time")), "not said");
     assert!(!dir.join("crash.txt").exists(), "kept under its own name, so it is said once");
     assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("crash-")));
     drop(h);
-    let h = harness(dir, AskPolicy::Remote);
+    let h = harness(&dir, AskPolicy::Remote);
     assert!(!h.state().toasts.iter().any(|t| t.text.contains("internal error last time")), "said again");
 }
 
@@ -566,7 +578,7 @@ fn an_internal_error_last_time_is_said_once_at_the_next_start() {
 fn a_recording_opens_for_review_and_is_never_shown_as_live() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("review");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -633,7 +645,7 @@ fn assert_padded_speed(v: &[f64]) {
 fn what_is_in_view_saves_as_csv_and_png() {
     let fake = FakeController::start(padded_speed()).unwrap();
     let dir = temp_dir("export");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -677,7 +689,7 @@ fn a_reviewed_stretch_saves_as_csv() {
     b.signals.insert(9872, SignalDef { source: SignalSource::text(|(t, _, _)| format!("wobj{}", t / 40 % 2)), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("review-export");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -737,7 +749,7 @@ fn full_csv() -> String {
 #[test]
 fn a_reviewed_slow_log_gives_its_intervals_extremes_and_saves_them() {
     let dir = temp_dir("review-slow");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     let csv = "controller_ms,channel,count,mean,min,max\n1000,4002/ROB_1/J1,250,356.5,300,357.1\n2000,4002/ROB_1/J1,250,356.5,356,357\n3000,4002/ROB_1/J1,250,356.4,356,357\n";
     let folder = recording_on_disk(&dir, "slow", "slow", "", csv);
     h.state_mut().open_recording(folder);
@@ -756,7 +768,7 @@ fn a_reviewed_slow_log_gives_its_intervals_extremes_and_saves_them() {
 #[test]
 fn a_reviewed_recordings_saves_carry_its_own_label() {
     let dir = temp_dir("review-label");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().rec_label = "robot three".into();
     let folder = recording_on_disk(&dir, "one", "full", "robot one", &full_csv());
     h.state_mut().open_recording(folder);
@@ -774,7 +786,7 @@ fn a_reviewed_recordings_saves_carry_its_own_label() {
 fn keys_while_reviewing_leave_the_live_session_alone() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("review-keys");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     start_recording(&mut h);
@@ -796,7 +808,7 @@ fn keys_while_reviewing_leave_the_live_session_alone() {
 #[test]
 fn review_statistics_are_computed_once_for_a_stretch() {
     let dir = temp_dir("review-stats-once");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     let folder = recording_on_disk(&dir, "one", "full", "", &full_csv());
     h.state_mut().open_recording(folder);
     assert!(wait(&mut h, 5000, |a| a.review.is_some()));
@@ -810,7 +822,8 @@ fn review_statistics_are_computed_once_for_a_stretch() {
 #[test]
 fn a_set_partly_there_already_still_ends_in_one_chart() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("sets-partly"), AskPolicy::Remote);
+    let dir = temp_dir("sets-partly");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -827,7 +840,8 @@ fn a_set_partly_there_already_still_ends_in_one_chart() {
 
 #[test]
 fn the_same_channel_twice_in_one_request_is_added_once() {
-    let mut h = harness(temp_dir("add-twice"), AskPolicy::Remote);
+    let dir = temp_dir("add-twice");
+    let mut h = harness(&dir, AskPolicy::Remote);
     let k = spy_core::store::ChannelKey { signal: 5027, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(1).unwrap() };
     assert!(h.state_mut().add_channels(vec![k.clone(), k.clone()], true));
     assert_eq!(h.state().chans.len(), 1, "a settings file naming a unit twice added its DC link twice");
@@ -843,7 +857,8 @@ fn streaming_with_nothing_arriving_does_not_read_as_streaming() {
     use std::io::Write;
     other.write_all(&spy_core::request::Command::StreamConnect.frame(1, "127.0.0.1")).unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    let mut h = harness(temp_dir("not-receiving"), AskPolicy::Remote);
+    let dir = temp_dir("not-receiving");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4002, "Add");
@@ -857,7 +872,8 @@ fn streaming_with_nothing_arriving_does_not_read_as_streaming() {
 #[test]
 fn a_channel_set_adds_or_replaces_in_one_go() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("sets"), AskPolicy::Remote);
+    let dir = temp_dir("sets");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     let ids = |a: &SpyApp| a.chans.iter().map(|c| c.key.id()).collect::<Vec<_>>();
@@ -938,7 +954,8 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
     let mut b = Behaviour::default();
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("turn"), AskPolicy::Remote);
+    let dir = temp_dir("turn");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5138, "Add");
@@ -1009,7 +1026,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     }
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("derived");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     // A plateau compares its level with 2 s before, not 20: the history below is
     // seconds long.
     h.state_mut().plateau_trend_ms = 2000;
@@ -1095,7 +1112,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
 fn derived_channels_come_back_without_their_plateau() {
     let dir = temp_dir("derived-persist");
     {
-        let mut h = harness(dir.clone(), AskPolicy::Remote);
+        let mut h = harness(&dir, AskPolicy::Remote);
         add_via_dialog(&mut h, 5138, "Add");
         add_via_dialog(&mut h, 5027, "Add");
         let k = h.state().chans[0].key.clone();
@@ -1109,7 +1126,7 @@ fn derived_channels_come_back_without_their_plateau() {
     }
     let file = std::fs::read_to_string(dir.join("settings.json")).unwrap();
     assert!(file.contains("\"target_deg\": 90.0") && !file.contains("356.5"), "no plateau in the file: {file}");
-    let h = harness(dir, AskPolicy::Remote);
+    let h = harness(&dir, AskPolicy::Remote);
     let defs: Vec<spy_core::derived::Derived> = h.state().derived.iter().map(|d| d.live.def().clone()).collect();
     assert_eq!(defs.len(), 2);
     assert!(matches!(defs[0], spy_core::derived::Derived::Turn { target_deg: Some(t), .. } if t == 90.0), "a target is the person's: kept");
@@ -1121,7 +1138,8 @@ fn derived_channels_come_back_without_their_plateau() {
 fn a_commutator_offset_target_is_the_controllers_it_came_from() {
     let mut b = Behaviour::default();
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
-    let (fake, rws, mut h, dir) = with_rws(b, "rws-target-owner");
+    let dir = temp_dir("rws-target-owner");
+    let (fake, rws, mut h) = with_rws(b, &dir);
     add_via_dialog(&mut h, 5138, "Add");
     let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
@@ -1165,7 +1183,8 @@ fn a_plateau_of_no_voltage_is_refused() {
     let mut b = Behaviour::default();
     b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 0.0), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("plateau-zero"), AskPolicy::Remote);
+    let dir = temp_dir("plateau-zero");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "Add");
@@ -1217,7 +1236,8 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
     let mut b = Behaviour::default();
     b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 379.0 } else { 381.0 }), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("plateau-trend"), AskPolicy::Remote);
+    let dir = temp_dir("plateau-trend");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "Add");
@@ -1266,7 +1286,7 @@ fn a_derived_setting_changed_while_recording_is_in_the_recording() {
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
     let dir = temp_dir("derived-setting");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5138, "Add");
@@ -1291,7 +1311,8 @@ fn a_plateau_goes_when_another_controller_streams_and_is_said_once() {
     let mut b = Behaviour::default();
     b.signals.insert(5027, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { 379.0 } else { 381.0 }), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("plateau-other"), AskPolicy::Remote);
+    let dir = temp_dir("plateau-other");
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
@@ -1317,7 +1338,8 @@ fn the_deepest_sag_counts_from_its_plateau_on() {
     let mut b = Behaviour::default();
     b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 16.0), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("plateau-deepest"), AskPolicy::Remote);
+    let dir = temp_dir("plateau-deepest");
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().plateau_trend_ms = 2000;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
@@ -1336,22 +1358,21 @@ fn the_deepest_sag_counts_from_its_plateau_on() {
 }
 
 /// A fake controller and its RWS, one system, the app logged in to both.
-fn with_rws(b: Behaviour, tag: &str) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>, PathBuf) {
-    with_rws_as(b, spy_core::fake_rws::RwsBehaviour::default(), tag)
+fn with_rws(b: Behaviour, dir: &Path) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>) {
+    with_rws_as(b, spy_core::fake_rws::RwsBehaviour::default(), dir)
 }
 
 /// The same, with the RWS stand-in's behaviour given (its system id is the fake's).
-fn with_rws_as(b: Behaviour, rb: spy_core::fake_rws::RwsBehaviour, tag: &str) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>, PathBuf) {
+fn with_rws_as(b: Behaviour, rb: spy_core::fake_rws::RwsBehaviour, dir: &Path) -> (FakeController, spy_core::fake_rws::FakeRws, Harness<'static, SpyApp>) {
     let id = b.system_id.clone();
     let fake = FakeController::start(b).unwrap();
     let rws = spy_core::fake_rws::FakeRws::start(spy_core::fake_rws::RwsBehaviour { system_id: id, ..rb }).unwrap();
-    let dir = temp_dir(tag);
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(dir, AskPolicy::Remote);
     h.state_mut().settings.rws_port = rws.port();
     h.state_mut().rws_poll = Duration::from_millis(150);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
-    (fake, rws, h, dir)
+    (fake, rws, h)
 }
 
 fn log_in(h: &mut Harness<'static, SpyApp>, password: &str) {
@@ -1366,7 +1387,8 @@ fn log_in(h: &mut Harness<'static, SpyApp>, password: &str) {
 fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings() {
     let mut b = Behaviour::default();
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
-    let (_fake, rws, mut h, dir) = with_rws(b, "rws");
+    let dir = temp_dir("rws");
+    let (_fake, rws, mut h) = with_rws(b, &dir);
     add_via_dialog(&mut h, 4002, "Add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     // An event from before the recording, which the first look after logging in reads:
@@ -1477,7 +1499,8 @@ fn rws_names_the_controller_and_puts_its_events_on_the_charts_and_in_recordings(
 
 #[test]
 fn rws_is_refused_for_another_controller_or_a_wrong_login_and_ends_with_the_connection() {
-    let (fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-refused");
+    let _dir = temp_dir("rws-refused");
+    let (fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "wrong");
     assert!(wait(&mut h, 5000, |a| a.rws.is_none()));
     assert!(h.state().toasts.iter().any(|t| t.text.contains("refused the login")), "said why");
@@ -1496,7 +1519,8 @@ fn rws_is_refused_for_another_controller_or_a_wrong_login_and_ends_with_the_conn
 
 #[test]
 fn rws_stops_when_another_controller_answers_after_a_new_login() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-other");
+    let _dir = temp_dir("rws-other");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     // A laptop's cable moved to another IRC5 (every one's service port is 192.168.125.1)
@@ -1512,7 +1536,8 @@ fn rws_stops_when_another_controller_answers_after_a_new_login() {
 fn a_commutator_offset_from_another_controller_is_not_taken_and_rws_stops() {
     let mut b = Behaviour::default();
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
-    let (_fake, rws, mut h, _dir) = with_rws(b, "rws-other-calib");
+    let _dir = temp_dir("rws-other-calib");
+    let (_fake, rws, mut h) = with_rws(b, &_dir);
     add_via_dialog(&mut h, 5138, "Add");
     let k = h.state().chans.iter().find(|c| c.key.signal == 5138).unwrap().key.clone();
     assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: k, target_deg: None }));
@@ -1533,7 +1558,8 @@ fn a_commutator_offset_from_another_controller_is_not_taken_and_rws_stops() {
 
 #[test]
 fn rws_stops_and_says_so_after_an_internal_error() {
-    let (_fake, _rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-crash");
+    let _dir = temp_dir("rws-crash");
+    let (_fake, _rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     h.state().crash_rws_for_test();
@@ -1564,7 +1590,8 @@ fn start_recording(h: &mut Harness<'static, SpyApp>) {
 
 #[test]
 fn a_login_again_during_a_recording_files_no_event_twice_and_reads_back_what_it_missed() {
-    let (_fake, rws, mut h, dir) = with_rws(Behaviour::default(), "rws-again");
+    let dir = temp_dir("rws-again");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &dir);
     start_recording(&mut h);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
@@ -1600,7 +1627,8 @@ fn a_login_again_during_a_recording_files_no_event_twice_and_reads_back_what_it_
 
 #[test]
 fn an_unreadable_controller_event_is_said_and_the_rest_arrive() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-unreadable");
+    let _dir = temp_dir("rws-unreadable");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     rws.with(|b| {
@@ -1615,7 +1643,8 @@ fn an_unreadable_controller_event_is_said_and_the_rest_arrive() {
 
 #[test]
 fn the_clock_offset_follows_a_change_of_the_controllers_clock() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-clock");
+    let _dir = temp_dir("rws-clock");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     // Its clock set an hour on (a DST change, or someone correcting it): the window
@@ -1635,7 +1664,8 @@ fn an_event_logged_as_the_clock_is_set_mid_look_is_placed_through_the_new_clock(
     // The clock set on between a look's clock read and its events read, and an event
     // logged on the new clock: placed through the old offset it would be an hour off
     // (and a recording would take it for one from before its start).
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-clock-mid-look");
+    let _dir = temp_dir("rws-clock-mid-look");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     rws.with(|b| b.clock_step_at_events = 3600);
@@ -1647,7 +1677,8 @@ fn an_event_logged_as_the_clock_is_set_mid_look_is_placed_through_the_new_clock(
 
 #[test]
 fn with_the_event_log_off_a_refused_login_still_ends_rws() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-off-refused");
+    let _dir = temp_dir("rws-off-refused");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     h.get_by_label("Event log on the charts and in recordings (a look every 5 s)").click();
@@ -1661,7 +1692,8 @@ fn with_the_event_log_off_a_refused_login_still_ends_rws() {
 
 #[test]
 fn rws_log_lines_carry_no_login_and_say_when_an_event_happened() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-log");
+    let _dir = temp_dir("rws-log");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     assert!(!log_texts(&h).iter().any(|t| t.contains("Default User")), "the user name reached the log file");
@@ -1676,7 +1708,8 @@ fn rws_log_lines_carry_no_login_and_say_when_an_event_happened() {
 
 #[test]
 fn the_rws_window_shows_the_login_while_infostream_reconnects() {
-    let (mut fake, _rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-reconnecting");
+    let _dir = temp_dir("rws-reconnecting");
+    let (mut fake, _rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     fake.stop();
@@ -1689,7 +1722,8 @@ fn the_rws_window_shows_the_login_while_infostream_reconnects() {
 #[test]
 fn rws_does_without_the_controllers_identity() {
     let rb = spy_core::fake_rws::RwsBehaviour { identity: false, ..Default::default() };
-    let (_fake, _rws, mut h, _dir) = with_rws_as(Behaviour::default(), rb, "rws-no-identity");
+    let _dir = temp_dir("rws-no-identity");
+    let (_fake, _rws, mut h) = with_rws_as(Behaviour::default(), rb, &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()), "a display name made RWS unusable");
     assert!(h.query_by_label("IRB2600 · RobotWare 6.16.2027").is_some());
@@ -1697,7 +1731,8 @@ fn rws_does_without_the_controllers_identity() {
 
 #[test]
 fn the_rws_password_goes_when_the_connection_ends() {
-    let (_fake, _rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-password");
+    let _dir = temp_dir("rws-password");
+    let (_fake, _rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     h.get_by_label("Disconnect").click();
@@ -1707,7 +1742,8 @@ fn the_rws_password_goes_when_the_connection_ends() {
 
 #[test]
 fn events_already_on_their_way_when_the_session_ends_are_kept() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-drain");
+    let _dir = temp_dir("rws-drain");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     log_in(&mut h, "robotics");
     assert!(wait(&mut h, 5000, |a| a.rws_ready()));
     rws.push_event(10010, 1, "on its way");
@@ -1725,7 +1761,8 @@ fn events_already_on_their_way_when_the_session_ends_are_kept() {
 
 #[test]
 fn controller_events_that_arrive_after_stop_reach_the_recording() {
-    let (_fake, rws, mut h, dir) = with_rws(Behaviour::default(), "rws-late");
+    let dir = temp_dir("rws-late");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &dir);
     start_recording(&mut h);
     // Looks far apart: an event logged just before STOP arrives after it.
     h.state_mut().rws_poll = Duration::from_secs(4);
@@ -1742,7 +1779,8 @@ fn controller_events_that_arrive_after_stop_reach_the_recording() {
 
 #[test]
 fn save_last_keeps_the_controller_events_of_its_stretch() {
-    let (_fake, rws, mut h, _dir) = with_rws(Behaviour::default(), "rws-save-last");
+    let _dir = temp_dir("rws-save-last");
+    let (_fake, rws, mut h) = with_rws(Behaviour::default(), &_dir);
     add_via_dialog(&mut h, 4002, "Add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     log_in(&mut h, "robotics");
@@ -1757,7 +1795,8 @@ fn save_last_keeps_the_controller_events_of_its_stretch() {
 
 #[test]
 fn the_browser_shows_named_signals_and_finds_any_number() {
-    let mut h = harness(temp_dir("browse"), AskPolicy::Remote);
+    let dir = temp_dir("browse");
+    let mut h = harness(&dir, AskPolicy::Remote);
     let get = |h: &Harness<'static, SpyApp>, n: u32| h.state().catalogue.get(n).unwrap().clone();
     let (open, inert, named, strong) = (get(&h, 8000), get(&h, 1101), get(&h, 4002), get(&h, 1717));
     // Named only by default.
@@ -1793,7 +1832,7 @@ fn a_settings_file_without_lanes_gives_each_channel_its_own_chart() {
         ]}"#,
     )
     .unwrap();
-    let h = harness(dir, AskPolicy::Remote);
+    let h = harness(&dir, AskPolicy::Remote);
     let lanes: Vec<u32> = h.state().chans.iter().map(|c| c.lane).collect();
     assert_eq!(lanes.len(), 3);
     assert_eq!(lanes[2], 7, "a saved lane is kept");
@@ -1810,7 +1849,8 @@ fn a_padded_speed_and_a_wrapping_angle_read_true_on_the_card_and_the_phone() {
     b.signals.insert(6010, SignalDef { source: SignalSource::float(|(t, _, _)| if [0, 1, 4, 5, 8].contains(&(t / 4 % 10)) { 0.5 } else { 0.0 }), sample_ms: 4.032 });
     b.signals.insert(5138, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 4 % 2 == 0 { std::f32::consts::TAU - 0.002 } else { 0.001 }), sample_ms: 4.032 });
     let fake = FakeController::start(b).unwrap();
-    let mut h = harness(temp_dir("readings"), AskPolicy::Remote);
+    let dir = temp_dir("readings");
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().settings.phone_port = 0;
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
@@ -1839,7 +1879,8 @@ fn one_chart_never_mixes_two_units() {
     // of its own, not share the degree axis (it drew near zero, and its hover said
     // "0.52 deg").
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("units"), AskPolicy::Remote);
+    let dir = temp_dir("units");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 6000, "Add the block 6000-6005");
@@ -1868,7 +1909,7 @@ fn a_settings_file_that_puts_two_units_in_one_lane_gets_two_charts() {
         ]}"#,
     )
     .unwrap();
-    let h = harness(dir, AskPolicy::Remote);
+    let h = harness(&dir, AskPolicy::Remote);
     let lanes = h.state().lanes(&[true, true]);
     assert_eq!(lanes, vec![(3, "V".to_string()), (3, "deg".to_string())]);
 }
@@ -1925,7 +1966,8 @@ fn a_minimised_window_keeps_the_phone_the_turn_and_the_title_current() {
     let finder = VcFinder::new(move |timeout| {
         found.lock().unwrap().iter().filter_map(|&p| spy_core::discovery::hello(std::net::SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect()
     });
-    let mut h = harness_with(temp_dir("minimised"), Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
+    let dir = temp_dir("minimised");
+    let mut h = harness_with(&dir, Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
     h.state_mut().settings.phone_port = 0;
     connect(&mut h, &old);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
@@ -1980,7 +2022,8 @@ fn a_minimised_window_keeps_the_phone_the_turn_and_the_title_current() {
 
 #[test]
 fn a_recording_that_closes_while_minimised_is_said_when_the_window_is_shown() {
-    let (fake, rws, mut h, dir) = with_rws(Behaviour::default(), "minimised-rec");
+    let dir = temp_dir("minimised-rec");
+    let (fake, rws, mut h) = with_rws(Behaviour::default(), &dir);
     add_via_dialog(&mut h, 4002, "Add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     log_in(&mut h, "robotics");
@@ -2019,7 +2062,8 @@ fn a_recording_that_closes_while_minimised_is_said_when_the_window_is_shown() {
 
 #[test]
 fn toasts_left_unseen_are_kept_to_the_newest_few() {
-    let mut h = harness(temp_dir("toasts"), AskPolicy::Remote);
+    let dir = temp_dir("toasts");
+    let mut h = harness(&dir, AskPolicy::Remote);
     for i in 0..30 {
         h.state_mut().toast(spy_core::log::Level::Info, format!("said {i}"));
     }
@@ -2057,7 +2101,8 @@ fn on_the_line(p: &crate::xy::Pairs) -> bool {
 #[test]
 fn the_xy_plot_pairs_two_channels_tick_by_tick_over_the_stretch_in_view() {
     let fake = FakeController::start(xy_signals()).unwrap();
-    let mut h = harness(temp_dir("xy"), AskPolicy::Remote);
+    let dir = temp_dir("xy");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     for n in [4001, 4002, 318, 1298, 6010] {
@@ -2150,7 +2195,8 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     // 2 x 4001 + 3 on every tick, and 2 x 318 + 3 on the 24 ms group's ticks; 1298 is a
     // sawtooth, 6010 a zero-filled constant.
     let fake = FakeController::start(xy_signals()).unwrap();
-    let mut h = harness(temp_dir("compare"), AskPolicy::Remote);
+    let dir = temp_dir("compare");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     for n in [4001, 4002, 318, 1298, 6010] {
@@ -2232,7 +2278,8 @@ fn disconnect_pressed_through_accessibility_stays_disconnected() {
     // screen reader or an automation tool takes) was followed by a connect half a second
     // later, nobody having asked: Connect is drawn where Disconnect was.
     let fake = FakeController::start(Behaviour::default()).unwrap();
-    let mut h = harness(temp_dir("a11y-disconnect"), AskPolicy::Remote);
+    let dir = temp_dir("a11y-disconnect");
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     let total = fake.connections_total();
@@ -2273,7 +2320,8 @@ fn every_channel_is_named_with_its_number_where_channels_are_told_apart() {
     // Several signals share a catalogue name: at the cell (2026-10-04) five cards and four
     // Compare rows read "Load-derived quantity, two groups ROB_1 J1" alike. The cards and
     // the chart menu's overlay choices name each with its number, as the legends do.
-    let mut h = harness(temp_dir("numbered"), AskPolicy::Remote);
+    let dir = temp_dir("numbered");
+    let mut h = harness(&dir, AskPolicy::Remote);
     let key = |axis| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(axis).unwrap() };
     assert!(h.state_mut().add_channels(vec![key(1), key(2)], false));
     let _ = h.run_ok();
@@ -2301,7 +2349,7 @@ fn type_into(h: &mut Harness<'static, SpyApp>, role: egui::accesskit::Role, labe
 fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     use egui::accesskit::Role;
     let dir = temp_dir("notes");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().settings.show_open = true;
     h.state_mut().selected = Some(1403);
     let _ = h.run_ok();
@@ -2332,7 +2380,7 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
 
     // Next time: the same notes.
     drop(h);
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     h.state_mut().settings.show_open = true;
     h.state_mut().selected = Some(1403);
     let _ = h.run_ok();
@@ -2364,7 +2412,8 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
 
 #[test]
 fn your_notes_export_in_the_catalogues_columns_and_never_with_an_address() {
-    let (_fake, _rws, mut h, dir) = with_rws(Behaviour::default(), "notes-export");
+    let dir = temp_dir("notes-export");
+    let (_fake, _rws, mut h) = with_rws(Behaviour::default(), &dir);
     let export = |h: &mut Harness<'static, SpyApp>| {
         h.get_by_label("Catalogue").click();
         let _ = h.run_ok();
@@ -2413,7 +2462,7 @@ fn your_notes_export_in_the_catalogues_columns_and_never_with_an_address() {
 fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     let fake = FakeController::start(xy_signals()).unwrap();
     let dir = temp_dir("xy-review");
-    let mut h = harness(dir.clone(), AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 4001, "Add");
@@ -2472,7 +2521,7 @@ fn channels_come_back_next_time() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("persist");
     {
-        let mut h = harness(dir.clone(), AskPolicy::Remote);
+        let mut h = harness(&dir, AskPolicy::Remote);
         add_via_dialog(&mut h, 6000, "Add the block 6000-6005");
         assert_eq!(h.state().chans.len(), 6);
         h.state_mut().host_input = "127.0.0.1".into();
@@ -2481,7 +2530,7 @@ fn channels_come_back_next_time() {
         let _ = h.run_ok();
         h.state_mut().shutdown();
     }
-    let mut h = harness(dir, AskPolicy::Remote);
+    let mut h = harness(&dir, AskPolicy::Remote);
     assert_eq!(h.state().chans.len(), 6, "the channel set is restored");
     assert_eq!(h.state().port_input, fake.port().to_string(), "the last controller is filled in");
     h.get_by_label("Connect").click();

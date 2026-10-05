@@ -477,9 +477,7 @@ mod tests {
     #[test]
     fn a_save_stopped_partway_leaves_nothing() {
         // The window closing while a long save runs: it stops, and no part file stays.
-        let dir = std::env::temp_dir().join(format!("spy-export-stop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = spy_core::testdir::TestDir::new("export-stop");
         let p = dir.join("x view.csv");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let s2 = stop.clone();
@@ -492,7 +490,6 @@ mod tests {
         let r = write_csv_until(&p, 0, None, vec![Series { id: "a".into(), name: "n".into(), units: String::new(), samples: Box::new(samples) }], &stop);
         assert!(r.is_err(), "finished though told to stop: {r:?}");
         assert!(!p.exists() && !part_name(&p).exists(), "a stopped save left a file behind");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -505,9 +502,7 @@ mod tests {
 
     #[test]
     fn a_save_appears_only_when_complete() {
-        let dir = std::env::temp_dir().join(format!("spy-export-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = spy_core::testdir::TestDir::new("export");
         let p = dir.join("x view.csv");
         assert_eq!(write_csv(&p, 0, None, vec![Series { id: "4002/ROB_1/J1".into(), name: "n".into(), units: "Nm".into(), samples: numbers(vec![(0, 1.0), (4, 2.0)]) }]), Ok(2));
         assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 3);
@@ -534,7 +529,6 @@ mod tests {
         std::fs::create_dir(&r).unwrap();
         assert!(write_csv(&r, 0, None, vec![Series { id: "4002/ROB_1/J1".into(), name: "n".into(), units: "Nm".into(), samples: numbers(vec![(0, 1.0)]) }]).is_err());
         assert!(!part_name(&r).exists(), "a failed save leaves no part file");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

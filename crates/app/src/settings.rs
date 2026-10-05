@@ -275,11 +275,11 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spy_core::testdir::TestDir;
 
     #[test]
     fn a_partial_or_old_file_loads_with_defaults() {
-        let dir = std::env::temp_dir().join(format!("spy-settings-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("settings");
         let p = dir.join("settings.json");
         std::fs::write(&p, r#"{"dark": false, "window_s": 99999, "units": ["ROB_1", "bad unit"], "unknown": 1}"#).unwrap();
         let (s, note) = Settings::load(&p);
@@ -300,17 +300,13 @@ mod tests {
         assert!(!p.exists(), "the bad file is set aside, not overwritten");
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).0, s);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn load_text(tag: &str, text: &str) -> (Settings, Option<String>) {
-        let dir = std::env::temp_dir().join(format!("spy-settings-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new(&format!("settings-{tag}"));
         let p = dir.join("settings.json");
         std::fs::write(&p, text).unwrap();
-        let r = Settings::load(&p);
-        let _ = std::fs::remove_dir_all(&dir);
-        r
+        Settings::load(&p)
     }
 
     #[test]
@@ -378,14 +374,12 @@ mod tests {
             rws_events: false,
         };
         assert_ne!(s, Settings::default());
-        let dir = std::env::temp_dir().join(format!("spy-settings-all-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("settings-all");
         let p = dir.join("settings.json");
         s.save(&p).unwrap();
         let (back, note) = Settings::load(&p);
         assert_eq!(note, None);
         assert_eq!(back, s);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn key(signal: u32, unit: &str, axis: u8) -> spy_core::store::ChannelKey {
@@ -394,8 +388,7 @@ mod tests {
 
     #[test]
     fn derived_channels_load_one_by_one_and_never_with_a_plateau() {
-        let dir = std::env::temp_dir().join(format!("spy-settings-derived-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("settings-derived");
         let p = dir.join("settings.json");
         std::fs::write(
             &p,
@@ -416,6 +409,5 @@ mod tests {
         assert_eq!(s.derived[0].def, spy_core::derived::Derived::Sag { link: key(5027, "ROB_1", 1), plateau_v: None }, "a plateau in the file is not used");
         assert_eq!(s.derived[0].lane, 2);
         assert_eq!(s.derived[1].def.id(), "duty-sum:ROB_1/J2");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

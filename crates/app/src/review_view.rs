@@ -683,16 +683,14 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, marks: &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spy_core::testdir::TestDir;
 
     /// A small recording on disk, opened: 4002 J1 at 1000-1040 ms, then after a 5 s gap
     /// at 6000-6040.
     fn gapped_review() -> Review {
         // A folder of its own per call: two tests run this at once, and one removing the
         // folder while the other reads it failed the other now and then.
-        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let d = std::env::temp_dir().join(format!("spy-review-gap-{}-{call}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = TestDir::new("review-gap");
         std::fs::write(
             d.join("recording.json"),
             r#"{"format": "abb-signal-spy-recording", "version": 2, "kind": "full", "app": "t", "started_utc": "2026-09-27T10:00:00.000Z", "complete": true,
@@ -705,9 +703,7 @@ mod tests {
             csv += &format!("{t},4002/ROB_1/J1,{}\n", if t < 5000 { 1 } else { 2 });
         }
         std::fs::write(d.join("data.csv"), csv).unwrap();
-        let r = spy_core::review::open(&d, &[]).unwrap();
-        let _ = std::fs::remove_dir_all(&d);
-        r
+        spy_core::review::open(&d, &[]).unwrap()
     }
 
     #[test]
@@ -731,23 +727,20 @@ mod tests {
 
     #[test]
     fn a_dropped_folder_or_one_of_its_files_means_the_recording() {
-        let d = std::env::temp_dir().join(format!("spy-dropped-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = TestDir::new("dropped");
         assert_eq!(recording_dir(&d), None, "no recording.json: not a recording");
         std::fs::write(d.join("recording.json"), "{}").unwrap();
         std::fs::write(d.join("data.csv"), "").unwrap();
-        assert_eq!(recording_dir(&d), Some(d.clone()));
-        assert_eq!(recording_dir(&d.join("data.csv")), Some(d.clone()));
-        assert_eq!(recording_dir(&d.join("recording.json")), Some(d.clone()));
-        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(recording_dir(&d), Some(d.to_path_buf()));
+        assert_eq!(recording_dir(&d.join("data.csv")), Some(d.to_path_buf()));
+        assert_eq!(recording_dir(&d.join("recording.json")), Some(d.to_path_buf()));
     }
 
     #[test]
     fn a_recorded_channel_goes_by_the_catalogues_name_now() {
         // Recorded on the cell on 2026-09-26 before 6000 was found to be the EGM
         // reference: its old name stays in the recording, the review shows the right one.
-        let d = std::env::temp_dir().join(format!("spy-review-name-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = TestDir::new("review-name");
         std::fs::write(
             d.join("recording.json"),
             r#"{"format": "abb-signal-spy-recording", "version": 1, "kind": "full", "app": "t", "started_utc": "2026-09-26T08:47:20.000Z", "complete": true,
@@ -765,13 +758,11 @@ mod tests {
         let unknown = r.channel("77777/ROB_1/J1").unwrap();
         assert_eq!(name(&cat, unknown), "Something new", "a signal the catalogue does not know keeps its recorded name");
         assert_eq!(display(ch), ("deg".to_string(), 180.0 / std::f64::consts::PI));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn a_recorded_resolver_angle_averages_on_the_circle() {
-        let d = std::env::temp_dir().join(format!("spy-review-wrap-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = TestDir::new("review-wrap");
         std::fs::write(
             d.join("recording.json"),
             r#"{"format": "abb-signal-spy-recording", "version": 2, "kind": "full", "app": "t", "started_utc": "2026-09-27T10:00:00.000Z", "complete": true,
@@ -786,6 +777,5 @@ mod tests {
         let s = review_stats(&cat, r.channel("5138/ROB_1/J1").unwrap(), 0, 100);
         assert_eq!(s.n, 4);
         assert!(s.mean < 0.01 || s.mean > 359.99, "the mean is {} deg: averaged across the wrap", s.mean);
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

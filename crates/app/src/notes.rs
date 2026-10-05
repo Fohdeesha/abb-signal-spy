@@ -479,12 +479,13 @@ pub fn note_mark(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spy_core::testdir::TestDir;
 
-    fn temp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("spy-notes-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d.join(FILE)
+    /// The notes file in a folder of its own, which goes when the test ends.
+    fn temp(tag: &str) -> (TestDir, PathBuf) {
+        let d = TestDir::new(&format!("notes-{tag}"));
+        let p = d.join(FILE);
+        (d, p)
     }
 
     fn note(name: &str, evidence: &str) -> Note {
@@ -493,7 +494,7 @@ mod tests {
 
     #[test]
     fn notes_survive_a_save_and_a_load_and_an_empty_one_is_removed() {
-        let p = temp("round");
+        let (_dir, p) = temp("round");
         let (mut notes, msg) = Notes::load(&p);
         assert!(msg.is_none() && notes.map.is_empty(), "no file yet is no notes, and nothing to say");
         let full = Note { name: "gear wind-up".into(), description: "d".into(), units: "rad".into(), category: "motor".into(), confidence: Leaning::Probable, evidence: "e".into(), ruled_out: "r".into(), open_question: "o".into(), next_test: "n".into(), saved: "2026-09-29_14-03-07".into() };
@@ -510,7 +511,7 @@ mod tests {
 
     #[test]
     fn a_bad_note_costs_that_note_and_a_bad_file_is_set_aside_not_overwritten() {
-        let p = temp("bad");
+        let (_dir, p) = temp("bad");
         std::fs::write(&p, r#"{"format":"abb-signal-spy-notes","version":1,"notes":{"1403":{"name":"x"},"abc":{"name":"y"},"0":{},"5007":{"confidence":"certain"}}}"#).unwrap();
         let (notes, msg) = Notes::load(&p);
         assert_eq!(notes.map.keys().copied().collect::<Vec<_>>(), vec![1403]);
@@ -537,7 +538,7 @@ mod tests {
 
     #[test]
     fn a_file_that_cannot_be_read_is_never_overwritten() {
-        let p = temp("locked");
+        let (_dir, p) = temp("locked");
         // A folder where the file should be: unreadable, and not renamable into place.
         std::fs::create_dir_all(&p).unwrap();
         let (mut notes, msg) = Notes::load(&p);

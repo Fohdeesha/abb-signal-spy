@@ -11,8 +11,9 @@ publish.workspace = true
 name = "spy_core"
 
 [features]
-# The in-process fake controller (tests, the probe's self-test, demos). It
-# listens on loopback only and is never built into the app unless asked for.
+# The in-process fake controller (tests, the probe's self-test, demos), and the
+# tests' self-deleting temporary folder. The fake listens on loopback only, and
+# neither is built into the app unless asked for.
 fake = []
 
 [dependencies]

@@ -570,17 +570,15 @@ impl Review {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdir::TestDir;
 
-    fn temp(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("spy-review-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn temp(tag: &str) -> TestDir {
+        TestDir::new(&format!("review-{tag}"))
     }
 
     /// A recording folder: its description (with these anchors, markers, events and
     /// channel ids) and its data file, as given.
-    fn folder(tag: &str, kind: &str, anchors: &str, extra: &str, csv: &str) -> PathBuf {
+    fn folder(tag: &str, kind: &str, anchors: &str, extra: &str, csv: &str) -> TestDir {
         let d = temp(tag);
         let file = if kind == "slow" { "slow.csv" } else { "data.csv" };
         let json = format!(
@@ -632,14 +630,12 @@ mod tests {
         assert!(r.notes.iter().any(|n| n.contains("not the three PWM legs")), "{:?}", r.notes);
         assert!(r.notes.iter().any(|n| n.contains("Turn to target") && n.contains("not in the recording")), "{:?}", r.notes);
         assert!(r.notes.iter().any(|n| n.contains("computed with the last one")), "a setting changed while recording: {:?}", r.notes);
-        let _ = std::fs::remove_dir_all(&d);
 
         // A slow log's averages are not a sample-by-sample input.
         let slow = folder("derived-slow", "slow", r#"{"controller_ms": 10000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#, derived, "controller_ms,channel,count,mean,min,max\n10000,5027/ROB_1/J1,25,350,349,351\n");
         let r = open(&slow, &[]).unwrap();
         assert!(r.channel("sag:5027/ROB_1/J1").is_none());
         assert!(r.notes.iter().any(|n| n.contains("slow log")), "{:?}", r.notes);
-        let _ = std::fs::remove_dir_all(&slow);
     }
 
     #[test]
@@ -656,7 +652,6 @@ mod tests {
         assert_eq!(ch.t, vec![t0, t0 + 4, t0 + 8, t1, t1 + 4]);
         assert_eq!(ch.v, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         assert_eq!((r.start, r.end, r.out_of_order), (t0, t1 + 4, 0));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -671,7 +666,6 @@ mod tests {
         let ch = r.channel("4002/ROB_1/J1").expect("the format-1 id read under the new one");
         let (a, b, c) = (ms("2026-09-27T10:00:00.000Z"), ms("2026-09-27T10:01:00.500Z"), ms("2026-09-27T10:05:00.000Z"));
         assert_eq!(ch.t, vec![a, a + 4, b, c, c + 4], "the reconnect's anchor re-times its rows (the PC's clock drifted 0.5 s)");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -681,7 +675,6 @@ mod tests {
         assert!(!r.wall_clock);
         assert_eq!(r.channel("4002/ROB_1/J1").unwrap().t, vec![100, 104]);
         assert!(r.notes.iter().any(|n| n.contains("no wall-clock anchor")), "{:?}", r.notes);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -699,7 +692,6 @@ mod tests {
         let cols = ch.decimate(r.start, r.end + 1, 100, 1.0);
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].iter().map(|c| c.max).fold(f64::MIN, f64::max), 9.0, "the band's maximum is charted");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -712,7 +704,6 @@ mod tests {
         assert_eq!((r.bad_rows, r.out_of_order), (1, 1));
         assert_eq!(r.bad_lines, vec![3]);
         assert_eq!(r.notes.len(), 2, "{:?}", r.notes);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -720,7 +711,6 @@ mod tests {
         let d = folder("big", "full", "", "", "controller_ms,channel,value\n100,4002/ROB_1/J1,1\n");
         let e = open_limited(&d, &[], 10).unwrap_err();
         assert!(e.contains("more than this program opens"), "{e}");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -736,7 +726,6 @@ mod tests {
         assert_eq!(ch.v, vec![0.5, 0.5, 0.5, 0.7, 0.7]);
         assert_eq!(ch.recorded(i64::MIN, i64::MAX).map(|(_, v)| v).collect::<Vec<_>>(), vec![0.5, 0.0, 0.0, 0.7, 0.0], "the values as recorded stay available");
         assert_eq!(open(&d, &[]).unwrap().channel("6010/ROB_1/J1").unwrap().v, vec![0.5, 0.0, 0.0, 0.7, 0.0]);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -748,7 +737,6 @@ mod tests {
         let r = open(&d, &[]).unwrap();
         let t0 = ms("2026-09-27T10:00:00.000Z");
         assert_eq!(r.marks, vec![ReviewMark { t: t0 + 200, kind: "lost".into(), text: "connection lost".into() }, ReviewMark { t: t0 + 500, kind: "marker".into(), text: "dip".into() }]);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn channel(t: Vec<i64>, v: Vec<f64>) -> ReviewChannel {
@@ -820,7 +808,6 @@ mod tests {
         let r = open(&d, &[]).unwrap();
         let m = r.marks.iter().find(|m| m.kind == "marker").unwrap();
         assert_eq!(m.t, ms("2026-09-27T11:00:00.000Z"), "{} ms off its sample", m.t - ms("2026-09-27T11:00:00.000Z"));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -832,7 +819,6 @@ mod tests {
         assert_eq!(r.channel("4002/ROB_1/J1").unwrap().v, vec![1.0, 2.0, 3.0, 4.0], "the rows after the garbled ones were dropped as out of order");
         assert_eq!(r.bad_rows, 2);
         assert!(r.end - r.start < 1000, "the stretch spans {} ms", r.end - r.start);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -848,10 +834,8 @@ mod tests {
         let r = open(&d, &[]).unwrap();
         assert_eq!(r.channel("4002/ROB_1/J1").unwrap().v, vec![356.7], "a cut-off value read as data");
         assert_eq!(r.bad_rows, 1);
-        let _ = std::fs::remove_dir_all(&d);
         let d = folder("uncut", "full", anchors, "", csv);
         assert_eq!(open(&d, &[]).unwrap().channel("4002/ROB_1/J1").unwrap().v, vec![356.7, 35.0], "a complete file's last line is its own");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

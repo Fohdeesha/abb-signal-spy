@@ -26,3 +26,5 @@ pub mod wire;
 pub mod fake;
 #[cfg(feature = "fake")]
 pub mod fake_rws;
+#[cfg(feature = "fake")]
+pub mod testdir;

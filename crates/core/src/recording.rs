@@ -1100,6 +1100,7 @@ impl<R: std::io::BufRead> CsvRows<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdir::TestDir;
 
     #[test]
     fn numbers_print_as_sent() {
@@ -1114,7 +1115,7 @@ mod tests {
 
     #[test]
     fn folder_names_are_safe_and_unique() {
-        let base = std::env::temp_dir().join(format!("spy-rec-test-{}", std::process::id()));
+        let base = TestDir::new("rec-names");
         let a = new_folder(&base, "dc link: dip/1?").unwrap();
         let b = new_folder(&base, "dc link: dip/1?").unwrap();
         assert_ne!(a, b);
@@ -1134,13 +1135,10 @@ mod tests {
         let after = crate::util::local_stamp(SystemTime::now());
         let name = d.file_name().unwrap().to_string_lossy().to_string();
         assert!(name == before || name == after, "{name} is not {before} (local time)");
-        let _ = std::fs::remove_dir_all(&base);
     }
 
-    fn temp(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("spy-rec-unit-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        p
+    fn temp(tag: &str) -> TestDir {
+        TestDir::new(&format!("rec-unit-{tag}"))
     }
 
     fn manual_tap(capacity: usize) -> (mpsc::SyncSender<TapEvent>, Tap) {
@@ -1192,7 +1190,6 @@ mod tests {
         stopper.join().unwrap();
         feeder.join().unwrap();
         assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1222,7 +1219,6 @@ mod tests {
         let at: Vec<i64> = back.meta.anchors.iter().map(|a| a.controller_ms).collect();
         assert_eq!(at, vec![1000, 2000], "the first sample after a loss anchors the wall clock again");
         assert_eq!(back.meta.anchors[0].utc, wall_iso(arrived));
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(windows)]
@@ -1253,7 +1249,6 @@ mod tests {
         let back = read(&dir).unwrap();
         assert_eq!(back.meta.markers.len(), 2);
         assert_eq!(back.data["4002/ROB_1/J1"].len(), 6);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1284,7 +1279,6 @@ mod tests {
         let at: Vec<i64> = back.meta.anchors.iter().map(|a| a.controller_ms).collect();
         assert_eq!(at, vec![1000, 900_000]);
         assert!(back.meta.events.iter().any(|e| e.kind == "clock_reset" && e.text.contains("forward")));
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn connected(system: &str) -> TapEvent {
@@ -1315,7 +1309,6 @@ mod tests {
         assert_eq!(back.meta.system_id.as_deref(), Some("{A}"));
         assert_eq!(back.data["4002/ROB_1/J1"].iter().map(|r| r.0).collect::<Vec<_>>(), vec![1000, 1004, 1008, 2000, 2004, 2008], "nothing of the second controller's");
         assert!(back.meta.notes.contains("{B}"), "{}", back.meta.notes);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1331,13 +1324,11 @@ mod tests {
         let st = rec.stop();
         assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
         assert_eq!(read(&st.dir).unwrap().meta.system_id.as_deref(), Some("{A}"));
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn events_that_arrive_late_are_added_once_in_time_order_and_nothing_else_changes() {
         let dir = temp("append");
-        std::fs::create_dir_all(&dir).unwrap();
         let mut meta = Meta::new(Kind::Full, "test", "127.0.0.1:1", Some("{S}".into()));
         meta.version = 1;
         meta.events.push(EventEntry { utc: "2026-09-28T10:00:02.000Z".into(), kind: "connected".into(), text: "c".into(), controller_ms: Some(5) });
@@ -1355,7 +1346,6 @@ mod tests {
         assert_eq!(texts, ["10010 Motors OFF state (information)", "c", "50204 Motion supervision (error)"], "in time order");
         let raw = std::fs::read_to_string(dir.join("recording.json")).unwrap();
         assert!(raw.contains("\"4002/ROB_1/2\"") && raw.contains("\"version\": 1"), "the rest of a format 1 file is kept as written");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1373,7 +1363,6 @@ mod tests {
         let back = read(&rec.stop().dir).unwrap();
         let rows: Vec<(i64, Option<u64>)> = back.meta.anchors.iter().map(|a| (a.controller_ms, a.row)).collect();
         assert_eq!(rows, vec![(900_000, Some(0)), (5000, Some(3))]);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1394,7 +1383,6 @@ mod tests {
         let back = read(&st.dir).unwrap();
         let rows: Vec<(i64, Option<u64>)> = back.meta.anchors.iter().map(|a| (a.controller_ms, a.row)).collect();
         assert_eq!(rows, vec![(900_000, Some(0)), (5000, Some(1))]);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1402,7 +1390,6 @@ mod tests {
         // The cell's recordings of 2026-09-26 wrote 4002/ROB_1/2; this program now
         // writes 4002/ROB_1/J2. Both read back the same.
         let dir = temp("v1");
-        std::fs::create_dir_all(&dir).unwrap();
         let mut meta = Meta::new(Kind::Full, "", "192.0.2.77:5515", None);
         meta.version = 1;
         let mut e = entry(&ChannelKey::parse_id("4002/ROB_1/2").unwrap(), None);
@@ -1415,7 +1402,6 @@ mod tests {
         assert_eq!(back.data["4002/ROB_1/J2"], vec![(10, 1.5), (14, 2.5)]);
         assert_eq!(back.meta.channels[0].id, "4002/ROB_1/J2");
         assert_eq!(back.data["not/a/channel"], vec![(18, 3.0)], "an id it cannot parse is kept as written");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1433,7 +1419,6 @@ mod tests {
         let names: Vec<String> = list(&base).into_iter().map(|(_, m)| m.label).collect();
         assert_eq!(names, vec!["b", "a", "c"]);
         assert!(list(&base.join("missing")).is_empty());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1492,7 +1477,6 @@ mod tests {
         let utc = |i: usize| crate::util::parse_iso(&back.meta.anchors[i].utc).unwrap();
         let gap = utc(1).duration_since(utc(0)).unwrap().as_secs_f64();
         assert!((19.9..20.1).contains(&gap), "the anchors are {gap} s apart; 20 s passed");
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
