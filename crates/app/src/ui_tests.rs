@@ -2179,6 +2179,13 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     assert!(h.query_all_by_label_contains("r = 1.0000").next().is_some(), "the correlation is not shown");
     let header = format!("{} =", res.subject_title);
     assert!(h.query_by_label(&header).is_some(), "the line's header does not name the channel compared ({header})");
+    // Each named with its number: on the IRC5 (2026-10-04) four rows read "Load-derived
+    // quantity, two groups ROB_1 J1" alike, 8080, 8082, 883 and 8081.
+    let numbered = |id: &str, title: &str| title.starts_with(&format!("{} · ", id.split('/').next().unwrap()));
+    assert!(numbered(&res.subject, &res.subject_title), "{}", res.subject_title);
+    for r in &res.rows {
+        assert!(numbered(&r.id, &r.title), "a row without its number: {}", r.title);
+    }
     assert!(h.query_all_by_label("2.00000 × this + 3.00000 Nm").count() == 2, "the line is not shown");
     // One click: the pair in the XY plot, the channel compared on Y.
     h.get_all_by_label("Show in XY").next().unwrap().click();
@@ -2217,6 +2224,69 @@ fn compare_ranks_the_other_channels_by_how_closely_it_follows_a_line_of_each() {
     h.get_all_by_label("⋯").next().unwrap().click();
     let _ = h.run_ok();
     assert!(h.query_by_label("Compare with the other channels").is_none(), "offered with nothing to compare with");
+}
+
+#[test]
+fn disconnect_pressed_through_accessibility_stays_disconnected() {
+    // Seen 2026-10-04 on the VC: Disconnect pressed through UI Automation (the path a
+    // screen reader or an automation tool takes) was followed by a connect half a second
+    // later, nobody having asked: Connect is drawn where Disconnect was.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let mut h = harness(temp_dir("a11y-disconnect"), AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let total = fake.connections_total();
+    h.get_by_label("Disconnect").click_accesskit();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle), "{:?}", phase(h.state()));
+    // Long enough for any connect to show.
+    std::thread::sleep(Duration::from_millis(800));
+    let _ = h.run_ok();
+    assert_eq!(phase(h.state()), Phase::Idle, "connected again after Disconnect");
+    assert_eq!(fake.connections_total(), total, "a connection was made after Disconnect");
+    // And the other way: Connect pressed so is one connect, not a connect and a disconnect.
+    h.get_by_label("Connect").click_accesskit();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
+    std::thread::sleep(Duration::from_millis(800));
+    let _ = h.run_ok();
+    assert_eq!(phase(h.state()), Phase::Streaming, "disconnected again after Connect");
+    // As on the VC that night: no samples coming, and a teardown the controller is slow to
+    // answer, so Disconnect shows for frames after it was pressed.
+    fake.with(|b| {
+        b.mute_all = true;
+        b.unanswered = ["StopStream", "StreamUndefine", "StreamDisconnect"].iter().map(|s| s.to_string()).collect();
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let total = fake.connections_total();
+    h.get_by_label("Disconnect").click_accesskit();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Idle), "{:?}", phase(h.state()));
+    std::thread::sleep(Duration::from_millis(800));
+    let _ = h.run_ok();
+    assert_eq!(phase(h.state()), Phase::Idle, "connected again after a slow Disconnect");
+    assert_eq!(fake.connections_total(), total, "a connection was made after a slow Disconnect");
+}
+
+#[test]
+fn every_channel_is_named_with_its_number_where_channels_are_told_apart() {
+    // Several signals share a catalogue name: at the cell (2026-10-04) five cards and four
+    // Compare rows read "Load-derived quantity, two groups ROB_1 J1" alike. The cards and
+    // the chart menu's overlay choices name each with its number, as the legends do.
+    let mut h = harness(temp_dir("numbered"), AskPolicy::Remote);
+    let key = |axis| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(axis).unwrap() };
+    assert!(h.state_mut().add_channels(vec![key(1), key(2)], false));
+    let _ = h.run_ok();
+    let (j1, j2) = (view::short_label(&h.state().catalogue, &key(1)), view::short_label(&h.state().catalogue, &key(2)));
+    assert!(j1.starts_with("4002 · ") && j2.starts_with("4002 · "), "{j1} / {j2}");
+    for name in [&j1, &j2] {
+        // A label's text is its node's value (the legends' entries are checkboxes).
+        let cards = h.query_all_by(|n| n.role() == egui::accesskit::Role::Label && n.value().as_deref() == Some(name.as_str())).count();
+        assert_eq!(cards, 1, "no card named {name}");
+    }
+    h.get_all_by_label("⋯").next().unwrap().click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label(&format!("Overlay on: {j2}")).is_some(), "the overlay choice does not name {j2}");
 }
 
 /// Click into a text field (by its label) and type, as a person does.
@@ -2364,6 +2434,9 @@ fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     assert!(h.query_by_label("XY plot · reviewing, not live").is_some(), "the plot does not say it is not live");
     let (_, p) = xy_pairs(h.state()).unwrap();
     assert!(on_the_line(p) && p.points.len() <= recorded);
+    // Its channels (and Compare's) named with their numbers, as live.
+    let titles: Vec<String> = h.state().xy_sources().0.iter().map(|c| c.title.clone()).collect();
+    assert!(titles.len() == 2 && titles.iter().all(|t| t.starts_with("4001 · ") || t.starts_with("4002 · ")), "{titles:?}");
 
     // The first half in view: the pairs of the first half.
     let all = p.points.len();

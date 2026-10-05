@@ -180,14 +180,16 @@ impl SpyApp {
                 .filter(|(_, ch)| !ch.v.is_empty())
                 .map(|(i, ch)| {
                     let (units, factor) = crate::review_view::display_of(ch);
-                    Candidate { id: ch.id.clone(), title: crate::review_view::name_of(&self.catalogue, ch), units, source: Source::Recorded(r.clone(), i, factor) }
+                    Candidate { id: ch.id.clone(), title: crate::review_view::short_of(&self.catalogue, ch), units, source: Source::Recorded(r.clone(), i, factor) }
                 })
                 .collect();
             return (cands, Some(rs.stretch()), Data::Review(Arc::as_ptr(&r) as usize, r.end));
         }
         let st = self.session.status().clone();
         let charted: Vec<bool> = (0..self.chans.len()).map(|i| self.charted(i, &st)).collect();
-        let cands = self.members(&charted, &st).into_iter().map(|m| Candidate { id: m.id.clone(), title: m.title.clone(), units: m.lane.1.clone(), source: Source::Live(m) }).collect();
+        // Named with their numbers: several signals share a catalogue name (four rows of
+        // Compare read alike on the IRC5, 2026-10-04).
+        let cands = self.members(&charted, &st).into_iter().map(|m| Candidate { id: m.id.clone(), title: m.name.clone(), units: m.lane.1.clone(), source: Source::Live(m) }).collect();
         let store = self.session.store();
         (cands, self.view_ms, Data::Live(store.newest(), store.epoch()))
     }

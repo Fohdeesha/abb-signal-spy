@@ -115,8 +115,9 @@ impl SpyApp {
         let lanes: Vec<(u32, String)> = {
             let mut v: Vec<(u32, String)> = Vec::new();
             for c in &self.chans {
+                // With the number: several signals share a catalogue name.
                 if !v.iter().any(|(l, _)| *l == c.lane) {
-                    v.push((c.lane, view::label(&self.catalogue, &c.key)));
+                    v.push((c.lane, view::short_label(&self.catalogue, &c.key)));
                 }
             }
             v
@@ -146,7 +147,8 @@ impl SpyApp {
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
                         ui.painter().rect_filled(rect, 2.0, color);
-                        let name = view::label(&self.catalogue, &key);
+                        // With the number, as the legend: five cards read alike at the cell.
+                        let name = view::short_label(&self.catalogue, &key);
                         ui.label(RichText::new(&name).strong()).on_hover_text(format!(
                             "{}\nsignal {}, {} axis {}{}",
                             sig.as_ref().map(|s| s.description.as_str()).unwrap_or(""),

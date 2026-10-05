@@ -610,6 +610,10 @@ pub(crate) fn name_of(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String 
     name(cat, ch)
 }
 
+pub(crate) fn short_of(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
+    short(cat, ch)
+}
+
 /// A recorded channel's display unit and factor (degrees for radians).
 fn display(ch: &ReviewChannel) -> (String, f64) {
     let units = ch.entry.as_ref().map(|e| e.units.clone()).unwrap_or_default();

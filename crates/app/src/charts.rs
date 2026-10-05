@@ -46,8 +46,9 @@ pub(crate) struct Member {
     factor: f64,
     hold: bool,
     reading: view::Reading,
-    /// For the legend.
-    name: String,
+    /// For the legend, and wherever channels are listed side by side (Compare, the XY
+    /// plot): with its number, since several signals share a catalogue name.
+    pub(crate) name: String,
     /// For a chart's title and the cursor table.
     pub(crate) title: String,
     frozen: bool,
