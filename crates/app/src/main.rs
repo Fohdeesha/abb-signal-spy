@@ -12,6 +12,7 @@ mod charts;
 mod compare;
 mod derived_view;
 mod export;
+mod fields;
 mod net;
 mod notes;
 mod oom;

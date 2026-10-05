@@ -14,6 +14,7 @@ use spy_core::session::MAX_CHANNELS;
 use spy_core::store::ChannelKey;
 
 use crate::app::{chan_color, AddDialog, ChanView, SpyApp, Stats};
+use crate::fields;
 use crate::theme;
 
 pub fn confidence_color(c: Confidence) -> egui::Color32 {
@@ -96,7 +97,7 @@ impl SpyApp {
         if ui.button("Channel sets...").on_hover_text("Both DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block, in one go").clicked() {
             self.open_sets();
         }
-        ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("search: number, name or unit").desired_width(f32::INFINITY));
+        fields::line(ui, &mut self.search, "Search the signals", |t| t.hint_text("search: number, name or unit").desired_width(f32::INFINITY));
         ui.horizontal_wrapped(|ui| {
             if ui.toggle_value(&mut self.settings.show_open, "open").on_hover_text("Also show signals that respond but are not yet identified").changed() {
                 self.mark_settings_dirty();
@@ -177,7 +178,7 @@ impl SpyApp {
 
         ui.horizontal(|ui| {
             ui.label("Raw number");
-            ui.add(egui::TextEdit::singleline(&mut self.raw_number).desired_width(70.0).hint_text("e.g. 4002"));
+            fields::line(ui, &mut self.raw_number, "Raw signal number", |t| t.desired_width(70.0).hint_text("e.g. 4002"));
             if ui.button("Add...").clicked() {
                 match self.raw_number.trim().parse::<u32>() {
                     Ok(n) if n > 0 => {
@@ -378,7 +379,7 @@ impl SpyApp {
                             ui.selectable_value(&mut d.unit, u.clone(), u);
                         }
                     });
-                    ui.add(egui::TextEdit::singleline(&mut d.unit).desired_width(90.0)).on_hover_text("Another unit name, e.g. ROB_3 or STN_1");
+                    fields::line(ui, &mut d.unit, "Mechanical unit", |t| t.desired_width(90.0)).on_hover_text("Another unit name, e.g. ROB_3 or STN_1");
                 });
                 if !unit_ok {
                     ui.colored_label(theme::BAD, "A mechanical unit name is letters, digits and _ (like ROB_1).");

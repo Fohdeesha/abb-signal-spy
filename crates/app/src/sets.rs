@@ -14,6 +14,7 @@ use spy_core::session::MAX_CHANNELS;
 use spy_core::store::ChannelKey;
 
 use crate::app::SpyApp;
+use crate::fields;
 use crate::theme;
 
 /// What a set asks the person to choose.
@@ -145,7 +146,7 @@ impl SpyApp {
                                 ui.selectable_value(&mut d.unit, u.clone(), u);
                             }
                         });
-                        ui.add(egui::TextEdit::singleline(&mut d.unit).desired_width(90.0)).on_hover_text("Another unit name, e.g. ROB_3");
+                        fields::line(ui, &mut d.unit, "Mechanical unit", |t| t.desired_width(90.0)).on_hover_text("Another unit name, e.g. ROB_3");
                     });
                 }
                 Scope::EachRobot => {

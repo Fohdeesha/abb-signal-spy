@@ -20,6 +20,7 @@ use spy_core::review::{Review, ReviewChannel};
 
 use crate::app::SpyApp;
 use crate::charts::{autoscale, min_span_for, RangeStats};
+use crate::fields;
 use crate::theme;
 use crate::view;
 
@@ -197,7 +198,7 @@ impl SpyApp {
             });
             ui.separator();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.recording_path_input).hint_text("C:\\path\\to\\a recording folder").desired_width(420.0));
+                fields::line(ui, &mut self.recording_path_input, "Recording folder", |t| t.hint_text("C:\\path\\to\\a recording folder").desired_width(420.0));
                 if ui.button("Open").clicked() {
                     let p = PathBuf::from(self.recording_path_input.trim().trim_matches('"'));
                     match recording_dir(&p) {

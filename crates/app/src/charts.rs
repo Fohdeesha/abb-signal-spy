@@ -16,6 +16,7 @@ use spy_core::store::{Channel, Ring};
 use spy_core::timeline::Timeline;
 
 use crate::app::SpyApp;
+use crate::fields;
 use crate::theme;
 use crate::view::{self, Health};
 
@@ -448,7 +449,7 @@ impl SpyApp {
                 self.cursor_b = None;
             }
             ui.separator();
-            ui.add(egui::TextEdit::singleline(&mut self.marker_text).hint_text("marker label").desired_width(110.0));
+            fields::line(ui, &mut self.marker_text, "Marker label", |t| t.hint_text("marker label").desired_width(110.0));
             if ui.button("Marker").on_hover_text("M: mark this moment on the charts and in any running recording").clicked() {
                 self.add_marker();
             }

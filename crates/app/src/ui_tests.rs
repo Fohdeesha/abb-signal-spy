@@ -2315,6 +2315,37 @@ fn disconnect_pressed_through_accessibility_stays_disconnected() {
     assert_eq!(fake.connections_total(), total, "a connection was made after a slow Disconnect");
 }
 
+/// What UI Automation's set-value on a named text field arrives as.
+fn set_value(h: &Harness<'static, SpyApp>, name: &str, value: &str) {
+    use egui::accesskit::{Action, ActionData, ActionRequest, Role};
+    use egui_kittest::kittest::NodeT;
+    let (target_node, target_tree) = h.get_by_role_and_label(Role::TextInput, name).accesskit_node().locate();
+    h.event(egui::Event::AccessKitActionRequest(ActionRequest { action: Action::SetValue, target_node, target_tree, data: Some(ActionData::Value(value.into())) }));
+}
+
+#[test]
+fn an_address_filled_in_through_accessibility_is_connected_to() {
+    // Seen 2026-10-04: a script could press the window's buttons through UI Automation
+    // but not fill its fields; egui's text fields ignore a value set that way.
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("a11y-set-value");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let _ = h.run_ok();
+    set_value(&h, "Controller address", "127.0.0.1");
+    set_value(&h, "Controller port", &fake.port().to_string());
+    set_value(&h, "Search the signals", "DC-link");
+    let _ = h.run_ok();
+    assert_eq!((h.state().host_input.as_str(), h.state().port_input.clone()), ("127.0.0.1", fake.port().to_string()));
+    assert_eq!(h.state().search, "DC-link");
+    h.get_by_label("Connect").click_accesskit();
+    let _ = h.run_ok();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
+    // Greyed out while connected: a tool cannot change the address under the session.
+    set_value(&h, "Controller address", "192.0.2.1");
+    let _ = h.run_ok();
+    assert_eq!(h.state().host_input, "127.0.0.1");
+}
+
 #[test]
 fn every_channel_is_named_with_its_number_where_channels_are_told_apart() {
     // Several signals share a catalogue name: at the cell (2026-10-04) five cards and four

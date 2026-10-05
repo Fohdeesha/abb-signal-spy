@@ -10,6 +10,7 @@ use spy_core::log::Level;
 use spy_core::recording::{self, RecState, Recorder};
 
 use crate::app::SpyApp;
+use crate::fields;
 use crate::phone::PhoneServer;
 use crate::theme;
 
@@ -33,7 +34,7 @@ impl SpyApp {
         // REC
         match &self.recorder {
             None => {
-                ui.add(egui::TextEdit::singleline(&mut self.rec_label).hint_text("recording name").desired_width(110.0));
+                fields::line(ui, &mut self.rec_label, "Recording name", |t| t.hint_text("recording name").desired_width(110.0));
                 if ui.add_enabled(have, egui::Button::new(RichText::new("● REC").color(theme::REC).strong())).on_hover_text("Record every sample of every channel to a new folder").clicked() {
                     match Recorder::start(&self.session, &self.record_dir(), &self.rec_label, None, &self.infos()) {
                         Ok(r) => {

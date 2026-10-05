@@ -17,6 +17,7 @@ use eframe::egui::{self, RichText};
 use spy_core::log::Level;
 
 use crate::app::SpyApp;
+use crate::fields;
 use crate::theme;
 
 pub const FILE: &str = "signal-notes.json";
@@ -360,7 +361,7 @@ impl SpyApp {
             egui::Grid::new("notes-fields").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                 let line = |ui: &mut egui::Ui, label: &str, hint: &str, text: &mut String| {
                     let l = ui.label(label);
-                    ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(f32::INFINITY)).labelled_by(l.id);
+                    fields::line(ui, text, label, |t| t.hint_text(hint).desired_width(f32::INFINITY)).labelled_by(l.id);
                     ui.end_row();
                 };
                 line(ui, "Name", "a name, if you have one", &mut d.name);
@@ -375,7 +376,7 @@ impl SpyApp {
                 ui.end_row();
                 let block = |ui: &mut egui::Ui, label: &str, hint: &str, text: &mut String| {
                     let l = ui.label(label);
-                    ui.add(egui::TextEdit::multiline(text).hint_text(hint).desired_rows(2).desired_width(f32::INFINITY)).labelled_by(l.id);
+                    fields::lines(ui, text, label, |t| t.hint_text(hint).desired_rows(2).desired_width(f32::INFINITY)).labelled_by(l.id);
                     ui.end_row();
                 };
                 block(ui, "Evidence", "what was seen, and against what", &mut d.evidence);

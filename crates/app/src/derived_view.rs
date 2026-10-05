@@ -13,6 +13,7 @@ use spy_core::store::ChannelKey;
 
 use crate::app::{chan_color, SpyApp, Stats};
 use crate::channels::health_color;
+use crate::fields;
 use crate::theme;
 use crate::view::{self, Health};
 
@@ -458,7 +459,8 @@ impl SpyApp {
                     Derived::Turn { target_deg, .. } => {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("target").small());
-                            let r = ui.add(egui::TextEdit::singleline(&mut self.derived[i].target_text).desired_width(70.0).hint_text(target_deg.map(view::fmt).unwrap_or_else(|| "deg".into())));
+                            let hint = target_deg.map(view::fmt).unwrap_or_else(|| "deg".into());
+                            let r = fields::line(ui, &mut self.derived[i].target_text, &format!("Target of {label}"), |t| t.desired_width(70.0).hint_text(hint));
                             if ui.small_button("Set").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                                 set_target = Some(i);
                             }

@@ -20,6 +20,7 @@ use spy_core::rws::{self, Client, EventPoll, Identity, MotorCalib, NewEvents, Rw
 use spy_core::session::Target;
 
 use crate::app::SpyApp;
+use crate::fields;
 use crate::theme;
 use crate::view;
 
@@ -516,10 +517,10 @@ impl SpyApp {
                         ui.add(egui::DragValue::new(&mut self.settings.rws_port).range(1..=65535)).on_hover_text("80 on a real IRC5; a virtual controller's may differ");
                         ui.end_row();
                         ui.label("User");
-                        ui.text_edit_singleline(&mut self.rws_form.user);
+                        fields::line(ui, &mut self.rws_form.user, "RWS user", |t| t);
                         ui.end_row();
                         ui.label("Password");
-                        let r = ui.add(egui::TextEdit::singleline(&mut self.rws_form.password).password(true));
+                        let r = fields::line(ui, &mut self.rws_form.password, "RWS password", |t| t.password(true));
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             login = true;
                         }

@@ -18,6 +18,7 @@ use spy_core::request::{Axis, MechUnit};
 use spy_core::session::{Options, Phase, Session, Target, ROBAPI_PORT};
 use spy_core::store::{ChannelKey, Store};
 
+use crate::fields;
 use crate::net::{self, Hostnames};
 use crate::phone::{PhoneServer, Snapshot};
 use crate::settings::{SavedChannel, SavedController, Settings};
@@ -697,10 +698,10 @@ impl SpyApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Controller").strong());
             ui.add_enabled_ui(!active, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.host_input).hint_text("address, e.g. 192.168.125.1").desired_width(170.0))
+                fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("address, e.g. 192.168.125.1").desired_width(170.0))
                     .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.");
                 ui.label(":");
-                ui.add(egui::TextEdit::singleline(&mut self.port_input).desired_width(48.0)).on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.");
+                fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(48.0)).on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.");
                 self.target_menu(ui);
             });
             match &phase {
@@ -784,7 +785,7 @@ impl SpyApp {
                 self.mark_settings_dirty();
             }
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.name_input).hint_text("name").desired_width(120.0));
+                fields::line(ui, &mut self.name_input, "Name for the saved controller", |t| t.hint_text("name").desired_width(120.0));
                 if ui.button("Save the address above").clicked() {
                     match self.parse_target() {
                         Ok(t) => {
@@ -1044,7 +1045,7 @@ impl SpyApp {
             let id = egui::Id::new("catalogue-path");
             let mut path: String = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut path).hint_text("C:\\path\\to\\catalogue.json").desired_width(380.0));
+                fields::line(ui, &mut path, "Catalogue file", |t| t.hint_text("C:\\path\\to\\catalogue.json").desired_width(380.0));
                 if ui.button("Load").clicked() {
                     load_path = Some(path.clone());
                 }
