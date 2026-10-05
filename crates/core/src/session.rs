@@ -144,6 +144,22 @@ pub struct Options {
     /// How often it looks meanwhile: each look is a connection that only handshakes,
     /// which changes nothing on the controller when it leaves.
     pub held_poll: Duration,
+    /// A real controller can be reached again after a network fault before it answers.
+    /// Measured on the IRC5 (2026-10-04, a switch port shut for 5-10 s, four times):
+    /// its RobAPI answered nobody, another PC included, until about 3 s after it let
+    /// go of the connection that broke, which it did when its own next retransmission
+    /// drew this PC's reset (1.5 to 4.5 s after the network was back). Meanwhile it
+    /// took a connection but never answered the handshake sent on it, not even after
+    /// (40 s waited, its keepalives still coming), or refused connections outright;
+    /// a connection made after the stall was answered within 2 ms. So when an automatic
+    /// reconnect meets either, it tries a fresh connection this long after each...
+    pub recovery_retry: Duration,
+    /// ...waiting this long for each handshake...
+    pub recovery_handshake: Duration,
+    /// ...for up to this long from the first, then goes back to the reconnect ladder.
+    /// Not on a virtual controller (see `vc_pause_patience`): one answers as soon as
+    /// it can be reached, or pauses for seconds when the PC is busy.
+    pub recovery_for: Duration,
     /// On a virtual controller (reached over loopback): how long every stream may stop
     /// while the controller still answers and nobody connects or leaves, before the
     /// session gives up. A VC the PC is too busy for pauses InfoStream and its clock,
@@ -191,6 +207,11 @@ impl Default for Options {
             // at most, and the first one after the network is back ends the hold.
             held_wait: Duration::from_secs(60),
             held_poll: Duration::from_secs(2),
+            // Every handshake the IRC5 answered on 2026-10-04 took 2 ms or less.
+            recovery_retry: Duration::from_secs(1),
+            recovery_handshake: Duration::from_secs(1),
+            // The longest the IRC5 can take to retransmit: as `held_wait`.
+            recovery_for: Duration::from_secs(60),
             vc_pause_patience: Duration::from_secs(120),
             find_vc: VcFinder::local(),
         }
@@ -783,6 +804,12 @@ struct Worker {
     /// Since when automatic reconnects have found the controller still holding the
     /// broken connection (the wait for it counts from there: `held_wait`).
     held_since: Option<Instant>,
+    /// Since when automatic reconnects have found a real controller reachable but not
+    /// answering (`recovery_for`), and whether the end of that wait was said.
+    recovering_since: Option<Instant>,
+    told_recovery_over: bool,
+    /// How long this connection's handshake is waited for.
+    hello_wait: Duration,
     /// This connection is the one automatic reconnect made after another program's
     /// exit ended InfoStream; the next one will be (set while leaving for it).
     leaver_retry: bool,
@@ -896,6 +923,9 @@ impl Worker {
             candidate: None,
             lost_at: None,
             held_since: None,
+            recovering_since: None,
+            told_recovery_over: false,
+            hello_wait: Duration::ZERO,
             leaver_retry: false,
             leaver_retry_next: false,
             system_id: None,
@@ -1031,6 +1061,8 @@ impl Worker {
                 self.candidate = None;
                 self.lost_at = None;
                 self.held_since = None;
+                self.recovering_since = None;
+                self.told_recovery_over = false;
                 self.leaver_retry = false;
                 self.leaver_retry_next = false;
                 // A deliberate connect retries what the controller refused last time.
@@ -1241,6 +1273,7 @@ impl Worker {
             }
         };
         let mut last_err = String::from("no address");
+        let mut refused = false;
         let mut stream = None;
         for a in &addrs {
             match TcpStream::connect_timeout(a, self.opt.connect_timeout) {
@@ -1248,7 +1281,10 @@ impl Worker {
                     stream = Some((s, *a));
                     break;
                 }
-                Err(e) => last_err = describe_io(&e),
+                Err(e) => {
+                    refused = e.kind() == std::io::ErrorKind::ConnectionRefused;
+                    last_err = describe_io(&e);
+                }
             }
         }
         let Some((stream, peer)) = stream else {
@@ -1260,6 +1296,12 @@ impl Worker {
                 self.followed_restart = true;
                 self.open_once(false);
                 return;
+            }
+            if refused && !addrs.iter().any(|a| self.vc_at(a.ip())) {
+                self.drop_conn();
+                if self.retry_while_recovering(&format!("{target} refused the connection")) {
+                    return;
+                }
             }
             // Refused on this PC with nothing to follow (a first connect knows no
             // system id): most likely a virtual controller started again since.
@@ -1341,7 +1383,8 @@ impl Worker {
         self.hello_txn = 0;
         self.hello_txn = self.next_txn();
         self.stage = Stage::Hello;
-        self.stage_deadline = Some(Instant::now() + self.opt.handshake_timeout);
+        self.hello_wait = if self.recovering() && !self.vc_at(peer.ip()) { self.opt.recovery_handshake } else { self.opt.handshake_timeout };
+        self.stage_deadline = Some(Instant::now() + self.hello_wait);
         self.set_phase(Phase::Handshaking);
         let f = request::hello(self.hello_txn);
         self.write(&f);
@@ -1379,6 +1422,43 @@ impl Worker {
             }
         }
         port
+    }
+
+    /// A virtual controller there (reached over loopback, with patience for its pauses).
+    fn vc_at(&self, ip: IpAddr) -> bool {
+        !self.opt.vc_pause_patience.is_zero() && is_loopback(ip)
+    }
+
+    /// Within the wait for a real controller that can be reached but is not answering.
+    fn recovering(&self) -> bool {
+        self.recovering_since.is_some_and(|since| since.elapsed() < self.opt.recovery_for)
+    }
+
+    /// An automatic reconnect found a real controller reachable but not answering
+    /// (`recovery_retry`): a fresh connection soon, said once, while within the wait.
+    /// False when this is no automatic reconnect or the wait is over: the ladder then.
+    fn retry_while_recovering(&mut self, what: &str) -> bool {
+        if !(self.established && self.auto_reconnect) {
+            return false;
+        }
+        if self.recovering_since.is_none() {
+            self.recovering_since = Some(Instant::now());
+            self.log.warn(format!(
+                "{}: the controller can be reached again but is not answering yet. After a network fault a controller holds back every new connection until it has dropped the one that broke (measured on an IRC5). Trying a fresh connection every {} s, for up to {:.0} s.",
+                capitalize(what),
+                self.opt.recovery_retry.as_secs_f64(),
+                self.opt.recovery_for.as_secs_f64()
+            ));
+        } else if !self.recovering() {
+            if !self.told_recovery_over {
+                self.told_recovery_over = true;
+                self.log.warn(format!("The controller is still not answering, {:.0} s after it first did not: trying again on the usual schedule.", self.opt.recovery_for.as_secs_f64()));
+            }
+            return false;
+        }
+        self.retry_at = Some(Instant::now() + self.opt.recovery_retry);
+        self.set_phase(Phase::Reconnecting { attempt: self.rung as u32 + 1, retry_in: self.opt.recovery_retry });
+        true
     }
 
     fn schedule_reconnect(&mut self, why: &str) {
@@ -1548,6 +1628,10 @@ impl Worker {
     // ---------------------------------------------------------------- the stages
 
     fn handshake_done(&mut self, frame: &Frame<'_>) {
+        if let Some(since) = self.recovering_since.take() {
+            self.told_recovery_over = false;
+            self.log.info(format!("The controller answers again, {:.1} s after it first did not.", since.elapsed().as_secs_f64()));
+        }
         let announce = Announce::from_rads(frame.rads(), frame.ctrl1());
         let (local, peer) = match &self.conn {
             Some(c) => (c.local, c.peer),
@@ -2171,9 +2255,19 @@ impl Worker {
                 match self.stage {
                     Stage::Hello => {
                         let t = self.target.as_ref().map(|t| t.to_string()).unwrap_or_default();
+                        let vc = self.conn.as_ref().is_some_and(|c| self.vc_at(c.peer.ip()));
                         self.stage_deadline = None;
                         self.drop_conn();
-                        let why = format!("{t} accepted the connection but did not answer the RobAPI handshake within {:.0} s; it is probably not a controller's RobAPI port", self.opt.handshake_timeout.as_secs_f64());
+                        let wait = self.hello_wait.as_secs_f64();
+                        // A controller that answered here before is not at the wrong port.
+                        let why = if self.system_id.is_some() {
+                            format!("{t} took the connection but did not answer the RobAPI handshake within {wait:.0} s")
+                        } else {
+                            format!("{t} accepted the connection but did not answer the RobAPI handshake within {wait:.0} s; it is probably not a controller's RobAPI port")
+                        };
+                        if !vc && self.retry_while_recovering(&why) {
+                            return;
+                        }
                         if self.established { self.schedule_reconnect(&why) } else {
                             self.log.error(format!("{}.", capitalize(&why)));
                             self.set_phase(Phase::Stopped { reason: capitalize(&why) });

@@ -887,9 +887,10 @@ impl SpyApp {
                 ui.label(format!("{live} ch"));
                 ui.label(format!("{:.0} frames/s", self.rates.3));
                 ui.label(format!("{:.0} samples/s", self.rates.4));
-                ui.label(format!("keepalives {}", st.counters.ayas)).on_hover_text("The controller's 'are you alive' checks, all answered. Unanswered, it drops the connection after about 16 s.");
+                ui.label(format!("keepalives {}", st.counters.ayas)).on_hover_text("The controller's 'are you alive' checks, all answered. Each names a 16 s timeout for an unanswered one, though an IRC5 left unanswered for 60 s did not drop the connection.");
                 if st.counters.reconnects > 0 {
-                    ui.label(RichText::new(format!("reconnects {}", st.counters.reconnects)).color(theme::WARN));
+                    ui.label(RichText::new(format!("reconnect attempts {}", st.counters.reconnects)).color(theme::WARN))
+                        .on_hover_text("Connections tried by the program itself since the last Connect, the ones that failed included: an outage of a few seconds can take several.");
                 }
                 if let Some(a) = &st.announce
                     && let Some(id) = &a.system_id {

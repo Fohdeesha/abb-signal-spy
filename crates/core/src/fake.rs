@@ -43,6 +43,10 @@
 //!   of it (measured 2026-09-25 and 2026-09-27): seen by the client as a drop
 //!   ([`FakeController::break_connections`]) or, for a fault out in the network, as
 //!   silence ([`FakeController::cut_network`])
+//! * with [`Behaviour::stall_while_held`], the real IRC5's stall after a network fault
+//!   (measured 2026-10-04): RobAPI answers nobody while it holds the broken
+//!   connection and for a while after, a handshake sent meanwhile is never answered,
+//!   and with [`Behaviour::stall_refuses`] new connections are refused
 //!
 //! Loopback only, on a port the OS picks, so a test can never reach a controller or
 //! stand in for one.
@@ -236,6 +240,15 @@ pub struct Behaviour {
     /// Never answer these commands (by property, e.g. "StartStream"), though they
     /// still take effect: a controller that loses a reply.
     pub unanswered: HashSet<String>,
+    /// The real IRC5 after a network fault (measured 2026-10-04): from the network's
+    /// return while it still holds a broken connection, until this long after it lets
+    /// go of it, its RobAPI answers nobody. A connection is still taken, but what is
+    /// sent on it meanwhile, its handshake included, is never answered, not even once
+    /// the stall is over (waited 40 s); a connection made after the stall is answered
+    /// at once. `None`: the VC's way, which answers as soon as the network is back.
+    pub stall_while_held: Option<Duration>,
+    /// During that stall, refuse new connections outright, as the IRC5 also did.
+    pub stall_refuses: bool,
 }
 
 impl Default for Behaviour {
@@ -285,6 +298,8 @@ impl Default for Behaviour {
             id_pools: IdPools::Vc,
             system_id: SYSTEM_ID.into(),
             unanswered: HashSet::new(),
+            stall_while_held: None,
+            stall_refuses: false,
         }
     }
 }
@@ -309,6 +324,8 @@ struct State {
     handshakes: u64,
     /// The network is down until then: nothing passes either way.
     cut_until: Option<Instant>,
+    /// The stall after a held broken connection was let go lasts until then.
+    stall_end: Option<Instant>,
 }
 
 pub struct FakeController {
@@ -350,6 +367,7 @@ impl FakeController {
             samples_sent: 0,
             handshakes: 0,
             cut_until: None,
+            stall_end: None,
         }));
         let running = Arc::new(AtomicBool::new(true));
         let mut threads = Vec::new();
@@ -504,6 +522,16 @@ fn network_down(st: &State) -> bool {
     st.cut_until.is_some_and(|t| Instant::now() < t)
 }
 
+/// The IRC5's stall after a network fault ([`Behaviour::stall_while_held`]): from the
+/// network's return while a broken connection is still held, to the end of its tail.
+fn stalled(st: &State) -> bool {
+    if st.behaviour.stall_while_held.is_none() || network_down(st) {
+        return false;
+    }
+    let now = Instant::now();
+    st.conns.values().any(|c| c.cut && c.zombie_until.is_some_and(|t| now < t)) || st.stall_end.is_some_and(|t| now < t)
+}
+
 fn send_to(st: &mut State, conn: usize, bytes: &[u8]) {
     let hold = st.behaviour.hold_delivery;
     let down = network_down(st);
@@ -567,8 +595,29 @@ fn close_conn(st: &mut State, conn: usize) {
 
 fn accept_loop(listener: TcpListener, state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
     let mut readers: Vec<JoinHandle<()>> = Vec::new();
+    let addr = listener.local_addr().ok();
+    let mut listener = Some(listener);
     while running.load(Ordering::SeqCst) {
-        match listener.accept() {
+        // Refusing during a stall: no listener, so a connection is refused, as the
+        // IRC5's were; the same port listens again once the stall is over (the
+        // connections it took meanwhile carry on).
+        let refusing = {
+            let st = lock(&state);
+            st.behaviour.stall_refuses && stalled(&st)
+        };
+        if refusing {
+            listener = None;
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        if listener.is_none() {
+            listener = addr.and_then(|a| TcpListener::bind(a).ok()).filter(|l| l.set_nonblocking(true).is_ok());
+        }
+        let Some(l) = &listener else {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        };
+        match l.accept() {
             Ok((stream, peer)) => {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_nonblocking(false);
@@ -708,6 +757,13 @@ fn handshake_reply(st: &State, txn: u16) -> Vec<u8> {
 fn handle_frame(conn: usize, bytes: &[u8], state: &Arc<Mutex<State>>) {
     let Some(frame) = Frame::parse(bytes) else { return };
     let mut st = lock(state);
+    // Stalled: only the keepalive exchange goes on; a request is lost for good.
+    if stalled(&st) && frame.service() != service::AYA {
+        if frame.service() == service::CONTROL {
+            st.handshakes += 1;
+        }
+        return;
+    }
     match frame.service() {
         service::CONTROL => {
             st.handshakes += 1;
@@ -955,9 +1011,16 @@ fn tick_loop(state: Arc<Mutex<State>>, running: Arc<AtomicBool>) {
         // Broken connections the controller now notices.
         let now = Instant::now();
         let expired: Vec<usize> = st.conns.values().filter(|c| c.zombie_until.is_some_and(|t| now >= t)).map(|c| c.id).collect();
+        let tail = st.behaviour.stall_while_held;
         for id in expired {
+            let mut was_cut = false;
             if let Some(c) = st.conns.get_mut(&id) {
                 c.zombie_until = None;
+                was_cut = c.cut;
+            }
+            // Let go of: what is left of the IRC5's stall starts now.
+            if was_cut && let Some(tail) = tail {
+                st.stall_end = Some(now + tail);
             }
             close_conn(&mut st, id);
         }

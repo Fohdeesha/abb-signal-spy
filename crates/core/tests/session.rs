@@ -33,6 +33,9 @@ fn opts() -> Options {
         ask: AskPolicy::Never,
         held_wait: Duration::from_secs(4),
         held_poll: Duration::from_millis(200),
+        recovery_retry: Duration::from_millis(100),
+        recovery_handshake: Duration::from_millis(300),
+        recovery_for: Duration::from_secs(4),
         // The fake is reached over loopback like a VC; its tests are of the fast exit
         // a real controller gets, except where a test turns this on.
         vc_pause_patience: Duration::ZERO,
@@ -2073,6 +2076,164 @@ fn a_program_that_came_during_a_network_fault_is_never_taken_from_unasked() {
     let reason = stopped_reason(&s);
     assert!(reason.contains("192.0.2.50") && reason.contains("While the connection was down"), "{reason}");
     assert_eq!(fake.seen().iter().filter(|x| x.verb == "SUBSCRIBE").count(), 1, "nothing set up on the reconnect");
+}
+
+/// The real IRC5 after a network fault (measured 2026-10-04): reachable again, but its
+/// RobAPI answers nobody until a while after it drops the connection that broke, and a
+/// handshake sent meanwhile is never answered, even after. `tail`: how long after.
+fn irc5_stalling(tail: Duration, refuses: bool) -> FakeController {
+    let mut b = Behaviour::default();
+    b.stall_while_held = Some(tail);
+    b.stall_refuses = refuses;
+    FakeController::start(b).unwrap()
+}
+
+/// Streaming 4002 from `fake`, the network then cut for `outage`, the controller
+/// holding the broken connection until `hold`: how long until it streams again.
+fn through_a_stall(s: &Session, fake: &FakeController, outage: Duration, hold: Duration) -> Duration {
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(fake));
+    assert!(wait_for(5000, || streaming_with_samples(s, std::slice::from_ref(&k))));
+    let t0 = Instant::now();
+    fake.cut_network(outage, hold);
+    let n = samples(s, &k);
+    assert!(wait_for(20000, || phase(s) == Phase::Streaming && samples(s, &k) > n + 50), "{:?}\n{}", phase(s), log_text(s));
+    t0.elapsed()
+}
+
+#[test]
+fn the_fakes_irc5_stall_outlasts_the_held_connection_by_its_tail() {
+    // The model the recovery tests lean on (measured 2026-10-04): nobody answered while
+    // the broken connection is held, nor for a while after it is let go, then at once.
+    let fake = irc5_stalling(Duration::from_millis(1500), false);
+    let _held = std::net::TcpStream::connect(fake.addr()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let t0 = Instant::now();
+    // The network back at 0.3 s, the connection let go at 1.0 s, answers from 2.5 s.
+    fake.cut_network(Duration::from_millis(300), Duration::from_millis(1000));
+    let answered_at = |ms: u64| {
+        std::thread::sleep(Duration::from_millis(ms).saturating_sub(t0.elapsed()));
+        discovery::hello(fake.addr(), Duration::from_millis(300)).is_ok()
+    };
+    assert!(!answered_at(500), "answered while the broken connection is held");
+    assert!(!answered_at(1400), "answered right after letting it go");
+    assert!(answered_at(2800), "not answered after the stall");
+}
+
+#[test]
+fn an_irc5_that_holds_back_its_answers_after_a_fault_is_connected_through_once_it_answers() {
+    // The network is back at 1 s, the controller lets go at 2.5 s and answers again
+    // from 3.5 s. The ladder's second rung is 4 s, so waiting for it shows.
+    let fake = irc5_stalling(Duration::from_millis(1000), false);
+    let s = spawn(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(4000)], ..opts() });
+    let took = through_a_stall(&s, &fake, Duration::from_millis(1000), Duration::from_millis(2500));
+    let log = log_text(&s);
+    assert!(took < Duration::from_millis(5500), "streaming again {took:?} after the cut\n{log}");
+    // It answered before: the controller is recovering, not a wrong port.
+    assert!(!log.contains("probably not a controller"), "{log}");
+    assert!(log.contains("not answering yet"), "{log}");
+    assert!(log.contains("answers again"), "{log}");
+}
+
+#[test]
+fn an_irc5_that_refuses_connections_after_a_fault_is_tried_again_soon() {
+    // Refusing from the network's return (1 s) to 1 s after it lets go (4 s). Windows
+    // reports a refusal only after 2 s, so the connect timeout outlasts that, as the
+    // product's does.
+    let fake = irc5_stalling(Duration::from_millis(1000), true);
+    let s = spawn(Options { connect_timeout: Duration::from_secs(3), ladder: vec![Duration::from_millis(100), Duration::from_millis(6000)], ..opts() });
+    let took = through_a_stall(&s, &fake, Duration::from_millis(1000), Duration::from_millis(4000));
+    let log = log_text(&s);
+    assert!(took < Duration::from_millis(8000), "streaming again {took:?} after the cut\n{log}");
+    assert!(log.contains("refused") && log.contains("not answering yet"), "{log}");
+}
+
+#[test]
+fn while_an_irc5_recovers_each_try_is_a_fresh_connection_soon_after_the_last() {
+    // Answering nobody from 1 s to 6 s. Each unanswered handshake is let go after the
+    // short wait and tried again on a fresh connection: several within the stall, not
+    // one or two on the full wait and the ladder.
+    let fake = irc5_stalling(Duration::from_millis(1000), false);
+    let s = spawn(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(4000)], ..opts() });
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let before = fake.handshakes();
+    fake.cut_network(Duration::from_millis(1000), Duration::from_millis(5000));
+    let mut short_retry = false;
+    let n = samples(&s, &k);
+    assert!(
+        wait_for(20000, || {
+            short_retry |= matches!(phase(&s), Phase::Reconnecting { retry_in, .. } if retry_in == Duration::from_millis(100));
+            phase(&s) == Phase::Streaming && samples(&s, &k) > n + 50
+        }),
+        "{:?}\n{}",
+        phase(&s),
+        log_text(&s)
+    );
+    let tries = fake.handshakes() - before;
+    assert!(tries >= 6, "{tries} handshakes from the cut to streaming again\n{}", log_text(&s));
+    assert!(short_retry, "never shown retrying on the short spacing");
+}
+
+#[test]
+fn an_irc5_that_stays_unanswering_goes_back_to_the_ladder() {
+    // Held for 30 s: past the time a recovery is waited for on fresh connections.
+    let fake = irc5_stalling(Duration::from_millis(1000), false);
+    let s = spawn(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(700)], ..opts() });
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.cut_network(Duration::from_millis(1000), Duration::from_secs(30));
+    assert!(wait_for(15000, || log_text(&s).contains("usual schedule")), "{:?}\n{}", phase(&s), log_text(&s));
+    assert!(wait_for(3000, || matches!(phase(&s), Phase::Reconnecting { retry_in, .. } if retry_in == Duration::from_millis(700))), "{:?}\n{}", phase(&s), log_text(&s));
+    // Each said once, not at every try (three more on the ladder meanwhile).
+    std::thread::sleep(Duration::from_millis(3000));
+    let log = log_text(&s);
+    assert_eq!(log.matches("not answering yet").count(), 1, "{log}");
+    assert_eq!(log.matches("usual schedule").count(), 1, "{log}");
+}
+
+#[test]
+fn each_outage_gets_its_own_wait_for_the_irc5_to_recover() {
+    // Two faults, the second well after the first's recovery began: once it answers,
+    // the next fault starts its wait afresh rather than finding it used up.
+    let fake = irc5_stalling(Duration::from_millis(1000), false);
+    let s = spawn(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(4000)], ..opts() });
+    let first = through_a_stall(&s, &fake, Duration::from_millis(1000), Duration::from_millis(2500));
+    std::thread::sleep(Duration::from_millis(2000));
+    let k = key(4002, "ROB_1", 1);
+    let t0 = Instant::now();
+    fake.cut_network(Duration::from_millis(1000), Duration::from_millis(2500));
+    let n = samples(&s, &k);
+    assert!(wait_for(20000, || phase(&s) == Phase::Streaming && samples(&s, &k) > n + 50), "{:?}\n{}", phase(&s), log_text(&s));
+    let second = t0.elapsed();
+    let log = log_text(&s);
+    assert!(second < Duration::from_millis(5500), "first {first:?}, second {second:?}\n{log}");
+    assert_eq!(log.matches("not answering yet").count(), 2, "{log}");
+    assert_eq!(log.matches("answers again").count(), 2, "{log}");
+}
+
+#[test]
+fn a_virtual_controller_keeps_the_ladder_when_its_handshake_goes_unanswered() {
+    // On a VC (reached over loopback, with patience for its pauses) a handshake answered
+    // late is the PC being busy, not the IRC5's stall: the fresh-connection tries are
+    // the real controller's alone.
+    let fake = irc5_stalling(Duration::from_millis(1000), false);
+    let s = spawn(Options { ladder: vec![Duration::from_millis(100), Duration::from_millis(700)], ..patient() });
+    let k = key(4002, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.cut_network(Duration::from_millis(1000), Duration::from_millis(2500));
+    // The VC's patience waits out the silence (10 s), so it is dropped here instead:
+    // the reconnect then meets the stall.
+    fake.drop_connections();
+    assert!(wait_for(8000, || log_text(&s).contains("did not answer the RobAPI handshake")), "{:?}\n{}", phase(&s), log_text(&s));
+    assert!(!log_text(&s).contains("not answering yet"), "{}", log_text(&s));
 }
 
 fn patient() -> Options {
