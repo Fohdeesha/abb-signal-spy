@@ -30,11 +30,12 @@ pub struct ChanView {
     pub stats: Stats,
     pub smooth_ms: u32,
     pub scale: crate::charts::Scale,
+    pub decimals: Option<u8>,
 }
 
 impl ChanView {
     pub fn new(key: ChannelKey, color: Color32, lane: u32) -> ChanView {
-        ChanView { key, color, radians: false, hold_nonzero: false, lane, stats: Stats::default(), smooth_ms: 0, scale: crate::charts::Scale::default() }
+        ChanView { key, color, radians: false, hold_nonzero: false, lane, stats: Stats::default(), smooth_ms: 0, scale: crate::charts::Scale::default(), decimals: None }
     }
 }
 
@@ -352,7 +353,7 @@ impl SpyApp {
                 } else {
                     c.lane
                 };
-                app.chans.push(ChanView { radians: c.radians, hold_nonzero: c.hold_nonzero, smooth_ms: c.smooth_ms, scale: c.scale, ..ChanView::new(key, chan_color(i, app.settings.dark), lane) });
+                app.chans.push(ChanView { radians: c.radians, hold_nonzero: c.hold_nonzero, smooth_ms: c.smooth_ms, scale: c.scale, decimals: c.decimals, ..ChanView::new(key, chan_color(i, app.settings.dark), lane) });
             }
         }
         app.sync_channels();
@@ -413,7 +414,7 @@ impl SpyApp {
         self.settings.channels = self
             .chans
             .iter()
-            .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane, smooth_ms: c.smooth_ms, scale: c.scale })
+            .map(|c| SavedChannel { signal: c.key.signal, unit: c.key.unit.to_string(), axis: c.key.axis.one_based(), radians: c.radians, hold_nonzero: c.hold_nonzero, lane: c.lane, smooth_ms: c.smooth_ms, scale: c.scale, decimals: c.decimals })
             .collect();
         self.settings.derived = self
             .derived
@@ -1297,11 +1298,11 @@ impl SpyApp {
             let sig = self.catalogue.get(c.key.signal);
             let cs = st.channels.iter().find(|x| x.key == c.key);
             let h = view::health(cs, connected, sig, st.loopback);
-            let d = view::display(sig, c.radians);
+            let d = view::display(sig, c.radians).with_decimals(c.decimals);
             let reading = view::reading(sig);
             let value = self.session.store().get(&c.key).and_then(|ch| {
                 let r = ch.lock();
-                if r.kind == Some(spy_core::sample::ValueKind::String) { r.last_text.clone() } else { view::readout(&r, reading).map(|v| view::fmt(v * d.factor)) }
+                if r.kind == Some(spy_core::sample::ValueKind::String) { r.last_text.clone() } else { view::readout(&r, reading).map(|v| d.fmt(v)) }
             });
             chans.push(serde_json::json!({
                 "name": view::label(&self.catalogue, &c.key),

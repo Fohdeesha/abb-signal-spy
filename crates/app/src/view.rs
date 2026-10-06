@@ -7,14 +7,56 @@ pub struct Display {
     pub units: String,
     pub factor: f64,
     pub wraps: bool,
+    pub decimals: Option<usize>,
+}
+
+impl Display {
+    pub fn with_decimals(self, chosen: Option<u8>) -> Display {
+        Display { decimals: chosen.map(usize::from).or(self.decimals), ..self }
+    }
+
+    pub fn fmt(&self, raw: f64) -> String {
+        fmt_to(raw * self.factor, self.decimals)
+    }
 }
 
 pub fn display(sig: Option<&Signal>, radians: bool) -> Display {
-    let Some(s) = sig else { return Display { units: String::new(), factor: 1.0, wraps: false } };
+    let Some(s) = sig else { return Display { units: String::new(), factor: 1.0, wraps: false, decimals: None } };
     let wraps = s.has(catalogue::flag::WRAPPING);
-    match catalogue::angle_unit(&s.units) {
-        Some((deg, k)) if !radians => Display { units: deg.to_string(), factor: k, wraps },
-        _ => Display { units: s.units.clone(), factor: 1.0, wraps },
+    let (units, factor) = match catalogue::angle_unit(&s.units) {
+        Some((deg, k)) if !radians => (deg.to_string(), k),
+        _ => (s.units.clone(), 1.0),
+    };
+    Display { decimals: auto_decimals(&units), units, factor, wraps }
+}
+
+pub const MAX_DECIMALS: u8 = 6;
+
+pub fn auto_decimals(units: &str) -> Option<usize> {
+    match units {
+        "count" | "index" | "0 or 1" => Some(0),
+        "V" | "Nm" | "deg/s" => Some(1),
+        "A" | "deg" | "rad/s" => Some(2),
+        "rad" | "m/s" | "0..1" | "fraction" => Some(3),
+        "m" | "quaternion" => Some(4),
+        _ => None,
+    }
+}
+
+pub fn decimals_text(n: usize) -> String {
+    if n == 1 { "1 decimal".into() } else { format!("{n} decimals") }
+}
+
+pub fn fmt_to(v: f64, decimals: Option<usize>) -> String {
+    match decimals {
+        Some(n) if v.is_finite() => {
+            let s = format!("{v:.n$}");
+            match s.strip_prefix('-') {
+                Some(rest) if rest.chars().all(|c| c == '0' || c == '.') => rest.to_string(),
+                _ => s,
+            }
+        }
+        _ => fmt(v),
     }
 }
 
@@ -292,6 +334,31 @@ mod tests {
         assert_eq!(display(angle, true).units, "rad");
         assert_eq!(display(cat.get(5027), false).units, "V");
         assert!(display(cat.get(5138), false).wraps);
+    }
+
+    #[test]
+    fn a_number_has_the_decimals_its_unit_means() {
+        let cases = [("V", Some(1)), ("Nm", Some(1)), ("deg/s", Some(1)), ("A", Some(2)), ("deg", Some(2)), ("rad/s", Some(2)), ("rad", Some(3)), ("0..1", Some(3)), ("m", Some(4)), ("quaternion", Some(4)), ("0 or 1", Some(0)), ("count", Some(0)), ("-", None), ("furlongs", None)];
+        for (units, want) in cases {
+            assert_eq!(auto_decimals(units), want, "{units}");
+        }
+        let cat = Catalogue::builtin();
+        let angle = cat.get(6000);
+        assert_eq!((display(angle, false).decimals, display(angle, true).decimals), (Some(2), Some(3)), "the units shown decide");
+        assert_eq!(display(angle, false).with_decimals(Some(0)).decimals, Some(0), "a channel's choice wins");
+        assert_eq!(display(angle, false).with_decimals(None).decimals, Some(2), "no choice: the unit's");
+        assert_eq!(display(cat.get(5027), false).fmt(356.427), "356.4");
+    }
+
+    #[test]
+    fn fixed_decimals_round_and_never_show_minus_zero() {
+        assert_eq!(fmt_to(356.46, Some(1)), "356.5");
+        assert_eq!(fmt_to(-51.8774, Some(1)), "-51.9");
+        assert_eq!(fmt_to(2.4, Some(0)), "2");
+        assert_eq!(fmt_to(-0.04, Some(1)), "0.0");
+        assert_eq!(fmt_to(-0.0, Some(2)), "0.00");
+        assert_eq!(fmt_to(f64::NAN, Some(2)), "NaN");
+        assert_eq!(fmt_to(0.127039, None), "0.127039", "no unit: six digits as before");
     }
 
     #[test]

@@ -45,6 +45,10 @@ Or switch to the **live dashboard** for big numbers you can read from across the
 
 ![Live dashboard](screenshots/dashboard.png)
 
+Light theme also available: uncheck **dark** under **view**.
+
+![Light theme](screenshots/light.png)
+
 Recordings go to `Documents\TestSignals`, one folder each: a plain `data.csv`
 (`controller_ms,channel,value`) plus a `recording.json` with the details. **file > open a recording**
 brings one back up.

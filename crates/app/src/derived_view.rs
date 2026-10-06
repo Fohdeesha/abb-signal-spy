@@ -73,11 +73,18 @@ pub fn reading(d: &Derived) -> view::Reading {
     }
 }
 
+pub fn decimals(d: &Derived) -> Option<usize> {
+    match d {
+        Derived::Turn { .. } | Derived::DutySum { .. } => Some(3),
+        Derived::Sag { .. } => view::auto_decimals(d.units()),
+    }
+}
+
 pub fn value_text(def: &Derived, v: Option<f64>, live: bool) -> (String, bool) {
     match (def, v) {
         (Derived::Turn { .. }, Some(x)) if live && x.abs() <= derived::ON_TARGET_DEG => ("ON TARGET".into(), true),
         (Derived::Turn { .. }, Some(x)) => (format!("{x:+.3}"), false),
-        (_, Some(x)) => (view::fmt(x), false),
+        (_, Some(x)) => (view::fmt_to(x, decimals(def)), false),
         (_, None) => ("--".into(), false),
     }
 }
@@ -388,9 +395,9 @@ impl SpyApp {
                         ui.label(RichText::new(sag_share(v, *pl)).size(14.0).color(p.ink2));
                     }
                 });
-                let f = |x: f64| if x.is_finite() { view::fmt(x) } else { "--".into() };
+                let f = |x: f64| if x.is_finite() { view::fmt_to(x, decimals(&def)) } else { "--".into() };
                 if let Some(c) = &cursor {
-                    crate::channels::cursor_lines(ui, c, p);
+                    crate::channels::cursor_lines(ui, c, p, decimals(&def));
                 }
                 match &def {
                     Derived::Turn { target_deg, .. } => {
@@ -428,7 +435,7 @@ impl SpyApp {
                         ui.horizontal_wrapped(|ui| {
                             match plateau_v {
                                 Some(pl) => {
-                                    ui.label(RichText::new(format!("plateau {} V   deepest {} V", view::fmt(*pl), f(s.max))).monospace().size(14.0).color(p.ink2));
+                                    ui.label(RichText::new(format!("plateau {} V   deepest {} V", f(*pl), f(s.max))).monospace().size(14.0).color(p.ink2));
                                 }
                                 None => {
                                     ui.label(RichText::new("With the robot armed and still:").size(14.0));
@@ -570,7 +577,7 @@ mod tests {
         assert_eq!(value_text(&turn, Some(-0.26), true), ("-0.260".into(), false));
         assert_eq!(value_text(&turn, None, true), ("--".into(), false));
         let sag = Derived::Sag { link: key(5027, 1), plateau_v: Some(356.0) };
-        assert_eq!(value_text(&sag, Some(0.1), true), ("0.100000".into(), false), "only a turn is ever on target");
+        assert_eq!(value_text(&sag, Some(0.1), true), ("0.1".into(), false), "only a turn is ever on target");
     }
 
     #[test]

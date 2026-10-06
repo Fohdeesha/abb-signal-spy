@@ -207,7 +207,7 @@ impl SpyApp {
         let sig = self.catalogue.get(key.signal).cloned();
         let cs = st.channels.iter().find(|c| c.key == key).cloned();
         let h = view::health(cs.as_ref(), connected, sig.as_ref(), st.loopback);
-        let d = view::display(sig.as_ref(), self.chans[i].radians);
+        let d = view::display(sig.as_ref(), self.chans[i].radians).with_decimals(self.chans[i].decimals);
         let reading = view::reading(sig.as_ref());
         let smooth = self.chans[i].smooth_ms;
         let (value, is_text) = match self.session.store().get(&key) {
@@ -216,7 +216,7 @@ impl SpyApp {
                 if r.kind == Some(spy_core::sample::ValueKind::String) {
                     (r.last_text.clone(), true)
                 } else {
-                    (view::readout_ms(&r, reading, view::readout_window(smooth)).map(|v| view::fmt(v * d.factor)), false)
+                    (view::readout_ms(&r, reading, view::readout_window(smooth)).map(|v| d.fmt(v)), false)
                 }
             }
             None => (None, sig.as_ref().is_some_and(view::is_text)),
@@ -269,9 +269,9 @@ impl SpyApp {
                 ui.label(RichText::new(text).size(14.0).color(p.red));
             }
             if !is_text {
-                let f = |x: f64| if x.is_finite() { view::fmt(x * d.factor) } else { "--".into() };
+                let f = |x: f64| if x.is_finite() { d.fmt(x) } else { "--".into() };
                 match cursor {
-                    Some(c) => cursor_lines(ui, c, p),
+                    Some(c) => cursor_lines(ui, c, p, d.decimals),
                     None if !stale => {
                         let mean = s.mean(reading).unwrap_or(f64::NAN);
                         let one = format!("min {}  max {}  mean {}", f(s.min), f(s.max), f(mean));
@@ -307,7 +307,7 @@ impl SpyApp {
         let sig = self.catalogue.get(key.signal).cloned();
         let cs = st.channels.iter().find(|c| c.key == key).cloned();
         let h = view::health(cs.as_ref(), view::session_live(&st.phase), sig.as_ref(), st.loopback);
-        let d = view::display(sig.as_ref(), self.chans[i].radians);
+        let d = view::display(sig.as_ref(), self.chans[i].radians).with_decimals(self.chans[i].decimals);
         let name = view::short_label(&self.catalogue, &key);
         let mut back = false;
         let mut remove = false;
@@ -330,7 +330,7 @@ impl SpyApp {
             ui.horizontal_wrapped(|ui| {
                 let value = self.session.store().get(&key).and_then(|ch| {
                     let r = ch.lock();
-                    if r.kind == Some(spy_core::sample::ValueKind::String) { r.last_text.clone() } else { view::readout_ms(&r, view::reading(sig.as_ref()), view::readout_window(self.chans[i].smooth_ms)).map(|v| format!("{} {}", view::fmt(v * d.factor), d.units)) }
+                    if r.kind == Some(spy_core::sample::ValueKind::String) { r.last_text.clone() } else { view::readout_ms(&r, view::reading(sig.as_ref()), view::readout_window(self.chans[i].smooth_ms)).map(|v| format!("{} {}", d.fmt(v), d.units)) }
                 });
                 ui.label(theme::num(value.unwrap_or_else(|| "--".into()), 18.0).color(if h.is_live() { p.ink } else { p.ink2 }));
                 status_word(ui, h);
@@ -401,6 +401,25 @@ impl SpyApp {
             });
         });
         ui.label(RichText::new("also smooths the value (150 ms at least).").size(14.0).color(p.ink3)).on_hover_text("On the screen only: recordings and saved files keep every sample.");
+        let auto = match view::auto_decimals(&units) {
+            Some(n) => format!("auto ({})", view::decimals_text(n)),
+            None => "auto (6 digits)".to_string(),
+        };
+        option_row(ui, label_w, "decimals", |ui, w| {
+            let cur = self.chans[i].decimals.map_or_else(|| auto.clone(), |n| view::decimals_text(n.into()));
+            egui::ComboBox::from_id_salt(("decimals", &key)).selected_text(cur).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
+                if ui.selectable_value(&mut self.chans[i].decimals, None, auto.as_str()).changed() {
+                    changed = true;
+                }
+                for n in 0..=view::MAX_DECIMALS {
+                    if ui.selectable_value(&mut self.chans[i].decimals, Some(n), view::decimals_text(n.into())).changed() {
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How the numbers read on the screen. Recordings and saved files keep every digit.");
+        });
         let lane = self.chans[i].lane;
         let own = self.chans.iter().filter(|c| c.lane == lane).count() == 1;
         let mut lanes: Vec<(u32, String)> = Vec::new();
@@ -529,8 +548,8 @@ fn readout_tip(reading: view::Reading, smooth: u32) -> String {
     }
 }
 
-pub fn cursor_lines(ui: &mut egui::Ui, c: &CursorReading, p: &theme::Pal) {
-    let f = |v: Option<f64>| v.map(view::fmt).unwrap_or_else(|| "--".into());
+pub fn cursor_lines(ui: &mut egui::Ui, c: &CursorReading, p: &theme::Pal, decimals: Option<usize>) {
+    let f = |v: Option<f64>| v.map(|x| view::fmt_to(x, decimals)).unwrap_or_else(|| "--".into());
     let mono = |t: String| RichText::new(t).monospace().size(14.0);
     let word = |t: &str| theme::b(t).size(14.0);
     if c.a.is_none() && c.b.is_none() {
@@ -553,12 +572,12 @@ pub fn cursor_lines(ui: &mut egui::Ui, c: &CursorReading, p: &theme::Pal) {
             ui.end_row();
         });
     }
-    stats_grid(ui, &c.between, if c.a.is_some() && c.b.is_some() { "between A and B" } else { "in view" }, p);
+    stats_grid(ui, &c.between, if c.a.is_some() && c.b.is_some() { "between A and B" } else { "in view" }, p, decimals);
 }
 
-pub fn stats_grid(ui: &mut egui::Ui, s: &crate::charts::RangeStats, what: &str, p: &theme::Pal) {
+pub fn stats_grid(ui: &mut egui::Ui, s: &crate::charts::RangeStats, what: &str, p: &theme::Pal, decimals: Option<usize>) {
     let has = s.n > 0;
-    let num = |v: f64| RichText::new(if has { view::fmt(v) } else { "--".into() }).monospace().size(14.0).color(p.ink2);
+    let num = |v: f64| RichText::new(if has { view::fmt_to(v, decimals) } else { "--".into() }).monospace().size(14.0).color(p.ink2);
     let word = |t: &str| theme::b(t).size(14.0).color(p.ink2);
     ui.label(RichText::new(what).size(14.0).color(p.ink3));
     egui::Grid::new(ui.next_auto_id()).num_columns(4).spacing(egui::vec2(8.0, 1.0)).show(ui, |ui| {

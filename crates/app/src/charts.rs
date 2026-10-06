@@ -44,6 +44,7 @@ pub(crate) struct Member {
     min_span: f64,
     smooth_ms: u32,
     scale: Scale,
+    decimals: Option<usize>,
 }
 
 impl Member {
@@ -304,7 +305,7 @@ impl SpyApp {
                 continue;
             }
             let sig = self.catalogue.get(c.key.signal);
-            let d = view::display(sig, c.radians);
+            let d = view::display(sig, c.radians).with_decimals(c.decimals);
             let cs = st.channels.iter().find(|s| s.key == c.key);
             let scale = self.chans.iter().enumerate().find(|(j, o)| o.lane == c.lane && charted[*j] && self.units_of(*j) == d.units).map_or(c.scale, |(_, o)| o.scale);
             out.push(Member {
@@ -321,6 +322,7 @@ impl SpyApp {
                 min_span: min_span_for(&d.units, sig),
                 smooth_ms: c.smooth_ms,
                 scale,
+                decimals: d.decimals,
             });
         }
         for (i, d) in self.derived.iter().enumerate() {
@@ -339,6 +341,7 @@ impl SpyApp {
                 min_span: min_span(def.units()),
                 smooth_ms: 0,
                 scale: Scale::default(),
+                decimals: crate::derived_view::decimals(def),
             });
         }
         out
@@ -424,7 +427,9 @@ impl SpyApp {
         }
         let title_h = 30.0;
         let axis_h = 26.0;
-        let fit = (ui.available_height() - axis_h) / lanes.len() as f32 - title_h - 8.0;
+        let lane_gap = 8.0;
+        let lane_overhead = title_h + lane_gap + 2.0 * ui.spacing().item_spacing.y;
+        let fit = (ui.available_height() - axis_h) / lanes.len() as f32 - lane_overhead;
         let lane_h = fit.max(90.0);
         let every_axis = fit < 90.0;
 
@@ -462,6 +467,7 @@ impl SpyApp {
                 }
                 let tl2 = tl.clone();
                 let units = lane.1.clone();
+                let decimals = first.decimals;
                 let shown = self.hover_text.clone();
                 let marks2 = marks.clone();
                 let last_lane = k + 1 == lanes.len();
@@ -479,7 +485,7 @@ impl SpyApp {
                     })
                     .custom_y_axes(vec![theme::value_axis(p)])
                     .show_axes([last_lane || every_axis, true])
-                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, &marks2, mark_tol)))
+                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, decimals, &marks2, mark_tol)))
                     .allow_drag([true, false])
                     .allow_zoom(false)
                     .allow_scroll(false)
@@ -617,7 +623,7 @@ impl SpyApp {
                     ui.ctx().request_repaint();
                 }
                 events_out.push((lane.clone(), resp.inner));
-                ui.add_space(8.0);
+                ui.add_space(lane_gap);
             }
         });
         self.lane_transforms = transforms;
@@ -927,16 +933,17 @@ pub fn min_span_for(units: &str, sig: Option<&spy_core::catalogue::Signal>) -> f
     }
 }
 
-fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str, marks: &[(f64, String)], tol: f64) -> Option<String> {
+fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str, decimals: Option<usize>, marks: &[(f64, String)], tol: f64) -> Option<String> {
     let (name, p) = match pos {
         HoverPosition::NearDataPoint { plot_name, position, .. } => (Some(*plot_name), *position),
         HoverPosition::Elsewhere { position } => (None, *position),
     };
     let t = tl.origin().unwrap_or(0) + (p.x * 1000.0).round() as i64;
     let wall = tl.wall(t).map(view::local_time).unwrap_or_default();
+    let value = view::fmt_to(p.y, decimals);
     let text = match name {
-        Some(n) => format!("{n}\n{} {units}\nt = {:.3} s   {wall}", view::fmt(p.y), p.x),
-        None => format!("t = {:.3} s   {wall}\n{} {units}", p.x, view::fmt(p.y)),
+        Some(n) => format!("{n}\n{value} {units}\nt = {:.3} s   {wall}", p.x),
+        None => format!("t = {:.3} s   {wall}\n{value} {units}", p.x),
     };
     Some(with_mark(text, p.x, tol, marks))
 }
@@ -961,17 +968,19 @@ mod tests {
     fn a_hover_over_a_marks_line_names_it() {
         let marks = vec![(1.0, "marker M1".to_string()), (4.0, "controller: 10010 Motors OFF state (information)".to_string()), (4.5, "cursor A".to_string())];
         let tl = Timeline::default();
-        let at = |x: f64| hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 1.0) }, &tl, "Nm", &marks, 0.1).unwrap();
+        let at = |x: f64| hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 1.0) }, &tl, "Nm", None, &marks, 0.1).unwrap();
         assert!(at(4.05).starts_with("controller: 10010 Motors OFF state (information)\nt = 4.050 s"), "{}", at(4.05));
         assert!(at(4.42).starts_with("cursor A\n"), "the nearest: {}", at(4.42));
         assert!(at(0.95).starts_with("marker M1\n"), "{}", at(0.95));
         assert!(at(2.0).starts_with("t = 2.000 s"), "no mark within reach: {}", at(2.0));
         let two = vec![(4.0, "controller: 10002 Program pointer has been reset (information)".to_string()), (4.0, "controller: 10011 Motors ON state (information)".to_string())];
-        let text = hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(4.01, 1.0) }, &tl, "Nm", &two, 0.1).unwrap();
+        let text = hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(4.01, 1.0) }, &tl, "Nm", None, &two, 0.1).unwrap();
         assert!(text.starts_with("controller: 10002") && text.contains("\ncontroller: 10011 Motors ON state (information)\nt = "), "{text}");
         let near = HoverPosition::NearDataPoint { plot_name: "4002 · Torque", position: egui_plot::PlotPoint::new(3.95, 1.0), index: 0 };
-        let text = hover_label(&near, &tl, "Nm", &marks, 0.1).unwrap();
+        let text = hover_label(&near, &tl, "Nm", None, &marks, 0.1).unwrap();
         assert!(text.starts_with("controller: 10010") && text.contains("\n4002 · Torque\n"), "{text}");
+        let text = hover_label(&near, &tl, "Nm", Some(1), &marks, 0.1).unwrap();
+        assert!(text.contains("\n1.0 Nm\n"), "the chart's decimals: {text}");
     }
 
     fn ring(t0: i64, values: &[f64]) -> Ring {

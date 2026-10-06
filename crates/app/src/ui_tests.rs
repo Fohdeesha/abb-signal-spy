@@ -22,8 +22,12 @@ fn harness(dir: &Path, ask: AskPolicy) -> Harness<'static, SpyApp> {
 }
 
 fn harness_with(dir: &Path, opts: Options) -> Harness<'static, SpyApp> {
+    harness_sized(dir, opts, (1400.0, 900.0))
+}
+
+fn harness_sized(dir: &Path, opts: Options, size: (f32, f32)) -> Harness<'static, SpyApp> {
     let dir = dir.to_path_buf();
-    Harness::builder().with_size((1400.0, 900.0)).with_max_steps(20).build_eframe(move |cc| {
+    Harness::builder().with_size(size).with_max_steps(20).build_eframe(move |cc| {
         let mut app = SpyApp::with_options(cc, dir.clone(), false, opts.clone());
         app.settings.record_dir = Some(dir.join("recordings"));
         app.show_guide = false;
@@ -122,7 +126,7 @@ fn connect_add_a_channel_and_read_it_live() {
     assert!(h.state().add.is_none(), "the dialog closes after adding");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
     assert!(h.query_by_label("live").is_some());
-    assert!(h.query_by_label("101.000").is_some(), "the 150 ms mean is shown");
+    assert!(h.query_by_label("101.0").is_some(), "the 150 ms mean is shown");
 
     add_via_dialog(&mut h, 4002, "add");
     assert_eq!(h.state().chans.len(), 1);
@@ -420,7 +424,7 @@ fn the_phone_view_serves_what_the_window_shows() {
         s.read_to_string(&mut out).unwrap();
         out
     };
-    assert!(body.contains("DC-link voltage") && body.contains("356.700") && body.contains("\"stale\":false"), "{body}");
+    assert!(body.contains("DC-link voltage") && body.contains("\"356.7\"") && body.contains("\"stale\":false"), "{body}");
     menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_none()));
 }
@@ -616,6 +620,7 @@ fn a_recording_opens_for_review_and_is_never_shown_as_live() {
     let r = h.state().review.as_ref().unwrap().review.clone();
     assert!(r.wall_clock && r.channel("4002/ROB_1/J1").is_some_and(|c| c.v.len() > 100 && c.v.iter().all(|&v| v == 101.0)));
     assert!(h.query_all_by_label_contains("samples in view").next().is_some(), "statistics of the stretch in view");
+    assert!(h.query_all_by_label("101.0").next().is_some() && h.query_all_by_label("101.000").next().is_none(), "the review's numbers to their unit's decimals");
     assert_eq!(phase(h.state()), Phase::Streaming, "the live session carries on underneath");
 
     h.get_by_label("close the recording").click();
@@ -900,7 +905,7 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
     assert_eq!(ids(h.state())[2..], ["4002/ROB_2/J1", "4002/ROB_2/J2", "4002/ROB_2/J3", "4002/ROB_2/J4", "4002/ROB_2/J5", "4002/ROB_2/J6"]);
     assert_eq!(h.state().lanes(&[true; 8]).len(), 2);
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().filter(|c| c.key.signal == 4002).all(|c| c.samples > 20)));
-    assert!(h.query_by_label("203.000").is_some(), "ROB_2 J3's torque (the fake's 203) is read");
+    assert!(h.query_by_label("203.0").is_some(), "ROB_2 J3's torque (the fake's 203) is read");
 
     h.get_by_label("add a set").click();
     let _ = h.run_ok();
@@ -1022,7 +1027,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     assert_eq!(ids, ["5020/ROB_1/J1", "5021/ROB_1/J1", "5022/ROB_1/J1"], "the other two legs came with it");
     assert!(wait(&mut h, 5000, |a| a.derived[0].live.lock().len() > 20));
     let _ = h.run_ok();
-    assert!(h.query_by_label("1.50000").is_some(), "0.5 + 0.6 + 0.4");
+    assert!(h.query_by_label("1.500").is_some(), "0.5 + 0.6 + 0.4");
     assert_eq!(derived_health(&h, 0), view::Health::Live);
     let d_lane = (h.state().derived[0].lane, String::new());
     assert!(h.state().lanes(&[true; 3]).contains(&d_lane), "the sum has a chart of its own");
@@ -1062,7 +1067,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 346.5), sample_ms: 4.032 }));
     assert!(wait(&mut h, 3000, |a| a.derived[1].live.lock().last().is_some_and(|(_, v)| v == 10.0)));
     let _ = h.run_ok();
-    assert!(h.query_by_label("10.0000").is_some() && h.query_by_label("2.81% below").is_some());
+    assert!(h.query_by_label("10.0").is_some() && h.query_by_label("2.81% below").is_some());
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 357.5), sample_ms: 4.032 }));
     assert!(wait(&mut h, 3000, |a| a.derived[1].live.lock().last().is_some_and(|(_, v)| v == -1.0)));
     std::thread::sleep(Duration::from_millis(200));
@@ -1784,7 +1789,7 @@ fn a_padded_speed_and_a_wrapping_angle_read_true_on_the_card_and_the_phone() {
     add_via_dialog(&mut h, 5138, "add");
     assert_eq!(h.state().chans.len(), 2);
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 100)));
-    assert!(h.query_by_label("28.6479").is_some(), "the card does not show the speed the signal reports");
+    assert!(h.query_by_label("28.6").is_some(), "the card does not show the speed the signal reports");
     menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_some()));
     std::thread::sleep(Duration::from_millis(300));
@@ -1792,7 +1797,7 @@ fn a_padded_speed_and_a_wrapping_angle_read_true_on_the_card_and_the_phone() {
     let body = h.state().phone_snapshot.lock().unwrap().body.clone();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     let value = |i: usize| json["channels"][i]["value"].as_str().unwrap().parse::<f64>().unwrap();
-    assert!((value(0) - 28.6479).abs() < 1e-3, "{body}");
+    assert!((value(0) - 28.6479).abs() < 0.05, "{body}");
     let angle = value(1);
     assert!(!(0.5..=359.5).contains(&angle), "the resolver angle read {angle} deg: averaged across the wrap");
     menu(&mut h, "view", "phone view");
@@ -2594,6 +2599,30 @@ fn one_chart_fills_the_middle_and_all_come_back() {
 }
 
 #[test]
+fn charts_that_fit_the_middle_leave_nothing_to_scroll() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("fit");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    for a in 1..=4 {
+        let k = spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(a).unwrap() };
+        assert!(h.state_mut().add_channels(vec![k], false));
+    }
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+    let _ = h.run_ok();
+    let lanes = h.state().lane_transforms.clone();
+    assert_eq!(lanes.len(), 4);
+    assert!(lanes[0].frame().height() > 90.0, "the four charts are stretched to fit: {}", lanes[0].frame().height());
+    let top = lanes[0].frame().top();
+    let last_title = egui::pos2(lanes[3].frame().center().x, lanes[3].frame().top() - 20.0);
+    h.hover_at(last_title);
+    let _ = h.run_ok();
+    wheel(&mut h, -5.0, egui::Modifiers::NONE);
+    assert_eq!(h.state().lane_transforms[0].frame().top(), top, "the charts scrolled: the last one was below the fold");
+}
+
+#[test]
 fn the_dashboard_shows_big_numbers_and_never_a_stale_one_as_now() {
     let fake = FakeController::start(Behaviour::default()).unwrap();
     let dir = temp_dir("dashboard");
@@ -2607,10 +2636,7 @@ fn the_dashboard_shows_big_numbers_and_never_a_stale_one_as_now() {
     let _ = h.run_ok();
     assert!(h.state().dashboard);
     assert!(h.query_by_label("live dashboard").is_some(), "its heading");
-    assert!(h.query_by_label("101.000").is_some() && h.query_by_label("356.700").is_some(), "the numbers");
-    h.get_by_label("bigger").click();
-    let _ = h.run_ok();
-    assert_eq!(h.state().settings.dash_size, 80.0);
+    assert!(h.query_by_label("101.0").is_some() && h.query_by_label("356.7").is_some(), "the numbers");
     fake.with(|b| {
         b.mute.insert(4002);
     });
@@ -2621,6 +2647,136 @@ fn the_dashboard_shows_big_numbers_and_never_a_stale_one_as_now() {
     h.get_by_label("back to the charts").click();
     let _ = h.run_ok();
     assert!(!h.state().dashboard);
+}
+
+#[test]
+fn a_number_has_its_units_decimals_or_the_channels_choice() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("decimals");
+    {
+        let mut h = harness(&dir, AskPolicy::Remote);
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        add_via_dialog(&mut h, 4002, "add");
+        add_via_dialog(&mut h, 5027, "add");
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+        let _ = h.run_ok();
+        assert!(h.query_by_label("101.0").is_some() && h.query_by_label("356.7").is_some(), "torque and volts to one decimal");
+        let x = h.state().lane_transforms[0].bounds().max()[0] - 1.0;
+        hover_chart(&mut h, 0, x);
+        let shown = h.state().hover_text.lock().unwrap().clone();
+        assert!(shown.contains("101.0 Nm"), "the chart's hover too: {shown}");
+        h.state_mut().toggle_pause();
+        h.state_mut().cursors_on = true;
+        h.state_mut().cursor_a = Some(x);
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        assert!(h.query_by_label("101.000").is_none() && h.query_all_by_label("101.0").count() >= 3, "and the cursor readings");
+        h.state_mut().cursors_on = false;
+        h.state_mut().cursor_a = None;
+        h.state_mut().toggle_pause();
+        h.hover_at(egui::pos2(5.0, 5.0));
+        let _ = h.run_ok();
+        rows(&h)[0].click();
+        let _ = h.run_ok();
+        h.get_by(|n| n.role() == egui::accesskit::Role::ComboBox && n.value().as_deref() == Some("auto (1 decimal)")).click();
+        let _ = h.run_ok();
+        h.get_by_label("3 decimals").click();
+        let _ = h.run_ok();
+        h.get_by_label("all channels").click();
+        let _ = h.run_ok();
+        assert!(h.query_by_label("101.000").is_some(), "the torque to the three chosen");
+        assert!(h.query_by_label("356.7").is_some(), "the volts keep theirs");
+        h.state_mut().dashboard = true;
+        let _ = h.run_ok();
+        assert!(h.query_by_label("101.000").is_some(), "on the dashboard too");
+        h.state_mut().save_settings();
+        h.state_mut().session.disconnect();
+        let _ = h.run_ok();
+    }
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 50)));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("101.000").is_some(), "the choice is remembered");
+}
+
+struct DashboardTexts {
+    numbers: Vec<egui::Rect>,
+    ranges: Vec<egui::Rect>,
+    headings: Vec<egui::Rect>,
+}
+
+fn six_numbers_on_the_dashboard(tag: &str, size: (f32, f32)) -> DashboardTexts {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir(tag);
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let keys: Vec<spy_core::store::ChannelKey> = (1..=6).map(|a| spy_core::store::ChannelKey { signal: 4002, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(a).unwrap() }).collect();
+    assert!(h.state_mut().add_channels(keys, false));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 6 && a.session.status().channels.iter().all(|c| c.samples > 50)));
+    h.state_mut().dashboard = true;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let headings: Vec<egui::Rect> = h.query_all_by_label_contains("4002 · ").map(|n| n.rect()).collect();
+    assert_eq!(headings.len(), 6, "a heading on each card");
+    DashboardTexts {
+        numbers: (101..=106).map(|v| h.get_by_label(&format!("{v}.0")).rect()).collect(),
+        ranges: (101..=106).map(|v| h.get_by_label(&format!("{v}.0 to {v}.0")).rect()).collect(),
+        headings,
+    }
+}
+
+fn each_card_holds_its_own(d: &DashboardTexts, window: (f32, f32)) {
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(window.0, window.1));
+    let texts: Vec<egui::Rect> = d.numbers.iter().chain(&d.ranges).copied().collect();
+    for (i, a) in texts.iter().enumerate() {
+        assert!(window.contains_rect(*a), "{a:?} is past the window");
+        for b in &texts[i + 1..] {
+            assert!(!a.intersects(*b), "{a:?} runs into {b:?}");
+        }
+    }
+    let padding_gap_padding = 36.0;
+    for r in &d.ranges {
+        for below in d.headings.iter().filter(|hd| hd.top() > r.bottom() && hd.x_range().intersects(r.x_range())) {
+            assert!(below.top() - r.bottom() >= padding_gap_padding, "the range line at {r:?} runs out of its card, toward {below:?}");
+        }
+    }
+}
+
+#[test]
+fn a_dashboard_number_keeps_its_size_while_its_value_swings() {
+    let mut b = Behaviour::default();
+    b.signals.insert(4003, SignalDef { source: SignalSource::float(|(t, _, _)| if t / 1000 % 2 == 0 { 5.0 } else { -12.3456 }), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("dash-swing");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 700.0));
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let key = |signal: u32, a: u8| spy_core::store::ChannelKey { signal, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(a).unwrap() };
+    assert!(h.state_mut().add_channels(std::iter::once(key(4003, 1)).chain((1..=5).map(|a| key(4002, a))).collect(), false));
+    h.state_mut().dashboard = true;
+    assert!(wait(&mut h, 5000, |a| a.chans[0].stats.min < -12.0 && a.chans[0].stats.max > 4.0));
+    let (mut short, mut long) = (None, None);
+    let end = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < end && (short.is_none() || long.is_none()) {
+        let _ = h.run_ok();
+        short = short.or_else(|| h.query_by_label("5.0").map(|n| n.rect().height()));
+        long = long.or_else(|| h.query_by_label("-12.3").map(|n| n.rect().height()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (short, long) = (short.expect("the short reading shown"), long.expect("the long reading shown"));
+    assert_eq!(short, long, "the number changed size with its value");
+}
+
+#[test]
+fn the_dashboard_numbers_grow_into_the_room_they_have() {
+    let short = six_numbers_on_the_dashboard("dash-short", (1366.0, 700.0));
+    let tall = six_numbers_on_the_dashboard("dash-tall", (1366.0, 1024.0));
+    assert!(tall.numbers[0].height() > short.numbers[0].height() * 1.2, "a taller window, bigger numbers: {} then {}", short.numbers[0].height(), tall.numbers[0].height());
+    each_card_holds_its_own(&short, (1366.0, 700.0));
+    each_card_holds_its_own(&tall, (1366.0, 1024.0));
 }
 
 #[test]

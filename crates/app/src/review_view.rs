@@ -607,8 +607,9 @@ impl SpyApp {
                         ui.label(RichText::new(format!("{} change(s) in view, {} in all", texts.len(), ch.text.len())).size(14.0).color(p.ink2));
                     } else {
                         let (units, factor) = display(ch);
+                        let decimals = view::auto_decimals(&units);
                         let s = stats.get(i).copied().unwrap_or_default();
-                        let f = |v: Option<f64>| v.map(view::fmt).unwrap_or_else(|| "--".into());
+                        let f = |v: Option<f64>| v.map(|x| view::fmt_to(x, decimals)).unwrap_or_else(|| "--".into());
                         if cursors_on {
                             let va = a.and_then(|x| at_cursor(rs, ch, x, factor));
                             let vb = b.and_then(|x| at_cursor(rs, ch, x, factor));
@@ -630,21 +631,21 @@ impl SpyApp {
                                 });
                             });
                             if let (Some(x), Some(y)) = (va, vb) {
-                                ui.label(RichText::new(format!("B − A {} {units}", view::fmt(y - x))).monospace().size(14.0));
+                                ui.label(RichText::new(format!("B − A {} {units}", view::fmt_to(y - x, decimals))).monospace().size(14.0));
                             }
                             match between_stats.as_ref().and_then(|v| v.get(i)) {
-                                Some(bs) => crate::channels::stats_grid(ui, bs, "between A and B", p),
-                                None => crate::channels::stats_grid(ui, &s, "in view", p),
+                                Some(bs) => crate::channels::stats_grid(ui, bs, "between A and B", p, decimals),
+                                None => crate::channels::stats_grid(ui, &s, "in view", p, decimals),
                             }
                         } else if s.n == 0 {
                             ui.label(RichText::new("no samples in view").color(p.ink2));
                         } else {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("mean").color(p.ink2));
-                                ui.label(theme::num(view::fmt(s.mean), 24.0));
+                                ui.label(theme::num(view::fmt_to(s.mean, decimals), 24.0));
                                 ui.label(RichText::new(&units).color(p.ink2));
                             });
-                            crate::channels::stats_grid(ui, &s, &format!("{} samples in view, {} in all", s.n, ch.v.len()), p);
+                            crate::channels::stats_grid(ui, &s, &format!("{} samples in view, {} in all", s.n, ch.v.len()), p, decimals);
                         }
                     }
                 });
@@ -774,9 +775,10 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, marks: &[
     } else {
         format!("controller {t} ms")
     };
+    let value = view::fmt_to(p.y, view::auto_decimals(units));
     let text = match nm {
-        Some(n) => format!("{n}\n{} {units}\nt = {:.3} s   {when}", view::fmt(p.y), p.x),
-        None => format!("t = {:.3} s   {when}\n{} {units}", p.x, view::fmt(p.y)),
+        Some(n) => format!("{n}\n{value} {units}\nt = {:.3} s   {when}", p.x),
+        None => format!("t = {:.3} s   {when}\n{value} {units}", p.x),
     };
     Some(crate::charts::with_mark(text, p.x, tol, marks))
 }

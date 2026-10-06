@@ -241,7 +241,7 @@ impl SpyApp {
                     let p = match pos {
                         HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position } => *position,
                     };
-                    Some(format!("X {} {xu}\nY {} {yu}", view::fmt(p.x), view::fmt(p.y)))
+                    Some(hover_text(p, &xu, &yu))
                 })
                 .show(ui, |pu| {
                     if chosen_again {
@@ -316,9 +316,18 @@ fn pairs_text(p: &Pairs, x: &Candidate, y: &Candidate, secs: f64) -> String {
     }
 }
 
+fn hover_text(p: egui_plot::PlotPoint, x_units: &str, y_units: &str) -> String {
+    format!("X {} {x_units}\nY {} {y_units}", view::fmt_to(p.x, view::auto_decimals(x_units)), view::fmt_to(p.y, view::auto_decimals(y_units)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hover_reads_each_axis_to_its_units_decimals() {
+        assert_eq!(hover_text(egui_plot::PlotPoint::new(12.3456, -0.04), "A", "Nm"), "X 12.35 A\nY 0.0 Nm");
+    }
 
     #[test]
     fn the_line_and_correlation_are_the_least_squares_ones() {

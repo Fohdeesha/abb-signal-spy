@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 
 use spy_core::session::Target;
 
-pub const DASH_SIZES: [f32; 5] = [40.0, 52.0, 64.0, 80.0, 100.0];
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SavedController {
     pub name: String,
@@ -26,6 +24,8 @@ pub struct SavedChannel {
     pub smooth_ms: u32,
     #[serde(default)]
     pub scale: crate::charts::Scale,
+    #[serde(default)]
+    pub decimals: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -61,7 +61,6 @@ pub struct Settings {
     pub rws_events: bool,
     pub signals_folded: bool,
     pub status_open: bool,
-    pub dash_size: f32,
 }
 
 impl Default for Settings {
@@ -90,7 +89,6 @@ impl Default for Settings {
             rws_events: true,
             signals_folded: false,
             status_open: false,
-            dash_size: 64.0,
         }
     }
 }
@@ -140,7 +138,6 @@ impl Settings {
             rws_events: field(&obj, "rws_events", d.rws_events, &mut notes),
             signals_folded: field(&obj, "signals_folded", d.signals_folded, &mut notes),
             status_open: field(&obj, "status_open", d.status_open, &mut notes),
-            dash_size: field(&obj, "dash_size", d.dash_size, &mut notes),
         };
         s.sanitize(&mut notes);
         let note = (!notes.is_empty()).then(|| format!("Parts of the settings file ({}) could not be used and were left out (the rest loaded): {}.", path.display(), notes.join("; ")));
@@ -166,9 +163,6 @@ impl Settings {
         if !(self.ui_scale.is_finite() && (0.6..=2.5).contains(&self.ui_scale)) {
             self.ui_scale = 1.0;
         }
-        if !(self.dash_size.is_finite() && (DASH_SIZES[0]..=DASH_SIZES[DASH_SIZES.len() - 1]).contains(&self.dash_size)) {
-            self.dash_size = 64.0;
-        }
         for c in &mut self.channels {
             if !crate::charts::SMOOTHING.iter().any(|(ms, _)| *ms == c.smooth_ms) {
                 notes.push(format!("the smoothing of signal {} ({} ms is not one of the choices)", c.signal, c.smooth_ms));
@@ -177,6 +171,10 @@ impl Settings {
             if !c.scale.is_valid() {
                 notes.push(format!("the vertical scale of signal {} (not a range)", c.signal));
                 c.scale = crate::charts::Scale::default();
+            }
+            if c.decimals.is_some_and(|d| d > crate::view::MAX_DECIMALS) {
+                notes.push(format!("the decimals of signal {} (at most {})", c.signal, crate::view::MAX_DECIMALS));
+                c.decimals = None;
             }
         }
         if self.channels.len() > spy_core::session::MAX_CHANNELS {
@@ -335,19 +333,19 @@ mod tests {
     fn a_smoothing_or_scale_a_hand_edit_spoiled_is_left_out() {
         let (s, note) = load_text(
             "display",
-            r#"{"dash_size": 9999, "channels": [
-                {"signal": 4002, "unit": "ROB_1", "axis": 1, "smooth_ms": 33},
+            r#"{"channels": [
+                {"signal": 4002, "unit": "ROB_1", "axis": 1, "smooth_ms": 33, "decimals": 9},
                 {"signal": 4002, "unit": "ROB_1", "axis": 2, "scale": {"kind": "fixed", "lo": 5, "hi": 1}},
-                {"signal": 4002, "unit": "ROB_1", "axis": 3, "smooth_ms": 100, "scale": {"kind": "centred", "half": 50}}
+                {"signal": 4002, "unit": "ROB_1", "axis": 3, "smooth_ms": 100, "scale": {"kind": "centred", "half": 50}, "decimals": 2}
             ]}"#,
         );
         assert_eq!(s.channels.len(), 3, "the channels themselves are kept");
         assert_eq!(s.channels[0].smooth_ms, 0, "not a choice: off");
+        assert_eq!(s.channels[0].decimals, None, "too many decimals: the unit's");
         assert_eq!(s.channels[1].scale, crate::charts::Scale::default(), "not a range: fit");
-        assert_eq!((s.channels[2].smooth_ms, s.channels[2].scale), (100, crate::charts::Scale::Centred { half: 50.0 }), "good ones kept");
-        assert_eq!(s.dash_size, 64.0);
+        assert_eq!((s.channels[2].smooth_ms, s.channels[2].scale, s.channels[2].decimals), (100, crate::charts::Scale::Centred { half: 50.0 }, Some(2)), "good ones kept");
         let note = note.expect("the person is told");
-        assert!(note.contains("smoothing of signal 4002") && note.contains("vertical scale of signal 4002"), "{note}");
+        assert!(note.contains("smoothing of signal 4002") && note.contains("vertical scale of signal 4002") && note.contains("decimals of signal 4002"), "{note}");
     }
 
     #[test]
@@ -380,7 +378,7 @@ mod tests {
             last_target: Some(Target { host: "10.0.0.2".into(), port: 5515 }),
             dark: false,
             window_s: 30.0,
-            channels: vec![SavedChannel { signal: 6000, unit: "ROB_2".into(), axis: 1, radians: true, hold_nonzero: true, lane: 4, smooth_ms: 100, scale: crate::charts::Scale::Fixed { lo: -2.5, hi: 7.0 } }],
+            channels: vec![SavedChannel { signal: 6000, unit: "ROB_2".into(), axis: 1, radians: true, hold_nonzero: true, lane: 4, smooth_ms: 100, scale: crate::charts::Scale::Fixed { lo: -2.5, hi: 7.0 }, decimals: Some(3) }],
             record_dir: Some(PathBuf::from(r"D:\rec")),
             slow_interval_ms: 5000,
             snapshot_s: 60.0,
@@ -397,7 +395,6 @@ mod tests {
             rws_events: false,
             signals_folded: true,
             status_open: true,
-            dash_size: 80.0,
         };
         assert_ne!(s, Settings::default());
         let dir = TestDir::new("settings-all");
