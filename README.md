@@ -28,7 +28,7 @@ The core reason I built this: It exposes more than 150 diagnostic signals that T
 
 Grab the latest `.exe` from [Releases](../../releases). No installer, just run it - Windows 10 or 11. If you have a *really* shitty field laptop (Windows 7, 8 or 8.1) grab the exe with `-win7` in the filename.
 
-The exe isn't signed, so Windows SmartScreen may complain the first time: **More info > Run anyway**. `SHA256SUMS.txt` has the checksum of every file in a release, and `signal-spy-probe` is a command-line tool for poking at a controller (run it with `help`). The PC needs to reach the controller on TCP port 5515.
+The exe isn't signed, so Windows SmartScreen may complain the first time: **More info > Run anyway**. `SHA256SUMS.txt` has the checksum of every file in a release. The PC needs to reach the controller on TCP port 5515.
 
 ## Use it
 

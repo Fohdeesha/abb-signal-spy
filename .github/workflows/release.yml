@@ -54,7 +54,6 @@ jobs:
           fetch-depth: 0
       - run: rustup toolchain install 1.96 --profile minimal
       - run: cargo +1.96 build --release --locked -p abb-signal-spy
-      - run: cargo +1.96 build --release --locked -p signal-spy-probe
       - run: rustup toolchain install nightly-2026-09-25 --profile minimal --component rust-src
       - run: cargo +nightly-2026-09-25 build --release --locked -Z build-std=std,panic_unwind --target x86_64-win7-windows-msvc -p abb-signal-spy --no-default-features
       - name: windows 7 imports
@@ -70,7 +69,6 @@ jobs:
         run: |
           mkdir dist
           cp target/release/abb-signal-spy.exe "dist/abb-signal-spy-$VERSION.exe"
-          cp target/release/signal-spy-probe.exe "dist/signal-spy-probe-$VERSION.exe"
           cp target/x86_64-win7-windows-msvc/release/abb-signal-spy.exe "dist/abb-signal-spy-$VERSION-win7.exe"
           (cd dist && sha256sum *.exe > SHA256SUMS.txt)
           previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
