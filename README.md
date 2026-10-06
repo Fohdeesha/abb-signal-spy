@@ -26,7 +26,7 @@ The core reason I built this: It exposes more than 150 diagnostic signals that T
 
 ## Get it
 
-Grab the latest `.exe` from [Releases](../../releases). No installer, just run it. Windows 10 or 11.
+Grab the latest `.exe` from [Releases](../../releases). No installer, just run it. Windows 10 or 11; for Windows 7 (64-bit), take the one ending in `-win7`.
 
 ## Use it
 
