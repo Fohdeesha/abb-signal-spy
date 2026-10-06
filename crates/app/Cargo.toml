@@ -42,3 +42,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 signal-spy-core = { path = "../core", features = ["fake"] }
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }

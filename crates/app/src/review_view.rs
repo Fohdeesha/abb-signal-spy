@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, UNIX_EPOCH};
 
 use eframe::egui::{self, RichText};
-use egui_plot::{HoverPosition, Legend, Line, Plot, PlotPoints, VLine};
+use egui_plot::{HoverPosition, Line, Plot, PlotPoints, VLine};
 
 use spy_core::catalogue::{self, flag};
 use spy_core::log::Level;
@@ -158,10 +158,10 @@ impl SpyApp {
         let mut open = true;
         let mut chosen: Option<PathBuf> = None;
         let mut refresh = false;
-        egui::Window::new("Recordings").open(&mut open).default_width(640.0).default_height(420.0).show(ctx, |ui| {
+        theme::window("recordings", ctx).open(&mut open).default_width(640.0).default_height(420.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(self.record_dir().display().to_string()).weak());
-                if ui.small_button("refresh").clicked() {
+                if ui.add(egui::Button::new("refresh").min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
                     refresh = true;
                 }
             });
@@ -171,7 +171,7 @@ impl SpyApp {
             if list.is_empty() {
                 ui.label("No recordings here yet.");
             }
-            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height((theme::window_room(ui.ctx()) - 220.0).max(160.0)).show(ui, |ui| {
                 egui::Grid::new("recordings").striped(true).num_columns(6).show(ui, |ui| {
                     for h in ["started", "name", "kind", "controller", "", ""] {
                         ui.label(RichText::new(h).small().strong());
@@ -179,9 +179,10 @@ impl SpyApp {
                     ui.end_row();
                     for (dir, meta) in &list {
                         ui.label(RichText::new(local_start(meta)).monospace());
-                        ui.label(if meta.label.is_empty() { dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { meta.label.clone() });
+                        let name = if meta.label.is_empty() { dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { meta.label.clone() };
+                        ui.add_sized([200.0, 22.0], egui::Label::new(name.as_str()).truncate()).on_hover_text(&name);
                         ui.label(kind_word(meta.kind));
-                        ui.label(&meta.controller);
+                        ui.add_sized([150.0, 22.0], egui::Label::new(meta.controller.as_str()).truncate()).on_hover_text(&meta.controller);
                         if !meta.complete && self.still_recording(dir, meta) {
                             ui.label(RichText::new("still recording").color(theme::pal(ui).live)).on_hover_text("Being recorded now: what is written so far opens, and the rest follows when it ends.");
                         } else if !meta.complete {
@@ -198,8 +199,9 @@ impl SpyApp {
             });
             ui.separator();
             ui.horizontal(|ui| {
-                fields::line(ui, &mut self.recording_path_input, "Recording folder", |t| t.hint_text("C:\\path\\to\\a recording folder").desired_width(420.0));
-                if ui.button("open").clicked() {
+                let width = 420.0f32.min(ui.available_width() - 90.0);
+                let r = fields::line(ui, &mut self.recording_path_input, "Recording folder", |t| t.hint_text("C:\\path\\to\\a recording folder").desired_width(width));
+                if ui.add(egui::Button::new("open").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() || fields::entered(ui, &r) {
                     let p = PathBuf::from(self.recording_path_input.trim().trim_matches('"'));
                     match recording_dir(&p) {
                         Some(d) => chosen = Some(d),
@@ -294,12 +296,12 @@ impl SpyApp {
         ui.scope(|ui| {
             ui.spacing_mut().button_padding.x = 9.0;
             ui.spacing_mut().item_spacing.x = 6.0;
-            let cursors_text = if cursors_on { "cursors: on" } else { "cursors" };
+            let cursors_text = "cursors";
             let mut left = vec!["show all", cursors_text];
             if cursors_on && placed {
                 left.push("clear cursors");
             }
-            let (left_w, right_w) = (theme::buttons_width(ui, &left, 0.0), theme::buttons_width(ui, &["save csv", "save png", "xy plot"], 0.0));
+            let (left_w, right_w) = (theme::buttons_width(ui, &left, 0.0), theme::buttons_width(ui, &["xy plot"], 0.0) + theme::save_menu_width(ui) + 6.0);
             theme::section_tools(
                 ui,
                 "02",
@@ -315,8 +317,7 @@ impl SpyApp {
                 },
                 |ui| {
                     toggle_xy = ui.add(egui::Button::new("xy plot").selected(xy_open).min_size(egui::vec2(0.0, theme::TOOL_H))).on_hover_text(crate::charts::XY_HOVER).clicked();
-                    save_png = theme::tool(ui, "save png").on_hover_text("Save a picture of the charts to the recordings folder").clicked();
-                    save_csv = theme::tool(ui, "save csv").on_hover_text("Save the samples in view, as recorded, to a CSV file in the recordings folder").clicked();
+                    (save_csv, save_png) = theme::save_menu(ui, "The samples in view, as recorded, as a CSV file", "A picture of the charts");
                 },
             );
         });
@@ -333,35 +334,39 @@ impl SpyApp {
             rs.cursor_b = None;
         }
         if rs.cursors_on {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(theme::b("cursors"));
-                let step = |ui: &mut egui::Ui, n: &str, text: String, current: bool| {
-                    let galley_text = RichText::new(text);
-                    egui::Frame::new()
-                        .stroke(egui::Stroke::new(if current { 2.0 } else { 1.0 }, if current { p.hold } else { p.off_edge }))
-                        .inner_margin(egui::Margin::symmetric(10, 5))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(n).font(egui::FontId::new(16.0, theme::bold())).color(if current { p.hold } else { p.ink }));
-                                ui.label(if current { galley_text.color(p.ink).family(theme::bold()) } else { galley_text.color(p.ink2) });
-                            });
+            let steps: [(&str, String, bool); 2] = match (rs.cursor_a, rs.cursor_b) {
+                (None, _) => [("1", "click a chart to place A".into(), true), ("2", "then right-click one to place B".into(), false)],
+                (Some(a), None) => [("1", format!("A placed at {}", clock_text(a)), false), ("2", "now right-click a chart to place B".into(), true)],
+                (Some(a), Some(b)) => [("1", format!("A at {}", clock_text(a)), false), ("2", format!("B at {}, {:.3} s after A", clock_text(b), b - a), false)],
+            };
+            let text_w = |ui: &egui::Ui, t: &str| egui::WidgetText::from(theme::b(t)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x;
+            let box_w = |ui: &egui::Ui, n: &str, t: &str| text_w(ui, n) + text_w(ui, t) + ui.spacing().item_spacing.x + 20.0 + 4.0;
+            let side_by_side = text_w(ui, "cursors") + steps.iter().map(|(n, t, _)| box_w(ui, n, t)).sum::<f32>() + 3.0 * ui.spacing().item_spacing.x <= ui.available_width();
+            let step = |ui: &mut egui::Ui, n: &str, text: &str, current: bool| {
+                let galley_text = RichText::new(text);
+                egui::Frame::new()
+                    .stroke(egui::Stroke::new(if current { 2.0 } else { 1.0 }, if current { p.hold } else { p.off_edge }))
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(n).font(egui::FontId::new(16.0, theme::bold())).color(if current { p.hold } else { p.ink }));
+                            ui.add(egui::Label::new(if current { galley_text.color(p.ink).family(theme::bold()) } else { galley_text.color(p.ink2) }).truncate());
                         });
-                };
-                match (rs.cursor_a, rs.cursor_b) {
-                    (None, _) => {
-                        step(ui, "1", "click a chart to place A".into(), true);
-                        step(ui, "2", "then right-click one to place B".into(), false);
+                    });
+            };
+            if side_by_side {
+                ui.horizontal(|ui| {
+                    ui.label(theme::b("cursors"));
+                    for (n, t, current) in &steps {
+                        step(ui, n, t, *current);
                     }
-                    (Some(a), None) => {
-                        step(ui, "1", format!("A placed at {}", clock_text(a)), false);
-                        step(ui, "2", "now right-click a chart to place B".into(), true);
-                    }
-                    (Some(a), Some(b)) => {
-                        step(ui, "1", format!("A at {}", clock_text(a)), false);
-                        step(ui, "2", format!("B at {}, {:.3} s after A", clock_text(b), b - a), false);
-                    }
+                });
+            } else {
+                ui.label(theme::b("cursors"));
+                for (n, t, current) in &steps {
+                    step(ui, n, t, *current);
                 }
-            });
+            }
         }
         if toggle_xy {
             self.toggle_xy();
@@ -373,7 +378,6 @@ impl SpyApp {
             if save_png {
                 self.request_png(crate::export::Picture::Charts);
             }
-            return;
         }
         let hover_text = self.hover_text.clone();
         let decimals_of: Vec<Option<usize>> = self.review.as_ref().map(|rs| rs.review.channels.iter().map(|ch| self.review_decimals(ch, &display(ch).0)).collect()).unwrap_or_default();
@@ -430,10 +434,16 @@ impl SpyApp {
                         theme::square(ui, theme::channel_color(i, dark), 12.0);
                     }
                     let title = if members.len() == 1 { short(cat, first) } else { format!("{} (+{} overlaid)", short(cat, first), members.len() - 1) };
-                    ui.add(egui::Label::new(theme::b(title)).truncate());
+                    let zoomed = rs.zoom.contains_key(&(*signal, units.clone()));
+                    let units_w = egui::WidgetText::from(units.as_str()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x + 8.0;
+                    let chip_w = if zoomed { theme::badge_button_width(ui, "scale zoomed") + 8.0 } else { 0.0 };
+                    let room = (ui.available_width() - units_w - chip_w).max(0.0);
+                    ui.allocate_ui_with_layout(egui::vec2(room, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(theme::b(title)).truncate());
+                    });
                     ui.label(RichText::new(units).color(p.ink3));
-                    if rs.zoom.contains_key(&(*signal, units.clone())) {
-                        theme::badge(ui, "scale zoomed", p.hold, "Ctrl + wheel set this scale; a double-click gives the chart's own back.");
+                    if zoomed && theme::badge_button(ui, "scale zoomed", p.hold, crate::charts::ZOOMED_TIP).clicked() {
+                        zooms.push(((*signal, units.clone()), None));
                     }
                 });
                 let u2 = units.clone();
@@ -449,6 +459,7 @@ impl SpyApp {
                     .grid_spacing(crate::charts::GRID_PX..=300.0)
                     .x_grid_spacer(|input| crate::charts::time_marks(input, 0.0))
                     .custom_y_axes(vec![theme::value_axis(p)])
+                    .y_grid_spacer(crate::charts::value_marks)
                     .show_axes([last_lane || every_axis, true])
                     .allow_drag([true, false])
                     .allow_zoom(false)
@@ -457,7 +468,7 @@ impl SpyApp {
                     .allow_double_click_reset(false)
                     .label_formatter(move |pos| crate::charts::remember(&shown, hover(pos, start, wall, &u2, &lane_decimals, &marks2, mark_tol)));
                 if members.len() > 1 {
-                    plot = plot.legend(Legend::default().position(egui_plot::Corner::LeftTop));
+                    plot = plot.legend(theme::legend());
                 }
                 let min_span = members.iter().map(|&i| min_span_for(units, review.channels[i].key.as_ref().and_then(|k| cat.get(k.signal)))).fold(0.0, f64::max);
                 let zoomed = rs.zoom.get(&(*signal, units.clone())).copied();
@@ -647,14 +658,15 @@ impl SpyApp {
                         if cursors_on {
                             let va = a.and_then(|x| at_cursor(rs, ch, x, factor));
                             let vb = b.and_then(|x| at_cursor(rs, ch, x, factor));
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.label(theme::b("A"));
                                 ui.label(theme::num(f(va), 24.0));
                                 ui.label(RichText::new(&units).color(p.ink2));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match (va.is_some() || a.is_some(), b) {
+                                ui.add_space(8.0);
+                                match (va.is_some() || a.is_some(), b) {
                                     (_, Some(_)) => {
-                                        ui.label(theme::num(f(vb), 18.0));
                                         ui.label(theme::b("B"));
+                                        ui.label(theme::num(f(vb), 18.0));
                                     }
                                     (true, None) => {
                                         ui.label(theme::b("B: right-click").size(14.0).color(p.hold));
@@ -662,7 +674,7 @@ impl SpyApp {
                                     (false, None) => {
                                         ui.label(theme::b("A: click a chart").size(14.0).color(p.hold));
                                     }
-                                });
+                                }
                             });
                             if let (Some(x), Some(y)) = (va, vb) {
                                 ui.label(RichText::new(format!("B − A {} {units}", view::fmt_to(y - x, decimals))).monospace().size(14.0));
@@ -691,11 +703,12 @@ impl SpyApp {
         let y = ui.cursor().top() + 4.0;
         ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(2.0, p.ink));
         ui.add_space(10.0);
+        let value_w = (ui.available_width() - 110.0).max(80.0);
         egui::ScrollArea::vertical().id_salt("review-meta").auto_shrink([false, true]).show(ui, |ui| {
             egui::Grid::new("review-meta").num_columns(2).spacing(egui::vec2(12.0, 2.0)).show(ui, |ui| {
                 let mut row = |k: &str, v: String| {
                     ui.label(RichText::new(k).size(15.0).color(p.ink2));
-                    ui.label(RichText::new(v).size(15.0));
+                    ui.add_sized([value_w, 20.0], egui::Label::new(RichText::new(&v).size(15.0)).truncate().halign(egui::Align::Min)).on_hover_text(&v);
                     ui.end_row();
                 };
                 row("started", local_start(m));

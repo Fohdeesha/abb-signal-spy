@@ -280,17 +280,20 @@ const PAGE: &str = r#"<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>ABB Signal Spy</title><style>
 *{box-sizing:border-box}
-body{margin:0;background:#0d0f12;color:#e8eaed;font:16px/1.3 -apple-system,Segoe UI,Roboto,sans-serif;padding:14px;-webkit-text-size-adjust:100%}
-h1{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:#8b93a1;margin:0 0 4px;font-weight:600}
-.sub{color:#8b93a1;font-size:12px;margin-bottom:12px}
-.card{background:#161a20;border:1px solid #242a33;border-radius:12px;padding:12px 14px;margin-bottom:10px}
-.name{font-size:13px;color:#aeb6c2}
-.val{font:700 clamp(30px,10vw,56px)/1.1 ui-monospace,Consolas,monospace;font-variant-numeric:tabular-nums}
-.unit{font-size:15px;color:#8b93a1;margin-left:6px}
-.stale .val{opacity:.35}
-.badge{display:inline-block;font-size:11px;padding:1px 6px;border-radius:6px;margin-left:6px;background:#5a4410;color:#f0c050}
-#banner{display:none;background:#2a1414;border:1px solid #7d2f2f;color:#ff9f9f;border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:14px}
-footer{color:#5f6672;font-size:12px;margin-top:12px}
+:root{--page:#0e0e0e;--sheet:#1b1b1a;--line:#343432;--ink:#efeee9;--ink2:#c9c8c2;--hold:#ffb541;--red:#ff5646;--holdface:#241d0e}
+@media (prefers-color-scheme: light){:root{--page:#d6d5cf;--sheet:#f7f6f2;--line:#cfcec8;--ink:#141414;--ink2:#3a3935;--hold:#7a4900;--red:#a81c10;--holdface:#fbf1da}}
+body{margin:0;background:var(--page);color:var(--ink);font:16px/1.35 "Segoe UI",Roboto,-apple-system,sans-serif;padding:14px;-webkit-text-size-adjust:100%}
+h1{font-size:16px;letter-spacing:.06em;color:var(--ink2);margin:0 0 4px;font-weight:700}
+.sub{color:var(--ink2);font-size:15px;margin-bottom:12px}
+.card{background:var(--sheet);border:1px solid var(--line);padding:12px 14px;margin-bottom:10px}
+.name{font-size:16px;font-weight:600;color:var(--ink)}
+.val{font:700 clamp(32px,10vw,56px)/1.1 ui-monospace,Consolas,monospace;font-variant-numeric:tabular-nums}
+.unit{font-size:16px;color:var(--ink2);margin-left:6px}
+.stale{background:var(--holdface);border-color:var(--hold)}
+.stale .val,.gone .val{color:var(--ink2);text-decoration:line-through}
+.badge{display:inline-block;font-size:14px;font-weight:700;padding:1px 6px;margin-left:6px;border:1px solid var(--hold);color:var(--hold)}
+#banner{display:none;background:var(--sheet);border:2px solid var(--red);color:var(--red);padding:10px 14px;margin-bottom:10px;font-size:16px;font-weight:600}
+footer{color:var(--ink2);font-size:14px;margin-top:12px}
 </style></head><body>
 <h1>ABB Signal Spy</h1>
 <div class=sub id=sub>connecting...</div>
@@ -301,7 +304,7 @@ footer{color:#5f6672;font-size:12px;margin-top:12px}
 var lastOk = 0;
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function show(msg){var b=document.getElementById('banner');b.style.display=msg?'':'none';b.textContent=msg||'';
-  document.getElementById('cards').style.opacity=msg?'.45':'1';}
+  document.getElementById('cards').className=msg?'gone':'';}
 async function tick(){
   try{
     var r=await fetch('DATA_PATH',{cache:'no-store'}); var s=await r.json();
@@ -327,6 +330,21 @@ tick(); setInterval(tick,500);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_phone_page_reads_at_the_windows_sizes_and_never_fades_a_value() {
+        let css = &PAGE[PAGE.find("<style>").unwrap()..PAGE.find("</style>").unwrap()];
+        let mut rest = css;
+        while let Some(at) = rest.find("font-size:") {
+            let tail = &rest[at + "font-size:".len()..];
+            let px: f32 = tail[..tail.find("px").unwrap()].parse().unwrap();
+            assert!(px >= 14.0, "{px} px text on the phone page");
+            rest = tail;
+        }
+        assert!(!PAGE.contains("opacity"), "a value faded rather than marked");
+        assert!(!css.contains("opacity"), "a stale value faded rather than marked");
+        assert!(css.contains("prefers-color-scheme: light"), "no light page for a phone set to light");
+    }
 
     fn get(port: u16, req: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();

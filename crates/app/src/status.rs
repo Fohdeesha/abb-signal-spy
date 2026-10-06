@@ -90,7 +90,7 @@ impl SpyApp {
         let mut toggle = false;
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (icon, name) = if open { (Icon::Up, "Show less of the status") } else { (Icon::Down, "Show the whole status") };
-            toggle = theme::icon_button(ui, icon, name, egui::vec2(30.0, 26.0)).clicked();
+            toggle = theme::icon_button(ui, icon, name, egui::vec2(32.0, 30.0)).clicked();
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add_space(18.0);
                 let r = ui.add(egui::Label::new(theme::b(&s.controller).size(14.0).color(p.ink2)).truncate());
@@ -179,7 +179,6 @@ impl SpyApp {
         if ui.link(theme::b("details")).on_hover_text("The connection's counters, rates and identity").clicked() {
             self.show_diag = true;
         }
-        theme::vrule(ui, 26.0);
     }
 }
 
@@ -250,7 +249,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx);
         theme::apply(&ctx, true, 1.0);
-        let width = crate::app::SIGNALS_WIDTH - 20.0 - 18.0;
+        let width = crate::app::signals_opening(900.0) - 20.0 - 18.0;
         let mut seen = Vec::new();
         let mut squeezed = (0.0, 0.0, 0.0);
         ctx.run_ui(egui::RawInput::default(), |ui| {

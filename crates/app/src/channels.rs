@@ -154,10 +154,13 @@ impl SpyApp {
     pub fn channel_table(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         theme::section(ui, "03", "channels", true, |ui| {
-            ui.label(RichText::new(count_text(self.chans.len(), self.derived.len())).color(p.ink2));
-            if !self.chans.is_empty() {
+            let count = count_text(self.chans.len(), self.derived.len());
+            ui.add(egui::Label::new(RichText::new(&count).color(p.ink2)).truncate()).on_hover_text(&count);
+            let hint = RichText::new("click for options").size(14.0).color(p.ink3);
+            let hint_w = egui::WidgetText::from(hint.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x;
+            if !self.chans.is_empty() && ui.available_width() >= hint_w + 12.0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("click for options").size(14.0).color(p.ink3));
+                    ui.label(hint);
                 });
             }
         });
@@ -171,8 +174,10 @@ impl SpyApp {
         let st = self.session.status().clone();
         let cursors = if self.cursors_on { Some(self.cursor_readings(&st)) } else { None };
         let mut open = None;
-        let bottom = 46.0;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - bottom).max(80.0)).show(ui, |ui| {
+        let pair = ["reset all min/max", "remove all"];
+        let rows = if theme::pair_fits(ui, pair) { 1.0 } else { 2.0 };
+        let bottom = 6.0 + rows * (theme::SMALL_H + ui.spacing().item_spacing.y) + 4.0;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - bottom).max(theme::LIST_LEAST_H)).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             for i in 0..self.chans.len() {
                 let id = self.chans[i].key.id();
@@ -186,14 +191,20 @@ impl SpyApp {
             }
         });
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui.add(egui::Button::new("reset min/max").min_size(egui::vec2(0.0, theme::SMALL_H))).on_hover_text("Start min, max and mean afresh for every channel").clicked() {
-                self.reset_stats();
-            }
-            if ui.add(egui::Button::new("remove all").min_size(egui::vec2(0.0, theme::SMALL_H))).clicked() {
-                self.confirm_remove_all = true;
+        let (mut reset, mut remove_all) = (false, false);
+        theme::pair(ui, pair, theme::SMALL_H, |ui, k, size| {
+            if k == 0 {
+                reset = ui.add(egui::Button::new(pair[0]).min_size(size)).on_hover_text("Start min, max and mean afresh for every channel").clicked();
+            } else {
+                remove_all = ui.add(egui::Button::new(pair[1]).min_size(size)).clicked();
             }
         });
+        if reset {
+            self.reset_stats();
+        }
+        if remove_all {
+            self.confirm_remove_all = true;
+        }
         if open.is_some() {
             self.options_for = open;
         }
@@ -279,7 +290,7 @@ impl SpyApp {
                 ));
                 });
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let v = value.clone().unwrap_or_else(|| "--".into());
                 let mut text = if is_text { theme::num(v, 20.0) } else { theme::num(v, 28.0) };
                 if old {
@@ -343,19 +354,11 @@ impl SpyApp {
         let h = view::health(cs.as_ref(), view::session_live(&st.phase), sig.as_ref(), st.loopback);
         let d = view::display(sig.as_ref(), self.chans[i].radians).with_decimals(self.chans[i].decimals);
         let name = view::short_label(&self.catalogue, &key);
-        let mut back = false;
-        let mut remove = false;
-        theme::section(ui, "03", "", true, |ui| {
-            if theme::icon_text_button(ui, theme::Icon::Left, "all channels", theme::SMALL_H, false).clicked() {
-                back = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::outline_button(ui, "remove", p.red, theme::SMALL_H).on_hover_text(format!("Remove {name} from the channels")).clicked() {
-                    remove = true;
-                }
-            });
-        });
-        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - 52.0).max(80.0)).show(ui, |ui| {
+        let (back, remove) = options_header(ui, &format!("Remove {name} from the channels"));
+        let pair = ["compare...", "reset min/max"];
+        let rows = if theme::pair_fits(ui, pair) { 1.0 } else { 2.0 };
+        let bottom = 6.0 + rows * (fields::HEIGHT + ui.spacing().item_spacing.y) + 4.0;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - bottom).max(theme::LIST_LEAST_H)).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal(|ui| {
                 theme::square(ui, self.chans[i].color, 14.0);
@@ -391,21 +394,25 @@ impl SpyApp {
         });
         let charted = (0..self.chans.len()).filter(|&j| self.charted(j, &st)).count();
         ui.add_space(6.0);
-        ui.columns(2, |cols| {
-            let can = self.charted(i, &st) && charted >= 2;
-            if cols[0]
-                .add_enabled(can, egui::Button::new("compare...").min_size(egui::vec2(cols[0].available_width(), fields::HEIGHT)))
-                .on_hover_text("How closely it follows each other charted channel in a straight line (r), over the stretch in view: how an unknown signal is matched against known ones")
-                .on_disabled_hover_text("Chart at least two channels to compare them.")
-                .clicked()
-            {
-                self.open_compare(key.id());
-            }
-            if cols[1].add(egui::Button::new("reset min/max").min_size(egui::vec2(cols[1].available_width(), fields::HEIGHT))).clicked() {
-                let upto = self.chans[i].stats.upto;
-                self.chans[i].stats = Stats { upto, ..Stats::default() };
+        let can = self.charted(i, &st) && charted >= 2;
+        let (mut compare, mut reset) = (false, false);
+        theme::pair(ui, pair, fields::HEIGHT, |ui, k, size| {
+            if k == 0 {
+                compare = theme::lockable(ui, can, egui::Button::new("compare...").min_size(size))
+                    .on_hover_text("How closely it follows each other charted channel in a straight line (r), over the stretch in view: how an unknown signal is matched against known ones")
+                    .on_disabled_hover_text("Chart at least two channels to compare them.")
+                    .clicked();
+            } else {
+                reset = ui.add(egui::Button::new("reset min/max").min_size(size)).clicked();
             }
         });
+        if compare {
+            self.open_compare(key.id());
+        }
+        if reset {
+            let upto = self.chans[i].stats.upto;
+            self.chans[i].stats = Stats { upto, ..Stats::default() };
+        }
         if back {
             self.options_for = None;
         }
@@ -426,7 +433,7 @@ impl SpyApp {
         let label_w = 96.0;
         option_row(ui, label_w, "smoothing", |ui, w| {
             let cur = SMOOTHING.iter().find(|(ms, _)| *ms == self.chans[i].smooth_ms).map(|(_, t)| *t).unwrap_or("off");
-            egui::ComboBox::from_id_salt(("smoothing", &key)).selected_text(cur).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("smoothing", &key)).selected_text(cur).width(w).icon(theme::combo_icon).truncate().show_ui(ui, |ui| {
                 for (ms, t) in SMOOTHING {
                     if ui.selectable_value(&mut self.chans[i].smooth_ms, ms, t).changed() {
                         changed = true;
@@ -441,7 +448,7 @@ impl SpyApp {
         };
         option_row(ui, label_w, "decimals", |ui, w| {
             let cur = self.chans[i].decimals.map_or_else(|| auto.clone(), |n| view::decimals_text(n.into()));
-            egui::ComboBox::from_id_salt(("decimals", &key)).selected_text(cur).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("decimals", &key)).selected_text(cur).width(w).icon(theme::combo_icon).truncate().show_ui(ui, |ui| {
                 if ui.selectable_value(&mut self.chans[i].decimals, None, auto.as_str()).changed() {
                     changed = true;
                 }
@@ -467,7 +474,7 @@ impl SpyApp {
         }
         option_row(ui, label_w, "chart", |ui, w| {
             let current = if own { "its own chart".to_string() } else { lanes.iter().find(|(l, _)| *l == lane).map(|(_, n)| format!("with {n}")).unwrap_or_else(|| "shared".into()) };
-            egui::ComboBox::from_id_salt(("chart", &key)).selected_text(current).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("chart", &key)).selected_text(current).width(w).icon(theme::combo_icon).truncate().show_ui(ui, |ui| {
                 if ui.selectable_label(own, "its own chart").clicked() && !own {
                     self.chans[i].lane = self.next_lane;
                     self.next_lane += 1;
@@ -488,7 +495,7 @@ impl SpyApp {
         if sig.as_ref().is_some_and(|s| s.is_angle()) {
             option_row(ui, label_w, "units", |ui, w| {
                 let cur = if self.chans[i].radians { "radians" } else { "degrees" };
-                egui::ComboBox::from_id_salt(("units", &key)).selected_text(cur).width(w).icon(theme::combo_icon).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("units", &key)).selected_text(cur).width(w).icon(theme::combo_icon).truncate().show_ui(ui, |ui| {
                     for (rad, t) in [(false, "degrees"), (true, "radians")] {
                         if ui.selectable_value(&mut self.chans[i].radians, rad, t).changed() {
                             self.chans[i].scale = Scale::default();
@@ -499,8 +506,7 @@ impl SpyApp {
             });
         }
         if sig.as_ref().is_some_and(|s| s.has(flag::ZERO_FILLED))
-            && ui
-                .checkbox(&mut self.chans[i].hold_nonzero, "chart: hold the last non-zero value")
+            && theme::check(ui, &mut self.chans[i].hold_nonzero, "chart: hold the last non-zero value")
                 .on_hover_text("This signal pads between its values with exact zeros; holding makes the chart readable. The recording keeps the zeros.")
                 .changed()
         {
@@ -523,7 +529,7 @@ impl SpyApp {
         let scale = self.chans[first].scale;
         let unit_floor = crate::charts::min_span_for(&units, sig.as_ref());
         let shared = self.chans.iter().filter(|c| on_this_chart(c)).count() > 1;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(theme::b(if units.is_empty() { "vertical scale".to_string() } else { format!("vertical scale, in {units}") }));
             if shared {
                 ui.label(RichText::new("(the chart's, for all on it)").size(14.0).color(p.ink3));
@@ -543,21 +549,23 @@ impl SpyApp {
             Scale::Fit { floor } => floor.unwrap_or(unit_floor),
             _ => unit_floor,
         };
-        scale_row(ui, matches!(scale, Scale::Fit { .. }), "fit, at least", "Fit what is in view, never tighter than this", |ui, chosen| {
+        let one_box = NUM_W;
+        let two_boxes = 2.0 * NUM_W + TO_W + 2.0 * ui.spacing().item_spacing.x;
+        scale_row(ui, matches!(scale, Scale::Fit { .. }), "fit, at least", "Fit what is in view, never tighter than this", one_box, |ui, chosen| {
             if num_box(ui, id.with("floor"), &mut floor, &format!("Smallest span in {units}"), matches!(scale, Scale::Fit { .. })) || chosen {
                 set = Some(Scale::Fit { floor: if (floor - unit_floor).abs() <= unit_floor * 1e-9 { None } else { Some(floor.max(0.0)) } });
             }
         });
-        scale_row(ui, matches!(scale, Scale::Fixed { .. }), "fixed", "Always from the first value to the second", |ui, chosen| {
+        scale_row(ui, matches!(scale, Scale::Fixed { .. }), "fixed", "Always from the first value to the second", two_boxes, |ui, chosen| {
             let on = matches!(scale, Scale::Fixed { .. });
             let a = num_box(ui, id.with("hi"), &mut hi, &format!("Top of the scale in {units}"), on);
-            ui.add_sized([26.0, fields::HEIGHT], egui::Label::new(RichText::new("to").color(p.ink2)));
+            ui.add_sized([TO_W, fields::HEIGHT], egui::Label::new(RichText::new("to").color(p.ink2)));
             let b = num_box(ui, id.with("lo"), &mut lo, &format!("Bottom of the scale in {units}"), on);
             if a || b || chosen {
                 set = Some(Scale::Fixed { lo, hi });
             }
         });
-        scale_row(ui, matches!(scale, Scale::Centred { .. }), "around zero, ±", "From minus this to plus this", |ui, chosen| {
+        scale_row(ui, matches!(scale, Scale::Centred { .. }), "around zero, ±", "From minus this to plus this", one_box, |ui, chosen| {
             if num_box(ui, id.with("half"), &mut half, &format!("Half the scale in {units}"), matches!(scale, Scale::Centred { .. })) || chosen {
                 set = Some(Scale::Centred { half });
             }
@@ -573,6 +581,25 @@ impl SpyApp {
             self.mark_settings_dirty();
         }
     }
+}
+
+pub(crate) fn options_header(ui: &mut egui::Ui, remove_tip: &str) -> (bool, bool) {
+    let p = theme::pal(ui);
+    let (mut back, mut remove) = (false, false);
+    let gap = ui.spacing().item_spacing.x;
+    let need = theme::heading_width(ui, "03") + theme::icon_text_button_width(ui, "all channels") + theme::button_width(ui, "remove") + 3.0 * gap;
+    let number = if need <= ui.available_width() { "03" } else { "" };
+    theme::section(ui, number, "", true, |ui| {
+        if theme::icon_text_button(ui, theme::Icon::Left, "all channels", theme::SMALL_H, false).clicked() {
+            back = true;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::outline_button(ui, "remove", p.red, theme::SMALL_H).on_hover_text(remove_tip).clicked() {
+                remove = true;
+            }
+        });
+    });
+    (back, remove)
 }
 
 fn readout_tip(reading: view::Reading, smooth: u32) -> String {
@@ -646,23 +673,37 @@ fn option_row(ui: &mut egui::Ui, label_w: f32, label: &str, add: impl FnOnce(&mu
         });
         let w = ui.available_width();
         ui.scope(|ui| {
-            ui.spacing_mut().interact_size.y = fields::HEIGHT;
+            let sp = ui.spacing_mut();
+            sp.interact_size.y = fields::HEIGHT;
+            sp.icon_width = theme::COMBO_ICON_W;
+            sp.icon_spacing = theme::COMBO_ICON_GAP;
             add(ui, w);
         });
     });
 }
 
-fn scale_row(ui: &mut egui::Ui, on: bool, text: &str, tip: &str, add: impl FnOnce(&mut egui::Ui, bool)) {
+const NUM_W: f32 = 64.0;
+const TO_W: f32 = 26.0;
+
+fn scale_row(ui: &mut egui::Ui, on: bool, text: &str, tip: &str, boxes_w: f32, add: impl FnOnce(&mut egui::Ui, bool)) {
+    let beside = theme::chip_tall_width(ui, text) + ui.spacing().item_spacing.x + boxes_w <= ui.available_width();
+    let mut chosen = false;
+    let mut add = Some(add);
     ui.horizontal(|ui| {
         ui.set_min_height(theme::TOOL_H);
-        let chosen = ui.radio(on, text).on_hover_text(tip).clicked() && !on;
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| add(ui, chosen));
+        chosen = theme::chip_tall(ui, on, text).on_hover_text(tip).clicked() && !on;
+        if beside && let Some(add) = add.take() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| add(ui, chosen));
+        }
     });
+    if let Some(add) = add {
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), fields::HEIGHT), egui::Layout::right_to_left(egui::Align::Center), |ui| add(ui, chosen));
+    }
 }
 
 fn num_box(ui: &mut egui::Ui, id: egui::Id, v: &mut f64, name: &str, on: bool) -> bool {
     let mut text: String = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| view::fmt_short(*v));
-    let r = fields::line(ui, &mut text, name, |t| t.desired_width(64.0).min_size(egui::vec2(0.0, theme::TOOL_H)).horizontal_align(egui::Align::Max).id(id).char_limit(16));
+    let r = fields::line(ui, &mut text, name, |t| t.desired_width(NUM_W).min_size(egui::vec2(0.0, fields::HEIGHT)).horizontal_align(egui::Align::Max).id(id).char_limit(16));
     if !on && !r.has_focus() {
         let p = theme::pal(ui);
         ui.painter().rect_stroke(r.rect, 0.0, Stroke::new(1.0, p.field), egui::StrokeKind::Inside);

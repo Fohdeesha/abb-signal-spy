@@ -232,7 +232,12 @@ pub fn local_hms(t: std::time::SystemTime) -> String {
 }
 
 pub fn log_line(e: &spy_core::log::Entry) -> String {
-    format!("{}  {}", local_hms(e.wall), e.text)
+    let word = match e.level {
+        spy_core::log::Level::Info => "",
+        spy_core::log::Level::Warn => "warning  ",
+        spy_core::log::Level::Error => "error  ",
+    };
+    format!("{}  {word}{}", local_hms(e.wall), e.text)
 }
 
 pub fn short_label(cat: &Catalogue, key: &ChannelKey) -> String {
@@ -427,6 +432,10 @@ mod tests {
         let line = log_line(&e);
         assert!(line.starts_with(&local_time(wall)[..8]), "{line} / {}", local_time(wall));
         assert!(line.ends_with("  x"), "{line}");
+        for (level, word) in [(spy_core::log::Level::Warn, "warning"), (spy_core::log::Level::Error, "error")] {
+            let e = spy_core::log::Entry { seq: 0, wall, level, text: "x".into() };
+            assert!(log_line(&e).ends_with(&format!("  {word}  x")), "a {word} told by colour alone: {}", log_line(&e));
+        }
     }
 
     fn ring(values: &[f64]) -> Ring {

@@ -14,9 +14,9 @@ use crate::view;
 pub fn confidence_color(c: Confidence, p: &theme::Pal) -> egui::Color32 {
     match c {
         Confidence::Confirmed => p.live,
-        Confidence::Strong => egui::Color32::from_rgb(0x5A, 0x9B, 0xD5),
+        Confidence::Strong => p.strong,
         Confidence::Probable => p.hold,
-        Confidence::Open => egui::Color32::from_rgb(0xB0, 0x7A, 0xA1),
+        Confidence::Open => p.open,
         Confidence::Inert => p.ink2,
     }
 }
@@ -32,16 +32,16 @@ pub fn signal_badges(ui: &mut egui::Ui, s: &Signal) {
         theme::badge(ui, "PLACEHOLDER", theme::pal(ui).ink2, "Reads a placeholder (a huge value, -1 or NaN), not a measurement.");
     }
     if s.has(flag::EVENT) {
-        theme::badge(ui, "TEXT EVENT", egui::Color32::from_rgb(0x76, 0xB7, 0xB2), "Sends text now and then (on change), not a stream of samples. Quiet is normal for it.");
+        theme::badge(ui, "TEXT EVENT", theme::pal(ui).teal, "Sends text now and then (on change), not a stream of samples. Quiet is normal for it.");
     }
     if s.has(flag::PHYSICAL) {
-        theme::badge(ui, "REAL ONLY", egui::Color32::from_rgb(0x9C, 0xA3, 0xAF), "A physical measurement (current, voltage, resolver, DC link): a virtual controller does not have it.");
+        theme::badge(ui, "REAL ONLY", theme::pal(ui).ink2, "A physical measurement (current, voltage, resolver, DC link): a virtual controller does not have it.");
     }
     if s.has(flag::VC_ONLY) {
-        theme::badge(ui, "VC ONLY", egui::Color32::from_rgb(0x9C, 0xA3, 0xAF), "Only a virtual controller has it.");
+        theme::badge(ui, "VC ONLY", theme::pal(ui).ink2, "Only a virtual controller has it.");
     }
     if s.has(flag::WRAPPING) {
-        theme::badge(ui, "0-360", egui::Color32::from_rgb(0x86, 0xBC, 0xB6), "An angle reduced to one turn: it jumps from 360 back to 0.");
+        theme::badge(ui, "0-360", theme::pal(ui).teal, "An angle reduced to one turn: it jumps from 360 back to 0.");
     }
 }
 
@@ -80,15 +80,16 @@ impl SpyApp {
         true
     }
 
-    pub fn browser(&mut self, ui: &mut egui::Ui) {
+    pub fn browser(&mut self, ui: &mut egui::Ui, room: f32) {
+        const LOOKUP_ABOVE: f32 = 4.0;
+        const LOOKUP_RULE: f32 = 6.0;
         let p = theme::pal(ui);
-        self.signals_rect = Some(ui.max_rect());
         theme::section(ui, "01", "signals", false, |ui| {
-            if ui.link(theme::b("add a set")).on_hover_text("Both DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block, in one go").clicked() {
+            if ui.add(egui::Button::new(theme::b("add a set")).min_size(egui::vec2(0.0, 30.0))).on_hover_text("Both DC links, one robot's torques, joint positions or resolver angles, or the 8000-8009 block, in one go").clicked() {
                 self.open_sets();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(ui, theme::Icon::FoldLeft, "Fold the signal list", egui::vec2(34.0, 30.0)).clicked() {
+                if theme::icon_button(ui, theme::Icon::FoldLeft, "Fold the signal list", egui::vec2(32.0, 30.0)).clicked() {
                     self.settings.signals_folded = true;
                     self.mark_settings_dirty();
                 }
@@ -96,48 +97,59 @@ impl SpyApp {
         });
         let w = ui.available_width();
         fields::line(ui, &mut self.search, "Search the signals", |t| t.hint_text("search: number, name or unit").desired_width(w));
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if theme::small_chip(ui, self.settings.show_named, "identified").on_hover_text("The signals with a known quantity").clicked() {
+        let filters = (self.settings.show_inert as usize) + (self.only_favourites as usize) + (self.category.is_some() as usize) + (self.min_confidence.is_some() as usize);
+        let text = if filters > 0 { format!("filters ({filters})") } else { "filters".to_string() };
+        let row_room = self.signals_rect.map_or(ui.available_width(), |r| r.width()) - ui.spacing().scroll.allocated_width();
+        let words = theme::bold_text_w(ui, "identified") + theme::bold_text_w(ui, "not yet");
+        let fit = theme::CHIP_FITS.iter().copied().find(|f| words + 2.0 * f.pad + theme::drop_button_width(ui, &text, f.button_pad) + 2.0 * f.gap <= row_room).unwrap_or(theme::CHIP_FITS[theme::CHIP_FITS.len() - 1]);
+        let pad = fit.pad;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = fit.gap;
+            if theme::small_chip_padded(ui, self.settings.show_named, "identified", pad).on_hover_text("The signals with a known quantity").clicked() {
                 self.settings.show_named = !self.settings.show_named;
                 self.mark_settings_dirty();
             }
-            if theme::small_chip(ui, self.settings.show_open, "not yet").on_hover_text("Signals that respond but are not yet identified").clicked() {
+            if theme::small_chip_padded(ui, self.settings.show_open, "not yet", pad).on_hover_text("Signals that respond but are not yet identified").clicked() {
                 self.settings.show_open = !self.settings.show_open;
                 self.mark_settings_dirty();
             }
-            let filters = (self.settings.show_inert as usize) + (self.only_favourites as usize) + (self.category.is_some() as usize) + (self.min_confidence.is_some() as usize);
-            let text = if filters > 0 { format!("filters ({filters})") } else { "filters".to_string() };
-            let r = theme::small_drop_button(ui, &text);
+            theme::make_room(ui, theme::drop_button_width(ui, &text, fit.button_pad));
+            let r = ui
+                .scope(|ui| {
+                    ui.spacing_mut().button_padding.x = fit.button_pad;
+                    theme::small_drop_button(ui, &text)
+                })
+                .inner;
             egui::Popup::from_toggle_button_response(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.set_min_width(260.0);
-                if ui.checkbox(&mut self.settings.show_inert, "inert ones too").on_hover_text("Signals that returned nothing on the measured cell (features it did not use)").changed() {
+                ui.set_max_width(380.0);
+                if theme::check(ui, &mut self.settings.show_inert, "inert ones too").on_hover_text("Signals that returned nothing on the measured cell (features it did not use)").changed() {
                     self.mark_settings_dirty();
                 }
-                ui.checkbox(&mut self.only_favourites, "favourites only");
+                theme::check(ui, &mut self.only_favourites, "favourites only");
                 let mut cats: Vec<String> = self.catalogue.signals.iter().map(|s| s.category.clone()).filter(|c| !c.is_empty()).collect();
                 cats.sort();
                 cats.dedup();
                 ui.label(theme::b("kind"));
-                egui::ComboBox::from_id_salt("category").selected_text(self.category.clone().unwrap_or_else(|| "all kinds".into())).width(240.0).icon(theme::combo_icon).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.category, None, "all kinds");
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    if theme::small_chip(ui, self.category.is_none(), "all kinds").clicked() {
+                        self.category = None;
+                    }
                     for c in cats {
-                        ui.selectable_value(&mut self.category, Some(c.clone()), c);
+                        if theme::small_chip(ui, self.category.as_deref() == Some(c.as_str()), &c).clicked() {
+                            self.category = Some(c.clone());
+                        }
                     }
                 });
                 ui.label(theme::b("confidence"));
-                let conf_text = match self.min_confidence {
-                    None => "any confidence",
-                    Some(Confidence::Confirmed) => "confirmed only",
-                    Some(Confidence::Strong) => "strong or better",
-                    Some(Confidence::Probable) => "probable or better",
-                    Some(_) => "any confidence",
-                };
-                egui::ComboBox::from_id_salt("confidence").selected_text(conf_text).width(240.0).icon(theme::combo_icon).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.min_confidence, None, "any confidence");
-                    ui.selectable_value(&mut self.min_confidence, Some(Confidence::Confirmed), "confirmed only");
-                    ui.selectable_value(&mut self.min_confidence, Some(Confidence::Strong), "strong or better");
-                    ui.selectable_value(&mut self.min_confidence, Some(Confidence::Probable), "probable or better");
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for (word, level) in [("any confidence", None), ("confirmed only", Some(Confidence::Confirmed)), ("strong or better", Some(Confidence::Strong)), ("probable or better", Some(Confidence::Probable))] {
+                        if theme::small_chip(ui, self.min_confidence == level, word).clicked() {
+                            self.min_confidence = level;
+                        }
+                    }
                 });
             });
         });
@@ -163,11 +175,21 @@ impl SpyApp {
         if rows.is_empty() {
             ui.label(RichText::new("Nothing matches. Turn on 'not yet', or the inert ones in the filters, or look a number up below.").color(p.ink2));
         }
-        let bottom = 50.0;
+        let spacing = ui.spacing().item_spacing.y;
+        let bottom = spacing + LOOKUP_ABOVE + LOOKUP_RULE + theme::SMALL_H;
         let row_h = 38.0;
         let mut clicked = None;
         let mut add = None;
-        egui::ScrollArea::vertical().id_salt("catalogue-list").max_height((ui.available_height() - bottom).max(0.0)).auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
+        let used = ui.cursor().top() - ui.max_rect().top();
+        let list_h = (room - used - bottom).max(LIST_LEAST_ROWS * row_h);
+        let mut list = egui::ScrollArea::vertical().id_salt("catalogue-list").max_height(list_h).min_scrolled_height(0.0).auto_shrink([false, false]);
+        let group_of = |n: u32| self.catalogue.get(n).and_then(|s| s.group.clone());
+        if let Some(n) = self.scroll_list_to.take()
+            && let Some(i) = rows.iter().position(|&(m, _)| m == n).or_else(|| group_of(n).and_then(|g| rows.iter().position(|&(m, _)| group_of(m).as_ref() == Some(&g))))
+        {
+            list = list.vertical_scroll_offset((i as f32 * row_h - (list_h - row_h) / 2.0).max(0.0));
+        }
+        list.show_rows(ui, row_h - spacing, rows.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for &(n, count) in &rows[range] {
                 let Some((name, units, frozen)) = self.catalogue.get(n).map(|s| (s.display_name(), crate::view::shown_units(&s.units).to_string(), s.has(flag::FROZEN))) else { continue };
@@ -188,20 +210,23 @@ impl SpyApp {
             self.open_add(n);
         }
 
-        ui.add_space(4.0);
+        ui.add_space(LOOKUP_ABOVE);
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(2.0, p.ink));
-        ui.add_space(6.0);
+        ui.add_space(LOOKUP_RULE);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let look = theme::b("look it up").size(14.0);
+            let look = theme::b("look it up");
             let button_w = egui::WidgetText::from(look.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x + 2.0 * ui.spacing().button_padding.x;
             let w = (ui.available_width() - button_w - 6.0 - 20.0).max(60.0);
-            let r = fields::line(ui, &mut self.raw_number, "Raw signal number", |t| t.min_size(egui::vec2(0.0, theme::SMALL_H)).desired_width(w).font(egui::FontId::proportional(14.0)).hint_text("number not listed"));
+            let r = fields::line(ui, &mut self.raw_number, "Raw signal number", |t| t.min_size(egui::vec2(0.0, theme::SMALL_H)).desired_width(w).hint_text("number not listed"));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.add(egui::Button::new(look).min_size(egui::vec2(0.0, theme::SMALL_H))).clicked() || enter {
                 match self.raw_number.trim().parse::<u32>() {
-                    Ok(n) if n > 0 => self.selected = Some(n),
+                    Ok(n) if n > 0 => {
+                        self.selected = Some(n);
+                        self.scroll_list_to = Some(n);
+                    }
                     _ => self.toast(Level::Error, "Type a signal number (a whole number above 0)."),
                 }
             }
@@ -213,9 +238,8 @@ impl SpyApp {
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
             ui.label(RichText::new("01").font(egui::FontId::new(18.0, theme::bold())).color(p.red));
-            let unfold = theme::icon_button(ui, theme::Icon::FoldRight, "Unfold the signal list", egui::vec2(40.0, 40.0)).clicked();
-            let add = theme::upright_button(ui, "add signals", egui::vec2(40.0, 110.0)).clicked();
-            if unfold || add {
+            let add = theme::upright_button(ui, "add signals", egui::vec2(40.0, 110.0)).on_hover_text("Unfold the signal list").clicked();
+            if add {
                 self.settings.signals_folded = false;
                 self.mark_settings_dirty();
             }
@@ -226,39 +250,42 @@ impl SpyApp {
         let (Some(n), Some(list)) = (self.selected, self.signals_rect) else { return };
         let mut close = false;
         let height = (list.height() + 20.0).max(200.0);
-        egui::Area::new(egui::Id::new("signal-details"))
-            .order(egui::Order::Foreground)
+        let shown = egui::Area::new(egui::Id::new("signal-details"))
+            .order(egui::Order::Middle)
             .fixed_pos(egui::pos2(list.right() + 18.0, list.top() - 10.0))
             .show(ctx, |ui| {
                 let p = theme::pal(ui);
                 egui::Frame::new().fill(p.sheet).stroke(egui::Stroke::new(2.0, p.ink)).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
                     ui.set_width(400.0);
                     ui.set_max_height(height - 28.0);
-                    ui.horizontal(|ui| {
-                        ui.label(theme::num(n.to_string(), 20.0));
-                        let name = self.catalogue.get(n).map(|s| s.display_name()).unwrap_or_else(|| format!("Signal {n}"));
-                        ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(20.0, theme::bold()))).truncate());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if theme::icon_button(ui, theme::Icon::Close, "Close (Esc)", egui::vec2(40.0, 40.0)).clicked() {
-                                close = true;
-                            }
-                            if self.catalogue.get(n).is_some() {
-                                let fav = self.settings.favourites.contains(&n);
-                                if theme::chip(ui, fav, "favourite").on_hover_text("Favourites can be shown alone (filters)").clicked() {
-                                    if fav {
-                                        self.settings.favourites.retain(|&x| x != n);
-                                    } else {
-                                        self.settings.favourites.push(n);
-                                    }
-                                    self.mark_settings_dirty();
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_button(ui, theme::Icon::Close, "Close (Esc)", egui::vec2(theme::TOOL_H, theme::TOOL_H)).clicked() {
+                            close = true;
+                        }
+                        if self.catalogue.get(n).is_some() {
+                            let fav = self.settings.favourites.contains(&n);
+                            let (word, tip) = if fav { ("favourite", "A favourite: click to take it off the list (filters can show favourites alone)") } else { ("add to favourites", "Favourites can be shown alone (filters)") };
+                            if theme::chip(ui, fav, word).on_hover_text(tip).clicked() {
+                                if fav {
+                                    self.settings.favourites.retain(|&x| x != n);
+                                } else {
+                                    self.settings.favourites.push(n);
                                 }
+                                self.mark_settings_dirty();
                             }
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(theme::num(n.to_string(), 20.0));
+                            let name = self.catalogue.get(n).map(|s| s.display_name()).unwrap_or_else(|| format!("Signal {n}"));
+                            ui.add(egui::Label::new(RichText::new(name).font(egui::FontId::new(20.0, theme::bold()))).truncate());
                         });
                     });
                     egui::ScrollArea::vertical().id_salt("details").auto_shrink([false, true]).show(ui, |ui| self.details(ui, n));
                 });
             });
-        if close {
+        let box_rect = shown.response.rect;
+        let pressed_elsewhere = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|at| !box_rect.contains(at) && !list.contains(at)));
+        if close || (pressed_elsewhere && self.note_edit.is_none()) {
             self.selected = None;
         }
     }
@@ -301,6 +328,7 @@ impl SpyApp {
                     .clicked()
             {
                 self.open_compare(id.clone());
+                self.selected = None;
             }
         });
         if !s.description.is_empty() {
@@ -330,6 +358,7 @@ impl SpyApp {
                             ui.label(theme::num(m.to_string(), 16.0));
                         } else if ui.link(theme::num(m.to_string(), 16.0)).clicked() {
                             self.selected = Some(m);
+                            self.scroll_list_to = Some(m);
                         }
                     }
                 });
@@ -343,7 +372,7 @@ impl SpyApp {
         }
         for (title, text) in [("evidence", &s.evidence), ("ruled out", &s.ruled_out), ("open question", &s.open_question), ("next test", &s.next_test)] {
             if !text.is_empty() {
-                egui::CollapsingHeader::new(theme::b(title)).id_salt((title, n)).show(ui, |ui| {
+                egui::CollapsingHeader::new(theme::b(title)).id_salt((title, n)).icon(theme::collapse_icon).show(ui, |ui| {
                     ui.label(text.as_str());
                 });
             }
@@ -354,6 +383,7 @@ impl SpyApp {
         let unit = self.settings.units.first().cloned().unwrap_or_else(|| "ROB_1".into());
         let axis = self.catalogue.get(signal).and_then(|s| s.joint).unwrap_or(1);
         self.add = Some(AddDialog { signal, unit, axis });
+        self.selected = None;
     }
 
     pub fn add_channels(&mut self, keys: Vec<ChannelKey>, overlay: bool) -> bool {
@@ -412,7 +442,7 @@ impl SpyApp {
         let modal = egui::Modal::new(egui::Id::new("add-channel")).show(ctx, |ui| {
             ui.set_max_width(500.0);
             let title = sig.as_ref().map(|s| s.display_name()).unwrap_or_else(|| format!("Signal {}", d.signal));
-            ui.heading(format!("Add {title} ({})", d.signal));
+            ui.heading(format!("add {title} ({})", d.signal));
             if let Some(s) = &sig {
                 ui.horizontal_wrapped(|ui| signal_badges(ui, s));
             }
@@ -423,13 +453,8 @@ impl SpyApp {
             if select != Select::Controller {
                 ui.horizontal(|ui| {
                     ui.add_sized([150.0, fields::HEIGHT], egui::Label::new(theme::b("robot")).halign(egui::Align::Min)).on_hover_text("The mechanical unit");
-                    ui.spacing_mut().interact_size.y = fields::HEIGHT;
-                    egui::ComboBox::from_id_salt("unit").selected_text(d.unit.clone()).width(110.0).icon(theme::combo_icon).show_ui(ui, |ui| {
-                        for u in self.settings.units.clone() {
-                            ui.selectable_value(&mut d.unit, u.clone(), u);
-                        }
-                    });
-                    fields::line(ui, &mut d.unit, "Mechanical unit", |t| t.desired_width(90.0)).on_hover_text("Another unit name, e.g. ROB_3 or STN_1");
+                    let units = self.settings.units.clone();
+                    fields::with_choices(ui, &mut d.unit, "Mechanical unit", &units, 120.0).on_hover_text("ROB_1, ROB_2, or another unit name such as STN_1: the arrow lists the ones known");
                 });
                 if !unit_ok {
                     ui.colored_label(theme::pal(ui).red, "A mechanical unit name is letters, digits and _ (like ROB_1).");
@@ -443,7 +468,7 @@ impl SpyApp {
                     ui.add_sized([150.0, fields::HEIGHT], egui::Label::new(theme::b("axis")).halign(egui::Align::Min));
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for a in 1..=6u8 {
-                        if theme::chip(ui, d.axis == a, &a.to_string()).clicked() {
+                        if theme::chip_tall(ui, d.axis == a, &a.to_string()).clicked() {
                             d.axis = a;
                         }
                     }
@@ -480,7 +505,7 @@ impl SpyApp {
                 }
                 if select == Select::Axis {
                     let need = missing((1..=6).map(|a| key(d.signal, a)).collect());
-                    if ui.add_enabled(unit_ok && need > 0 && need <= free, egui::Button::new("add all six axes").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Six channels, overlaid in one chart").on_disabled_hover_text(if need == 0 { "All six are there already.".to_string() } else { why_not(need) }).clicked() {
+                    if theme::lockable(ui, unit_ok && need > 0 && need <= free, egui::Button::new("add all six axes").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Six channels, overlaid in one chart").on_disabled_hover_text(if need == 0 { "All six are there already.".to_string() } else { why_not(need) }).clicked() {
                         to_add = Some(((1..=6).map(|a| key(d.signal, a)).collect(), true));
                     }
                 }
@@ -488,7 +513,7 @@ impl SpyApp {
                     && let Some(base) = sig.as_ref().and_then(|s| s.joint).and_then(|j| d.signal.checked_sub(u32::from(j.max(1) - 1))).filter(|b| *b > 0 && b.checked_add(5).is_some())
                 {
                     let need = missing((base..base + 6).map(|n| key(n, 1)).collect());
-                    if ui.add_enabled(unit_ok && need > 0 && need <= free, egui::Button::new(format!("add the block {}-{}", base, base + 5)).min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("All six joints, overlaid in one chart").on_disabled_hover_text(if need == 0 { "The block is there already.".to_string() } else { why_not(need) }).clicked() {
+                    if theme::lockable(ui, unit_ok && need > 0 && need <= free, egui::Button::new(format!("add the block {}-{}", base, base + 5)).min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("All six joints, overlaid in one chart").on_disabled_hover_text(if need == 0 { "The block is there already.".to_string() } else { why_not(need) }).clicked() {
                         to_add = Some(((base..base + 6).map(|n| key(n, 1)).collect(), true));
                     }
                 }
@@ -516,6 +541,8 @@ pub fn known_unit(units: &[String], typed: &str) -> String {
     units.iter().find(|u| u.eq_ignore_ascii_case(typed)).cloned().unwrap_or_else(|| typed.to_string())
 }
 
+const LIST_LEAST_ROWS: f32 = 2.0;
+
 #[allow(clippy::too_many_arguments)]
 fn signal_row(ui: &mut egui::Ui, n: u32, name: &str, units: &str, count: usize, picked: bool, noted: bool, frozen: bool, height: f32) -> egui::Response {
     let p = theme::pal(ui);
@@ -526,7 +553,7 @@ fn signal_row(ui: &mut egui::Ui, n: u32, name: &str, units: &str, count: usize, 
     }
     let painter = ui.painter_at(rect);
     if picked {
-        painter.rect_filled(rect, 0.0, p.picked);
+        painter.rect(rect, 0.0, p.picked, egui::Stroke::new(2.0, p.ink), egui::StrokeKind::Inside);
     } else if r.hovered() {
         painter.rect_filled(rect, 0.0, p.face_hover);
     }

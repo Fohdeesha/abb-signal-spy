@@ -170,19 +170,19 @@ impl SpyApp {
         let streaming = self.session.status().phase == spy_core::session::Phase::Streaming;
         let mut open = true;
         let (mut png, mut rect) = (false, None);
-        let title = if reviewing { "XY plot · reviewing, not live" } else { "XY plot" };
-        let shown = egui::Window::new(title).id(egui::Id::new("xy-window")).open(&mut open).default_size([560.0, 520.0]).resizable(true).show(ctx, |ui| {
+        let title = if reviewing { "xy plot · reviewing, not live" } else { "xy plot" };
+        let shown = theme::window(title, ctx).id(egui::Id::new("xy-window")).open(&mut open).default_size([560.0, 520.0]).resizable(true).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (axis, choice) in [("X", &mut xy.x), ("Y", &mut xy.y)] {
                     ui.label(RichText::new(axis).strong());
                     let text = find(choice).map_or_else(|| "choose a channel".to_string(), |c| c.title.clone());
-                    egui::ComboBox::from_id_salt(("xy-axis", axis)).selected_text(text).width(200.0).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt(("xy-axis", axis)).selected_text(text).width(200.0).icon(theme::combo_icon).truncate().show_ui(ui, |ui| {
                         for c in &cands {
                             ui.selectable_value(choice, Some(c.id.clone()), &c.title);
                         }
                     });
                 }
-                if theme::icon_button(ui, theme::Icon::Swap, "Swap X and Y", egui::vec2(36.0, 30.0)).clicked() {
+                if theme::icon_button(ui, theme::Icon::Swap, "Swap X and Y", egui::vec2(theme::TOOL_H, theme::TOOL_H)).clicked() {
                     std::mem::swap(&mut xy.x, &mut xy.y);
                 }
                 if ui.button("save png").on_hover_text("Save a picture of this window to the recordings folder: the channels, the pairs, r and the line, and the plot with its axes").clicked() {
@@ -226,9 +226,11 @@ impl SpyApp {
             let pal = theme::pal(ui);
             let point = theme::xy_point(ui.visuals().dark_mode);
             let resp = Plot::new("xy-plot")
-                .x_axis_label(format!("{}  [{}]", cx.title, cx.units))
-                .y_axis_label(format!("{}  [{}]", cy.title, cy.units))
-                .y_axis_min_width(56.0)
+                .custom_x_axes(vec![theme::value_axis_across(pal).label(format!("{}  [{}]", cx.title, cx.units))])
+                .custom_y_axes(vec![theme::value_axis(pal).label(format!("{}  [{}]", cy.title, cy.units))])
+                .grid_spacing(crate::charts::GRID_PX..=300.0)
+                .x_grid_spacer(crate::charts::value_marks_across)
+                .y_grid_spacer(crate::charts::value_marks)
                 .include_x(xb.0)
                 .include_x(xb.1)
                 .include_y(yb.0)

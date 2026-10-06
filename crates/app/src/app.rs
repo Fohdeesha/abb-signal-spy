@@ -92,7 +92,53 @@ pub struct AddDialog {
     pub axis: u8,
 }
 
-pub const SIGNALS_WIDTH: f32 = 298.0;
+pub const SIGNALS_WIDEST: f32 = 388.0;
+
+pub const FOOTER_BUTTON_H: f32 = 30.0;
+pub const TOAST_ABOVE: f32 = 48.0;
+
+pub fn toast_life(level: Level) -> Duration {
+    match level {
+        Level::Info => Duration::from_secs(6),
+        Level::Warn => Duration::from_secs(10),
+        Level::Error => Duration::from_secs(15),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    About,
+    Guide,
+    Catalogue,
+    RecordDir,
+    Diag,
+    Recordings,
+    Rws,
+    Compare,
+    Xy,
+}
+pub const SIGNALS_LEAST: f32 = 248.0;
+pub const CHANNELS_LEAST: f32 = 260.0;
+pub const CHANNELS_WIDEST: f32 = 338.0;
+pub const CHARTS_LEAST: f32 = 360.0;
+const LOG_OPENING: f32 = 190.0;
+const LOG_LEAST: f32 = 90.0;
+pub const LOG_MOST_SHARE: f32 = 0.3;
+const LOG_OPENING_SHARE: f32 = 0.25;
+const SIGNALS_MOST: f32 = 470.0;
+const CHANNELS_MOST: f32 = 490.0;
+
+pub fn side_most(window: f32, least: f32, most: f32) -> f32 {
+    ((window - CHARTS_LEAST) / 2.0).clamp(least, most)
+}
+
+pub fn signals_opening(window: f32) -> f32 {
+    (window * 0.3).clamp(SIGNALS_LEAST, SIGNALS_WIDEST)
+}
+
+pub fn channels_opening(window: f32) -> f32 {
+    (window * 0.25).clamp(CHANNELS_LEAST, CHANNELS_WIDEST)
+}
 const BAR_SLACK: f32 = 24.0;
 
 pub struct SpyApp {
@@ -195,8 +241,14 @@ pub struct SpyApp {
     pub show_diag: bool,
     pub show_guide: bool,
     pub show_catalogue_info: bool,
+    pub window_stack: Vec<WindowKind>,
+    pub scroll_list_to: Option<u32>,
+    pub forget_ask: Option<usize>,
+    pub windows_opened_now: Vec<WindowKind>,
+    pub focus_next: Option<&'static str>,
     pub hostnames: Hostnames,
     pub toasts: Vec<Toast>,
+    pub toast_rect: Option<egui::Rect>,
     pub rates: (Instant, u64, u64, f64, f64),
     pub windows: crate::net::Windows,
     pub others_open: usize,
@@ -360,8 +412,14 @@ impl SpyApp {
             show_diag: false,
             show_guide: false,
             show_catalogue_info: false,
+            window_stack: Vec::new(),
+            scroll_list_to: None,
+            forget_ask: None,
+            windows_opened_now: Vec::new(),
+            focus_next: None,
             hostnames: Arc::new(Mutex::new(HashMap::new())),
             toasts: Vec::new(),
+            toast_rect: None,
             rates: (Instant::now(), 0, 0, 0.0, 0.0),
             windows,
             others_open: 0,
@@ -640,7 +698,11 @@ impl SpyApp {
                         self.show_rws = true;
                         ui.close();
                     }
-                    if ui.add_enabled(connected, egui::Button::new("reset InfoStream...")).on_hover_text("Removes EVERY client's test-signal streams on the controller. Only for when a crashed program left streams behind.").clicked() {
+                    if theme::lockable(ui, connected, egui::Button::new("reset InfoStream..."))
+                        .on_hover_text("Removes EVERY client's test-signal streams on the controller. Only for when a crashed program left streams behind.")
+                        .on_disabled_hover_text("Connect to the controller first.")
+                        .clicked()
+                    {
                         self.confirm_reset = true;
                         ui.close();
                     }
@@ -659,7 +721,7 @@ impl SpyApp {
                         ui.close();
                         self.load_catalogue_dialog();
                     }
-                    if ui.add_enabled(self.settings.catalogue_file.is_some(), egui::Button::new("back to the built-in catalogue")).clicked() {
+                    if theme::lockable(ui, self.settings.catalogue_file.is_some(), egui::Button::new("back to the built-in catalogue")).on_disabled_hover_text("The built-in catalogue is the one in use.").clicked() {
                         self.catalogue = Catalogue::builtin();
                         self.settings.catalogue_file = None;
                         self.mark_settings_dirty();
@@ -671,7 +733,7 @@ impl SpyApp {
                 });
                 ui.menu_button("view", |ui| {
                     plain(ui);
-                    if ui.checkbox(&mut self.settings.dark, "dark").changed() {
+                    if theme::check(ui, &mut self.settings.dark, "dark").changed() {
                         theme::apply(&self.ctx, self.settings.dark, self.settings.ui_scale);
                         self.recolor();
                         self.mark_settings_dirty();
@@ -679,7 +741,7 @@ impl SpyApp {
                     ui.horizontal(|ui| {
                         ui.label("text size");
                         for (label, s) in [("S", 0.9f32), ("M", 1.0), ("L", 1.2), ("XL", 1.45)] {
-                            if ui.selectable_label((self.settings.ui_scale - s).abs() < 0.01, label).clicked() {
+                            if theme::chip(ui, (self.settings.ui_scale - s).abs() < 0.01, label).clicked() {
                                 self.settings.ui_scale = s;
                                 theme::apply(&self.ctx, self.settings.dark, s);
                                 self.mark_settings_dirty();
@@ -687,13 +749,11 @@ impl SpyApp {
                         }
                     });
                     ui.separator();
-                    ui.checkbox(&mut self.dashboard, "live dashboard").on_hover_text("Big numbers in place of the charts, to read from a step away.");
-                    if ui.checkbox(&mut self.settings.signals_folded, "fold the signal list").changed() {
+                    theme::check(ui, &mut self.dashboard, "live dashboard").on_hover_text("Big numbers in place of the charts, to read from a step away.");
+                    if theme::check(ui, &mut self.settings.signals_folded, "fold the signal list").changed() {
                         self.mark_settings_dirty();
                     }
-                    if ui.checkbox(&mut self.show_log, "messages").changed() {
-                        ui.close();
-                    }
+                    theme::check(ui, &mut self.show_log, "messages");
                     ui.separator();
                     self.phone_switch(ui);
                 });
@@ -714,6 +774,7 @@ impl SpyApp {
 
     fn load_catalogue_dialog(&mut self) {
         self.show_catalogue_info = true;
+        self.focus_next = Some("catalogue-path");
     }
 
     fn controller_bar(&mut self, ui: &mut egui::Ui) {
@@ -754,19 +815,28 @@ impl SpyApp {
         let phase = self.session.status().phase.clone();
         let active = phase.is_active();
         ui.label(theme::b("controller").color(p.ink2));
-        ui.add_enabled_ui(!active, |ui| {
-            fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("e.g. 192.168.125.1").desired_width(150.0))
-                .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.")
-                .on_disabled_hover_text("Disconnect to change the address.");
-        });
+        let host = ui
+            .add_enabled_ui(!active, |ui| {
+                let width = fields::width_for(ui, "192.168.125.1").max(170.0);
+                fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("e.g. 192.168.125.1").desired_width(width))
+                    .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515. Enter connects.")
+                    .on_disabled_hover_text("Disconnect to change the address.")
+            })
+            .inner;
         ui.label(theme::b("port").color(p.ink2));
-        ui.add_enabled_ui(!active, |ui| {
-            let width = fields::width_for(ui, "65535");
-            fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(width))
-                .on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.")
-                .on_disabled_hover_text("Disconnect to change the port.");
-            self.target_menu(ui);
-        });
+        let port = ui
+            .add_enabled_ui(!active, |ui| {
+                let width = fields::width_for(ui, "65535");
+                let r = fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(width))
+                    .on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list. Enter connects.")
+                    .on_disabled_hover_text("Disconnect to change the port.");
+                self.target_menu(ui);
+                r
+            })
+            .inner;
+        if !active && (fields::entered(ui, &host) || fields::entered(ui, &port)) {
+            self.connect();
+        }
         match &phase {
             Phase::Idle | Phase::Stopped { .. } => {
                 if theme::primary(ui, "connect", fields::HEIGHT).clicked() {
@@ -801,98 +871,113 @@ impl SpyApp {
 
     fn target_menu(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
-        let button = theme::drop_button(ui, "list", fields::HEIGHT).on_hover_text("Virtual controllers on this PC, saved controllers and recent ones");
+        let button = theme::drop_button(ui, "list", fields::HEIGHT).on_hover_text("Virtual controllers on this PC, saved controllers and recent ones").on_disabled_hover_text("Disconnect to pick another controller.");
         if button.clicked() && matches!(self.discovery, Discovery::Idle) {
             self.start_discovery();
         }
+        let room = (ui.ctx().content_rect().height() - 160.0).max(200.0);
         egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(420.0);
-            ui.label(theme::b("virtual controllers on this PC"));
-            match &self.discovery {
-                Discovery::Idle => {
-                    ui.label("Not searched yet.");
-                }
-                Discovery::Running(_) => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Searching...");
-                    });
-                }
-                Discovery::Done(Err(e)) => {
-                    ui.colored_label(p.red, e.as_str());
-                }
-                Discovery::Done(Ok(list)) => {
-                    let list = list.clone();
-                    let answering: Vec<&LocalController> = list.iter().filter(|c| c.hello.is_ok()).collect();
-                    if answering.is_empty() {
-                        ui.label("None found. Start the virtual controller in RobotStudio first.");
+            egui::ScrollArea::vertical().id_salt("controller-list").max_height(room).show(ui, |ui| {
+                let row = |text: String| egui::Button::new(text).frame(true).min_size(egui::vec2(380.0, theme::TOOL_H));
+                ui.label(theme::b("virtual controllers on this PC"));
+                match &self.discovery {
+                    Discovery::Idle => {
+                        ui.label("Not searched yet.");
                     }
-                    for c in answering {
-                        let sys = c.hello.as_ref().ok().and_then(|a| a.system_id.clone()).unwrap_or_default();
-                        let kind = if c.process.eq_ignore_ascii_case("RobVC.exe") { "RobotWare 6 VC" } else { "RobotWare 7 VC" };
-                        if ui.button(format!("{kind}  127.0.0.1:{}  {}", c.port, short_id(&sys))).clicked() {
-                            self.host_input = "127.0.0.1".into();
+                    Discovery::Running(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Searching...");
+                        });
+                    }
+                    Discovery::Done(Err(e)) => {
+                        ui.colored_label(p.red, e.as_str());
+                    }
+                    Discovery::Done(Ok(list)) => {
+                        let list = list.clone();
+                        let answering: Vec<&LocalController> = list.iter().filter(|c| c.hello.is_ok()).collect();
+                        if answering.is_empty() {
+                            ui.label("None found. Start the virtual controller in RobotStudio first.");
+                        }
+                        for c in answering {
+                            let sys = c.hello.as_ref().ok().and_then(|a| a.system_id.clone()).unwrap_or_default();
+                            let kind = if c.process.eq_ignore_ascii_case("RobVC.exe") { "RobotWare 6 VC" } else { "RobotWare 7 VC" };
+                            if ui.add(row(format!("{kind}  127.0.0.1:{}  {}", c.port, short_id(&sys)))).clicked() {
+                                self.host_input = "127.0.0.1".into();
+                                self.port_input = c.port.to_string();
+                                ui.close();
+                            }
+                        }
+                        let silent = list.iter().filter(|c| c.hello.is_err()).count();
+                        if silent > 0 {
+                            ui.label(RichText::new(format!("{silent} other VC port(s) did not answer RobAPI (a RobotWare 7 VC does not serve it).")).small().weak());
+                        }
+                    }
+                }
+                if ui.add(egui::Button::new("search again").frame(true).min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
+                    self.start_discovery();
+                }
+                ui.separator();
+                ui.label(theme::b("saved controllers"));
+                if self.settings.controllers.is_empty() {
+                    ui.label(RichText::new("None yet.").weak());
+                }
+                let mut remove = None;
+                for (i, c) in self.settings.controllers.clone().iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if self.forget_ask == Some(i) {
+                            ui.label(theme::b(format!("forget {}?", c.name)).color(p.red));
+                            if theme::red_button(ui, egui::Button::new("forget it").min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
+                                remove = Some(i);
+                                self.forget_ask = None;
+                            }
+                            if ui.add(egui::Button::new("keep it").frame(true).min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
+                                self.forget_ask = None;
+                            }
+                            return;
+                        }
+                        if ui.add(egui::Button::new(format!("{}  {}:{}", c.name, c.host, c.port)).frame(true).min_size(egui::vec2(332.0, theme::TOOL_H))).clicked() {
+                            self.host_input = c.host.clone();
                             self.port_input = c.port.to_string();
                             ui.close();
                         }
-                    }
-                    let silent = list.iter().filter(|c| c.hello.is_err()).count();
-                    if silent > 0 {
-                        ui.label(RichText::new(format!("{silent} other VC port(s) did not answer RobAPI (a RobotWare 7 VC does not serve it).")).small().weak());
-                    }
+                        if theme::icon_button(ui, theme::Icon::Close, "Forget this controller", egui::vec2(theme::TOOL_H, theme::TOOL_H)).clicked() {
+                            self.forget_ask = Some(i);
+                        }
+                    });
                 }
-            }
-            if ui.button("search again").clicked() {
-                self.start_discovery();
-            }
-            ui.separator();
-            ui.label(theme::b("saved controllers"));
-            if self.settings.controllers.is_empty() {
-                ui.label(RichText::new("None yet.").weak());
-            }
-            let mut remove = None;
-            for (i, c) in self.settings.controllers.clone().iter().enumerate() {
+                if let Some(i) = remove {
+                    self.settings.controllers.remove(i);
+                    self.mark_settings_dirty();
+                }
                 ui.horizontal(|ui| {
-                    if ui.button(format!("{}  {}:{}", c.name, c.host, c.port)).clicked() {
-                        self.host_input = c.host.clone();
-                        self.port_input = c.port.to_string();
-                        ui.close();
-                    }
-                    if theme::icon_button(ui, theme::Icon::Close, "Forget this controller", egui::vec2(36.0, 36.0)).clicked() {
-                        remove = Some(i);
+                    let r = fields::line(ui, &mut self.name_input, "Name for the saved controller", |t| t.hint_text("name").desired_width(140.0));
+                    if ui.add(egui::Button::new("save the address").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() || fields::entered(ui, &r) {
+                        match self.parse_target() {
+                            Ok(t) => {
+                                let name = if self.name_input.trim().is_empty() { t.host.clone() } else { self.name_input.trim().to_string() };
+                                self.settings.controllers.retain(|c| !(c.host == t.host && c.port == t.port));
+                                self.settings.controllers.push(SavedController { name, host: t.host, port: t.port });
+                                self.name_input.clear();
+                                self.mark_settings_dirty();
+                            }
+                            Err(e) => self.toast(Level::Error, e),
+                        }
                     }
                 });
-            }
-            if let Some(i) = remove {
-                self.settings.controllers.remove(i);
-                self.mark_settings_dirty();
-            }
-            ui.horizontal(|ui| {
-                fields::line(ui, &mut self.name_input, "Name for the saved controller", |t| t.hint_text("name").desired_width(140.0));
-                if ui.button("save the address").clicked() {
-                    match self.parse_target() {
-                        Ok(t) => {
-                            let name = if self.name_input.trim().is_empty() { t.host.clone() } else { self.name_input.trim().to_string() };
-                            self.settings.controllers.retain(|c| !(c.host == t.host && c.port == t.port));
-                            self.settings.controllers.push(SavedController { name, host: t.host, port: t.port });
-                            self.name_input.clear();
-                            self.mark_settings_dirty();
+                if !self.settings.recent.is_empty() {
+                    ui.separator();
+                    ui.label(theme::b("recent"));
+                    for t in self.settings.recent.clone() {
+                        if ui.add(row(t.to_string())).clicked() {
+                            self.host_input = t.host.clone();
+                            self.port_input = t.port.to_string();
+                            ui.close();
                         }
-                        Err(e) => self.toast(Level::Error, e),
                     }
                 }
             });
-            if !self.settings.recent.is_empty() {
-                ui.separator();
-                ui.label(theme::b("recent"));
-                for t in self.settings.recent.clone() {
-                    if ui.button(t.to_string()).clicked() {
-                        self.host_input = t.host.clone();
-                        self.port_input = t.port.to_string();
-                        ui.close();
-                    }
-                }
-            }
         });
     }
 
@@ -1011,9 +1096,9 @@ impl SpyApp {
             net::lookup(&self.hostnames, &o.address, move || c.request_repaint());
         }
         let names = self.client_names(&others);
-        egui::Modal::new(egui::Id::new("approval")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("approval")).show(ctx, |ui| {
             ui.set_max_width(540.0);
-            ui.heading("Other programs are connected to this controller");
+            ui.heading("other programs are connected to this controller");
             ui.add_space(6.0);
             for n in &names {
                 ui.horizontal(|ui| {
@@ -1026,23 +1111,26 @@ impl SpyApp {
             ui.label(RichText::new("RobotStudio counts as a client whenever it is connected, even when it is not streaming anything.").weak());
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if theme::primary(ui, "take InfoStream", fields::HEIGHT).clicked() {
+                if theme::red_button(ui, egui::Button::new("take InfoStream").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
                     self.session.answer(true, &st.others);
                 }
-                if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                if theme::primary(ui, "cancel", fields::HEIGHT).on_hover_text("Esc").clicked() {
                     self.session.answer(false, &st.others);
                 }
             });
         });
+        if modal.should_close() {
+            self.session.answer(false, &st.others);
+        }
     }
 
     fn reset_dialog(&mut self, ctx: &egui::Context) {
         if !self.confirm_reset {
             return;
         }
-        egui::Modal::new(egui::Id::new("reset")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("reset")).show(ctx, |ui| {
             ui.set_max_width(480.0);
-            ui.heading("Reset InfoStream?");
+            ui.heading("reset InfoStream?");
             ui.label("This sends StreamUndefineAll, which removes EVERY program's test-signal streams on this controller: RobotStudio's, TuneMaster's, any other tool's, and this program's (which are then set up again).");
             ui.label("Use it only when the controller refuses new channels (\"no channel available\") because a program that crashed left its streams behind.");
             ui.add_space(8.0);
@@ -1051,16 +1139,19 @@ impl SpyApp {
                     self.session.reset_infostream();
                     self.confirm_reset = false;
                 }
-                if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Esc").clicked() {
                     self.confirm_reset = false;
                 }
             });
         });
+        if modal.should_close() {
+            self.confirm_reset = false;
+        }
     }
 
     fn info_windows(&mut self, ctx: &egui::Context) {
         let mut open = self.show_about;
-        egui::Window::new("About ABB Signal Spy").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        theme::window("about ABB Signal Spy", ctx).open(&mut open).resizable(false).vscroll(true).default_width(480.0).show(ctx, |ui| {
             ui.heading(format!("ABB Signal Spy {}", env!("CARGO_PKG_VERSION")));
             ui.label("Reads, charts and records the motion test signals an ABB IRC5 controller streams over RobAPI InfoStream.");
             ui.label("It only reads: it never commands motion, never writes RAPID, configuration or I/O, and never takes mastership.");
@@ -1072,7 +1163,7 @@ impl SpyApp {
             ui.label(RichText::new(format!("Catalogue: {} ({})", self.catalogue.title, self.catalogue.source)).weak());
             ui.label(RichText::new(format!("Set in {}: {}, under the SIL Open Font License 1.1.", theme::FACE, theme::face_copyright())).weak());
             ui.label(RichText::new(format!("Characters it lacks come from the faces egui brings: {}.", theme::FALLBACK_FACES)).weak());
-            egui::CollapsingHeader::new("the font licences").show(ui, |ui| {
+            egui::CollapsingHeader::new("the font licences").icon(theme::collapse_icon).show(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                     ui.label(RichText::new(theme::FACE_LICENCE).monospace().size(14.0));
                     ui.separator();
@@ -1083,7 +1174,7 @@ impl SpyApp {
         self.show_about = open;
 
         let mut open = self.show_guide;
-        egui::Window::new("Quick guide").open(&mut open).collapsible(false).default_width(520.0).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
+        theme::window("quick guide", ctx).open(&mut open).vscroll(true).default_width(520.0).show(ctx, |ui| {
             ui.label(theme::b("1. Connect"));
             ui.label("Real IRC5: type its address (the port is 5515) and press connect. RobotStudio virtual controller: open the list beside the port and pick it; its port changes every time it starts.");
             ui.label(theme::b("2. Only one program at a time"));
@@ -1095,7 +1186,7 @@ impl SpyApp {
             ui.label(theme::b("5. Record"));
             ui.label("record keeps every sample. 'save last' saves what just happened, even if nothing was recording. 'slow log' logs averages for runs of hours. The arrow beside each sets its name, seconds or interval. M drops a marker.");
             ui.label(theme::b("6. Look back"));
-            ui.label("file > open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live. 'save csv' and 'save png' above the charts save what is in view, live or reviewed; a CSV always holds the samples as they came.");
+            ui.label("file > open a recording (or drop its folder on the window) charts it again, marked REVIEWING: not live. 'save' above the charts saves what is in view as a CSV or a picture, live or reviewed; a CSV always holds the samples as they came.");
             ui.add_space(6.0);
             ui.label(RichText::new("Angles are in degrees; a channel's options switch one to radians.").weak());
         });
@@ -1103,7 +1194,7 @@ impl SpyApp {
 
         let mut open = self.show_catalogue_info;
         let mut load_path: Option<String> = None;
-        egui::Window::new("Catalogue").open(&mut open).default_width(560.0).show(ctx, |ui| {
+        theme::window("catalogue", ctx).vscroll(true).open(&mut open).default_width(560.0).show(ctx, |ui| {
             ui.heading(&self.catalogue.title);
             ui.label(format!("Source: {}", self.catalogue.source));
             ui.label(&self.catalogue.measured_on);
@@ -1113,11 +1204,18 @@ impl SpyApp {
             ui.label(format!("{} signal numbers, {named} with a named quantity.", self.catalogue.signals.len()));
             ui.separator();
             ui.label("Load a catalogue file (for another robot or RobotWare version):");
+            let focus_path = self.focus_next == Some("catalogue-path");
+            if focus_path {
+                self.focus_next = None;
+            }
             let id = egui::Id::new("catalogue-path");
             let mut path: String = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
             ui.horizontal(|ui| {
-                fields::line(ui, &mut path, "Catalogue file", |t| t.hint_text("C:\\path\\to\\catalogue.json").desired_width(380.0));
-                if ui.button("load").clicked() {
+                let r = fields::line(ui, &mut path, "Catalogue file", |t| t.hint_text("C:\\path\\to\\catalogue.json").desired_width(380.0));
+                if focus_path {
+                    r.request_focus();
+                }
+                if theme::primary(ui, "load", fields::HEIGHT).clicked() || fields::entered(ui, &r) {
                     load_path = Some(path.clone());
                 }
             });
@@ -1132,22 +1230,31 @@ impl SpyApp {
                     self.catalogue = c;
                     self.settings.catalogue_file = Some(p);
                     self.mark_settings_dirty();
+                    self.show_catalogue_info = false;
                 }
                 Err(e) => self.toast(Level::Error, e),
             }
         }
 
+        let focus_folder = self.windows_opened_now.contains(&WindowKind::RecordDir);
         let mut open = self.show_record_dir;
         let (mut use_typed, mut use_default) = (false, false);
-        egui::Window::new("Recordings folder").open(&mut open).collapsible(false).default_width(560.0).show(ctx, |ui| {
+        theme::window("recordings folder", ctx).open(&mut open).vscroll(true).default_width(560.0).show(ctx, |ui| {
             ui.label(format!("Recordings, saved CSVs and pictures go to {}", self.record_dir().display()));
             ui.label(RichText::new("A change applies to the next recording: one running now carries on where it is.").weak());
             ui.add_space(6.0);
-            fields::line(ui, &mut self.record_dir_input, "Recordings folder path", |t| t.hint_text("C:\\path\\to\\a folder").desired_width(520.0));
-            ui.horizontal(|ui| {
-                use_typed = ui.button("use this folder").clicked();
-                use_default = ui.add_enabled(self.settings.record_dir.is_some(), egui::Button::new("back to Documents\\TestSignals")).clicked();
-                if ui.button("open it").clicked() {
+            let width = 520.0f32.min(ui.available_width());
+            let r = fields::line(ui, &mut self.record_dir_input, "Recordings folder path", |t| t.hint_text("C:\\path\\to\\a folder").desired_width(width));
+            if focus_folder {
+                r.request_focus();
+            }
+            let entered = fields::entered(ui, &r);
+            ui.horizontal_wrapped(|ui| {
+                use_typed = theme::primary(ui, "use this folder", fields::HEIGHT).clicked() || entered;
+                use_default = theme::lockable(ui, self.settings.record_dir.is_some(), egui::Button::new("back to Documents\\TestSignals").min_size(egui::vec2(0.0, fields::HEIGHT)))
+                    .on_disabled_hover_text("Recordings already go to Documents\\TestSignals.")
+                    .clicked();
+                if ui.add(egui::Button::new("open it").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
                     let d = self.record_dir();
                     let _ = std::fs::create_dir_all(&d);
                     crate::paths::open_folder(&d);
@@ -1162,6 +1269,7 @@ impl SpyApp {
                     self.settings.record_dir = Some(p.clone());
                     self.mark_settings_dirty();
                     self.toast(Level::Info, format!("Recordings now go to {}.", p.display()));
+                    self.show_record_dir = false;
                 }
                 Err(e) => self.toast(Level::Error, e),
             }
@@ -1180,16 +1288,20 @@ impl SpyApp {
             let st = self.session.status().clone();
             self.client_names(&Self::others_shown(&st)).join(", ")
         };
-        egui::Window::new("Connection details").open(&mut open).default_width(560.0).show(ctx, |ui| {
+        theme::window("connection details", ctx).vscroll(true).open(&mut open).default_width(560.0).show(ctx, |ui| {
             let st = self.session.status().clone();
             let c = &st.counters;
+            let (word, _, _) = Self::phase_word(&st, theme::pal(ui));
             egui::Grid::new("diag").striped(true).show(ui, |ui| {
                 let mut row = |k: &str, v: String| {
                     ui.label(RichText::new(k).color(theme::pal(ui).ink2));
                     ui.label(RichText::new(v).monospace());
                     ui.end_row();
                 };
-                row("phase", format!("{:?}", st.phase));
+                row("phase", match &st.phase {
+                    Phase::Stopped { reason } => format!("{word}: {reason}"),
+                    _ => word,
+                });
                 row("controller", st.target.as_ref().map(|t| t.to_string()).unwrap_or_default());
                 if let Some(s) = &rws_system {
                     row("from its RWS", s.clone());
@@ -1224,7 +1336,7 @@ impl SpyApp {
         let p = theme::pal(ui);
         ui.horizontal(|ui| {
             ui.label(RichText::new("messages").font(egui::FontId::new(18.0, theme::bold())));
-            ui.checkbox(&mut self.log_filter_warn, "warnings only");
+            theme::check(ui, &mut self.log_filter_warn, "warnings only");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, theme::Icon::Close, "Close the messages", egui::vec2(32.0, 30.0)).clicked() {
                     self.show_log = false;
@@ -1250,48 +1362,51 @@ impl SpyApp {
         let rect = ui.max_rect();
         ui.painter().hline(rect.x_range(), rect.top() + 1.0, egui::Stroke::new(2.0, p.ink));
         ui.add_space(2.0);
+        let (said, folder): (Option<RichText>, Option<std::path::PathBuf>) = if let Some(h) = self.mouse_hint() {
+            (Some(RichText::new(h).color(p.ink)), None)
+        } else if let Some(r) = self.recorder.as_ref().or(self.slow.as_ref()) {
+            let dir = r.status().dir;
+            (Some(RichText::new(format!("recording to {}", dir.display())).color(p.ink)), Some(dir))
+        } else if let Some(e) = self.log.since(self.log.next_seq().saturating_sub(1)).last().filter(|e| !self.toasts.iter().any(|t| t.text == e.text)) {
+            let color = match e.level {
+                Level::Info => p.ink2,
+                Level::Warn => p.hold,
+                Level::Error => p.red,
+            };
+            let folder = self.last_folder.clone().filter(|d| e.text.contains(&d.display().to_string()));
+            (Some(RichText::new(&e.text).color(color)), folder)
+        } else {
+            (None, None)
+        };
+        let mut open_folder = None;
         ui.horizontal(|ui| {
             ui.set_min_height(30.0);
-            ui.label(theme::num(view::local_hms(std::time::SystemTime::now()), 16.0).color(p.red));
-            ui.add_space(4.0);
-            let hint = self.mouse_hint();
-            let mut open_folder = None;
-            if let Some(h) = hint {
-                ui.add(egui::Label::new(RichText::new(h).color(p.ink)).truncate());
-            } else if let Some(r) = self.recorder.as_ref().or(self.slow.as_ref()) {
-                let dir = r.status().dir;
-                ui.add(egui::Label::new(format!("recording to {}", dir.display())).truncate());
-                if ui.link(theme::b("open the folder")).clicked() {
-                    open_folder = Some(dir);
-                }
-            } else if let Some(e) = self.log.since(self.log.next_seq().saturating_sub(1)).last().filter(|e| !self.toasts.iter().any(|t| t.text == e.text)) {
-                let color = match e.level {
-                    Level::Info => p.ink2,
-                    Level::Warn => p.hold,
-                    Level::Error => p.red,
-                };
-                ui.add(egui::Label::new(RichText::new(&e.text).color(color)).truncate());
-                if let Some(d) = &self.last_folder
-                    && e.text.contains(&d.display().to_string())
-                    && ui.link(theme::b("open the folder")).clicked()
-                {
-                    open_folder = Some(d.clone());
-                }
-            }
-            if let Some(d) = open_folder {
-                crate::paths::open_folder(&d);
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let n = self.log.next_seq();
                 let text = format!("messages ({n})");
-                if ui.add(egui::Button::new(theme::b(text).size(15.0)).selected(self.show_log).min_size(egui::vec2(0.0, 26.0))).clicked() {
+                if ui.add(egui::Button::new(theme::b(text)).selected(self.show_log).min_size(egui::vec2(0.0, FOOTER_BUTTON_H))).clicked() {
                     self.show_log = !self.show_log;
+                }
+                if let Some(d) = &folder
+                    && ui.add(egui::Button::new(theme::b("open the folder")).min_size(egui::vec2(0.0, FOOTER_BUTTON_H))).on_hover_text(d.display().to_string()).clicked()
+                {
+                    open_folder = Some(d.clone());
                 }
                 if let Some(ph) = &self.phone {
                     ui.label(RichText::new(format!("phone view on, port {}", ph.port())).color(p.ink2)).on_hover_text(ph.urls.join("\n"));
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label(theme::num(view::local_hms(std::time::SystemTime::now()), 16.0).color(p.red));
+                    ui.add_space(4.0);
+                    if let Some(text) = said {
+                        ui.add(egui::Label::new(text).truncate());
+                    }
+                });
             });
         });
+        if let Some(d) = open_folder {
+            crate::paths::open_folder(&d);
+        }
     }
 
     fn mouse_hint(&self) -> Option<String> {
@@ -1317,24 +1432,49 @@ impl SpyApp {
 
     fn toasts(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        self.toasts.retain_mut(|t| now.duration_since(*t.shown.get_or_insert(now)) < Duration::from_secs(6));
+        let held = ctx.pointer_hover_pos().is_some_and(|at| self.toast_rect.is_some_and(|r| r.contains(at)));
+        if held {
+            for t in &mut self.toasts {
+                t.shown = Some(now);
+            }
+        }
+        self.toasts.retain_mut(|t| now.duration_since(*t.shown.get_or_insert(now)) < toast_life(t.level));
         if self.toasts.is_empty() {
+            self.toast_rect = None;
             return;
         }
-        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -44.0)).interactable(false).show(ctx, |ui| {
+        let over = self.charts_rect.unwrap_or_else(|| ctx.content_rect());
+        let width = (over.width() - 32.0).clamp(200.0, 440.0);
+        let shown = egui::Area::new(egui::Id::new("toasts")).pivot(egui::Align2::CENTER_BOTTOM).fixed_pos(egui::pos2(over.center().x, over.bottom() - TOAST_ABOVE)).show(ctx, |ui| {
             let p = theme::pal(ui);
-            for t in &self.toasts {
+            let mut closed = None;
+            for (i, t) in self.toasts.iter().enumerate() {
                 let color = match t.level {
                     Level::Info => p.live,
                     Level::Warn => p.hold,
                     Level::Error => p.red,
                 };
-                egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(2.0, color)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                    ui.set_max_width(440.0);
-                    ui.label(&t.text);
-                });
+                let r = egui::Frame::popup(ui.style())
+                    .stroke(egui::Stroke::new(2.0, color))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_max_width(width);
+                        ui.label(&t.text);
+                    })
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Click to close. It stays while the pointer is on it; every message is in the messages pane too.");
+                if r.clicked() {
+                    closed = Some(i);
+                }
             }
+            closed
         });
+        self.toast_rect = Some(shown.response.rect);
+        if let Some(i) = shown.inner {
+            self.toasts.remove(i);
+        }
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
@@ -1347,8 +1487,23 @@ impl SpyApp {
             return;
         }
         let (space, m, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::M), i.key_pressed(egui::Key::Escape)));
-        if esc {
-            self.selected = None;
+        let popup_open = egui::Popup::is_any_open(ctx) || ctx.any_popup_open();
+        if esc && !popup_open {
+            if self.selected.is_some() {
+                self.selected = None;
+            } else if let Some(top) = self.window_stack.pop() {
+                self.close_window(top);
+            } else if self.options_for.is_some() {
+                self.options_for = None;
+            } else if self.expanded.is_some() {
+                self.expanded = None;
+            }
+        }
+        if self.dashboard && self.review.is_none() {
+            if m {
+                self.add_marker();
+            }
+            return;
         }
         if self.review.is_some() {
             if m {
@@ -1361,6 +1516,46 @@ impl SpyApp {
         }
         if m {
             self.add_marker();
+        }
+    }
+
+    fn windows_open(&self) -> [(WindowKind, bool); 9] {
+        [
+            (WindowKind::About, self.show_about),
+            (WindowKind::Guide, self.show_guide),
+            (WindowKind::Catalogue, self.show_catalogue_info),
+            (WindowKind::RecordDir, self.show_record_dir),
+            (WindowKind::Diag, self.show_diag),
+            (WindowKind::Recordings, self.show_recordings),
+            (WindowKind::Rws, self.show_rws),
+            (WindowKind::Compare, self.compare.is_some()),
+            (WindowKind::Xy, self.xy.is_some()),
+        ]
+    }
+
+    pub fn track_windows(&mut self) {
+        let open = self.windows_open();
+        self.window_stack.retain(|k| open.iter().any(|(o, on)| o == k && *on));
+        self.windows_opened_now.clear();
+        for (k, on) in open {
+            if on && !self.window_stack.contains(&k) {
+                self.window_stack.push(k);
+                self.windows_opened_now.push(k);
+            }
+        }
+    }
+
+    fn close_window(&mut self, k: WindowKind) {
+        match k {
+            WindowKind::About => self.show_about = false,
+            WindowKind::Guide => self.show_guide = false,
+            WindowKind::Catalogue => self.show_catalogue_info = false,
+            WindowKind::RecordDir => self.show_record_dir = false,
+            WindowKind::Diag => self.show_diag = false,
+            WindowKind::Recordings => self.show_recordings = false,
+            WindowKind::Rws => self.show_rws = false,
+            WindowKind::Compare => self.compare = None,
+            WindowKind::Xy => self.xy = None,
         }
     }
 
@@ -1522,6 +1717,10 @@ impl eframe::App for SpyApp {
         let ctx = ui.ctx().clone();
         self.take_dropped(&ctx);
         self.take_screenshot(&ctx);
+        self.track_windows();
+        if self.settings.signals_folded || (self.dashboard && self.review.is_none()) {
+            self.selected = None;
+        }
         self.shortcuts(&ctx);
 
         let p = theme::pal(ui);
@@ -1549,7 +1748,8 @@ impl eframe::App for SpyApp {
         let sheet = |left: i8, right: i8| egui::Frame::new().fill(p.sheet).inner_margin(egui::Margin::same(10)).outer_margin(egui::Margin { left, right, top: 0, bottom: 8 });
         let column = egui::Frame::new().outer_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 8 });
         if self.show_log {
-            egui::Panel::bottom("log").frame(sheet(8, 8)).resizable(true).default_size(190.0).size_range(90.0..=600.0).show_separator_line(false).show(ui, |ui| self.log_pane(ui));
+            let tall = ctx.content_rect().height();
+            egui::Panel::bottom("log").frame(sheet(8, 8)).resizable(true).default_size(LOG_OPENING.min(tall * LOG_OPENING_SHARE)).size_range(LOG_LEAST..=(tall * LOG_MOST_SHARE).max(LOG_LEAST)).show_separator_line(false).show(ui, |ui| self.log_pane(ui));
         }
         if self.dashboard && self.review.is_none() {
             let central = egui::CentralPanel::default().frame(sheet(8, 8)).show(ui, |ui| self.dashboard_ui(ui));
@@ -1575,7 +1775,7 @@ impl eframe::App for SpyApp {
                     });
                 });
             } else {
-                egui::Panel::left("signals").frame(column).resizable(true).default_size(SIGNALS_WIDTH).size_range(248.0..=470.0).show_separator_line(false).show(ui, |ui| {
+                egui::Panel::left("signals").frame(column).resizable(true).default_size(signals_opening(ctx.content_rect().width())).size_range(SIGNALS_LEAST..=side_most(ctx.content_rect().width(), SIGNALS_LEAST, SIGNALS_MOST)).show_separator_line(false).show(ui, |ui| {
                     let top = theme::sheet_frame(ui).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         if self.review.is_some() {
@@ -1593,11 +1793,13 @@ impl eframe::App for SpyApp {
                     theme::sheet_frame(ui).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.set_min_height(ui.available_height());
-                        self.browser(ui);
+                        self.signals_rect = Some(ui.max_rect());
+                        let room = ui.available_height();
+                        egui::ScrollArea::vertical().id_salt("signals-sheet").auto_shrink([false, true]).show(ui, |ui| self.browser(ui, room));
                     });
                 });
             }
-            egui::Panel::right("channels").frame(sheet(0, 8)).resizable(true).default_size(338.0).size_range(308.0..=490.0).show_separator_line(false).show(ui, |ui| {
+            egui::Panel::right("channels").frame(sheet(0, 8)).resizable(true).default_size(channels_opening(ctx.content_rect().width())).size_range(CHANNELS_LEAST..=side_most(ctx.content_rect().width(), CHANNELS_LEAST, CHANNELS_MOST)).show_separator_line(false).show(ui, |ui| {
                 if self.review.is_some() {
                     self.review_table(ui);
                 } else if self.options_for.is_some() {

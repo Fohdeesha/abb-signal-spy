@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use eframe::egui::{self, RichText};
-use egui_plot::{HoverPosition, Legend, Line, Plot, PlotPoints, Span, VLine};
+use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Span, VLine};
 
 use spy_core::catalogue::flag;
 use spy_core::session::{Phase, Status};
@@ -256,6 +256,52 @@ struct LaneEvents {
 const TIME_STEPS: [f64; 22] = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0];
 
 pub const TIME_LABEL_PX: f64 = 92.0;
+pub const VALUE_LABEL_PX: f32 = 20.0;
+pub const STALE_SHADE: f32 = 0.22;
+pub const MARKER_LABEL_W: f32 = 180.0;
+pub const TITLE_LEAST: f32 = 90.0;
+pub const VALUE_LABEL_ACROSS_PX: f32 = 72.0;
+const VALUE_STEPS: [f64; 8] = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0];
+
+fn value_steps_from(least: f64) -> impl Iterator<Item = f64> {
+    let decade = 10f64.powf(least.log10().floor());
+    (0..4).flat_map(move |d| VALUE_STEPS.iter().map(move |m| m * decade * 10f64.powi(d))).filter(move |s| *s >= least * (1.0 - 1e-9))
+}
+
+pub(crate) fn value_marks(input: egui_plot::GridInput) -> Vec<egui_plot::GridMark> {
+    value_marks_apart(input, VALUE_LABEL_PX)
+}
+
+pub(crate) fn value_marks_across(input: egui_plot::GridInput) -> Vec<egui_plot::GridMark> {
+    value_marks_apart(input, VALUE_LABEL_ACROSS_PX)
+}
+
+fn value_marks_apart(input: egui_plot::GridInput, label_px: f32) -> Vec<egui_plot::GridMark> {
+    let (lo, hi) = input.bounds;
+    if !(input.base_step_size > 0.0 && lo.is_finite() && hi.is_finite() && hi > lo) {
+        return Vec::new();
+    }
+    let per_unit = f64::from(GRID_PX) / input.base_step_size;
+    let least = f64::from(label_px) / per_unit;
+    let wanted = ((hi - lo) * per_unit / 6.0).max(f64::from(label_px) * 1.6) / per_unit;
+    let count = |s: f64| (hi / s).floor() - (lo / s).ceil() + 1.0;
+    let candidates: Vec<f64> = value_steps_from(least).collect();
+    let roomy = candidates.iter().copied().find(|&s| s >= wanted).unwrap_or(least);
+    let step = if count(roomy) >= 3.0 { roomy } else { candidates.iter().copied().rfind(|&s| s < roomy && count(s) >= 3.0).unwrap_or(candidates.first().copied().unwrap_or(least)) };
+    let (k0, k1) = ((lo / step).ceil() as i64, (hi / step).floor() as i64);
+    if k1.saturating_sub(k0) > 1000 {
+        return Vec::new();
+    }
+    (k0..=k1).map(|k| egui_plot::GridMark { value: k as f64 * step, step_size: step }).collect()
+}
+
+pub(crate) fn value_label(mark: egui_plot::GridMark) -> String {
+    let decimals = (0..=12).find(|&d| {
+        let scaled = mark.step_size * 10f64.powi(d);
+        (scaled - scaled.round()).abs() <= scaled.abs() * 1e-6
+    });
+    view::fmt_to(mark.value, Some(decimals.unwrap_or(12) as usize))
+}
 pub const DOUBLE_CLICK_UNDO: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_plot::GridMark> {
@@ -463,7 +509,7 @@ impl SpyApp {
         if st.phase != Phase::Streaming && self.paused_at.is_none() {
             ui.horizontal(|ui| {
                 theme::square(ui, p.hold, 10.0);
-                ui.label(theme::b("Not streaming: the charts show the last data received.").color(p.hold));
+                ui.add(egui::Label::new(theme::b("Not streaming: the charts show the last data received.").color(p.hold)).wrap());
             });
         }
         let end_ms = self.paused_at.unwrap_or(newest);
@@ -487,7 +533,7 @@ impl SpyApp {
             None => all_lanes.clone(),
         };
         if self.expanded.is_some() {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("showing 1 of {} charts", all_lanes.len())).color(p.ink2));
                 if theme::icon_text_button(ui, theme::Icon::Collapse, "show all charts", 34.0, false).clicked() {
                     self.expanded = None;
@@ -555,6 +601,7 @@ impl SpyApp {
                         time_marks(input, anchor)
                     })
                     .custom_y_axes(vec![theme::value_axis(p)])
+                    .y_grid_spacer(value_marks)
                     .show_axes([last_lane || every_axis, true])
                     .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, &decimals, &marks2, mark_tol)))
                     .allow_drag([true, false])
@@ -563,7 +610,7 @@ impl SpyApp {
                     .allow_boxed_zoom(false)
                     .allow_double_click_reset(false);
                 if members.len() > 1 {
-                    plot = plot.legend(Legend::default().position(egui_plot::Corner::LeftTop));
+                    plot = plot.legend(theme::legend());
                 }
                 let (scale, min_span) = (first.scale, members.iter().map(|m| m.min_span).fold(0.0, f64::max));
                 let resp = plot.show(ui, |pu| {
@@ -624,7 +671,7 @@ impl SpyApp {
                         {
                             let x = (t - origin) as f64 / 1000.0;
                             if x < vx1 {
-                                pu.span(Span::new("", x..=vx1).fill(p.hold.gamma_multiply(0.10)).border_width(0.0));
+                                pu.span(Span::new("", x..=vx1).fill(p.hold.gamma_multiply(STALE_SHADE)).border_width(0.0));
                             }
                         }
                     }
@@ -761,7 +808,6 @@ impl SpyApp {
     }
 
     fn chart_toolbar(&mut self, ui: &mut egui::Ui) {
-        let p = theme::pal(ui);
         let paused = self.paused_at.is_some();
         let window_s = self.window_s;
         let cursors_on = self.cursors_on;
@@ -776,14 +822,16 @@ impl SpyApp {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.spacing_mut().interact_size.y = theme::TOOL_H;
             let cur = WINDOWS.iter().find(|(s, _)| (s - window_s).abs() < 1e-9).map(|(_, l)| *l).unwrap_or("custom");
-            let cursors_text = if cursors_on { "cursors: on" } else { "cursors" };
-            let mut left_texts = vec![cur, if paused { "back to live" } else { "pause" }, cursors_text, "marker"];
+            let cursors_text = "cursors";
+            let mut left_texts = vec![cur, if paused { "go live" } else { "pause" }, cursors_text, "marker"];
             if cursors_on && placed {
                 left_texts.push("clear cursors");
             }
-            let extra = 20.0 + 32.0 + if paused { 80.0 } else { 0.0 };
+            let extra = 20.0 + 32.0;
+            let pause_w = theme::widest_button(ui, &["pause", "go live"]);
+            let cursors_w = theme::widest_button(ui, &["cursors"]);
             let left_w = theme::buttons_width(ui, &left_texts, extra);
-            let right_w = theme::buttons_width(ui, &["save csv", "save png", "xy plot"], 0.0);
+            let right_w = theme::buttons_width(ui, &["xy plot"], 0.0) + theme::save_menu_width(ui) + 6.0;
             theme::section_tools(
                 ui,
                 "02",
@@ -801,24 +849,45 @@ impl SpyApp {
                         }
                     });
                     if paused {
-                        pause = theme::primary(ui, "back to live", theme::TOOL_H).on_hover_text("Space").clicked();
-                        theme::badge(ui, "paused", p.hold, "The charts are held: drag to move through the last 10 minutes, the wheel zooms time, Ctrl + wheel the vertical scale.");
+                        pause = theme::primary_sized(ui, "go live", egui::vec2(pause_w, theme::TOOL_H)).on_hover_text("Paused: drag to move through the last 10 minutes, the wheel zooms time, Ctrl + wheel the vertical scale. Space, or this, goes back to live.").clicked();
                     } else {
-                        pause = theme::tool(ui, "pause").on_hover_text("Space. While paused, drag to move back through the last 10 minutes; the wheel zooms time.").clicked();
+                        pause = ui.add(egui::Button::new("pause").min_size(egui::vec2(pause_w, theme::TOOL_H))).on_hover_text("Space. While paused, drag to move back through the last 10 minutes; the wheel zooms time.").clicked();
                     }
-                    cursors = ui.add(egui::Button::new(cursors_text).selected(cursors_on).min_size(egui::vec2(0.0, theme::TOOL_H))).on_hover_text("Click a chart to place cursor A, right-click for cursor B: each channel's row reads them").clicked();
+                    cursors = ui.add(egui::Button::new(cursors_text).selected(cursors_on).min_size(egui::vec2(cursors_w, theme::TOOL_H))).on_hover_text("On when lit: click a chart to place cursor A, right-click for cursor B, and each channel's row reads them").clicked();
                     if cursors_on && placed {
                         clear_cursors = theme::tool(ui, "clear cursors").clicked();
                     }
+                    let marker_w = theme::button_width(ui, "marker");
                     marker = theme::split(
                         ui,
                         "Marker label",
+                        marker_w,
                         |ui| theme::tool(ui, "marker").on_hover_text("M: mark this moment on the charts and in any running recording"),
-                        |ui| {
+                        |ui, opened| {
                             ui.label(theme::b("the next marker's label"));
-                            fields::line(ui, &mut label, "Marker label", |t| t.hint_text(format!("M{}", markers + 1)).desired_width(220.0));
-                            if markers > 0 && ui.button("clear the markers").clicked() {
-                                clear_markers = true;
+                            let r = fields::line(ui, &mut label, "Marker label", |t| t.hint_text(format!("M{}", markers + 1)).desired_width(220.0));
+                            if opened {
+                                r.request_focus();
+                            }
+                            if fields::entered(ui, &r) {
+                                ui.close();
+                            }
+                            let ask = egui::Id::new("clear-markers-asked");
+                            if markers > 0 {
+                                if ui.data(|d| d.get_temp::<bool>(ask)).unwrap_or(false) {
+                                    ui.label(theme::b(format!("Clear all {markers} markers from the charts?")).color(theme::pal(ui).red));
+                                    ui.horizontal(|ui| {
+                                        if theme::red_button(ui, egui::Button::new("clear them").min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
+                                            clear_markers = true;
+                                            ui.data_mut(|d| d.remove::<bool>(ask));
+                                        }
+                                        if ui.add(egui::Button::new("keep them").min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
+                                            ui.data_mut(|d| d.remove::<bool>(ask));
+                                        }
+                                    });
+                                } else if ui.add(egui::Button::new("clear the markers").min_size(egui::vec2(0.0, theme::TOOL_H))).clicked() {
+                                    ui.data_mut(|d| d.insert_temp(ask, true));
+                                }
                             }
                         },
                     )
@@ -826,8 +895,7 @@ impl SpyApp {
                 },
                 |ui| {
                     xy = ui.add(egui::Button::new("xy plot").selected(xy_open).min_size(egui::vec2(0.0, theme::TOOL_H))).on_hover_text(XY_HOVER).clicked();
-                    png = theme::tool(ui, "save png").on_hover_text("Save a picture of the charts as drawn to the recordings folder").clicked();
-                    csv = theme::tool(ui, "save csv").on_hover_text("Save every channel's samples in view, as they came (never smoothed), to a CSV file in the recordings folder").clicked();
+                    (csv, png) = theme::save_menu(ui, "Every channel's samples in view, as they came (never smoothed), as a CSV file", "A picture of the charts as drawn");
                 },
             );
         });
@@ -880,6 +948,8 @@ enum TitleAct {
     Collapse,
 }
 
+pub const ZOOMED_TIP: &str = "Ctrl + wheel or the - and + buttons set this scale. Click here, or double-click the chart, to go back to the chart's own scale.";
+
 fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bool, hovered: bool, marker: Option<&str>) -> TitleAct {
     let p = theme::pal(ui);
     let Some(first) = members.first() else { return TitleAct::None };
@@ -891,7 +961,10 @@ fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bo
     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let size = egui::vec2(32.0, 28.0);
-        if hovered || zoomed || expanded {
+        let buttons_w = 3.0 * size.x + 2.0 * 4.0;
+        if !(hovered || zoomed || expanded) {
+            ui.add_space(buttons_w);
+        } else {
             ui.scope(|ui| {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = p.chip;
                 if expanded {
@@ -907,36 +980,56 @@ fn lane_title(ui: &mut egui::Ui, members: &[&Member], zoomed: bool, expanded: bo
                 if theme::icon_button(ui, theme::Icon::Minus, "Zoom out the vertical scale", size).clicked() {
                     act = TitleAct::ZoomOut;
                 }
-                if zoomed && ui.add(egui::Button::new(theme::b("reset scale").size(15.0)).min_size(egui::vec2(0.0, 28.0))).clicked() {
-                    act = TitleAct::ResetScale;
-                }
             });
         }
-        if let Some(m) = marker {
+        let essential = members.len().min(6) as f32 * 20.0
+            + egui::WidgetText::from(first.lane.1.as_str()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x
+            + 8.0
+            + if zoomed { theme::badge_button_width(ui, "scale zoomed") + 8.0 } else { 0.0 }
+            + TITLE_LEAST;
+        let marker_w = (ui.available_width() * 0.3).min(MARKER_LABEL_W).min(ui.available_width() - essential - 4.0);
+        if let Some(m) = marker.filter(|_| marker_w >= 50.0) {
             ui.add_space(4.0);
-            ui.label(theme::b(m).color(p.hold)).on_hover_text("The newest marker in view");
+            let width = marker_w;
+            ui.allocate_ui_with_layout(egui::vec2(width, 30.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(theme::b(m).color(p.hold)).truncate()).on_hover_text(format!("The newest marker in view: {m}"));
+            });
         }
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            let gap = 8.0;
+            let text_w = |t: &str| egui::WidgetText::from(theme::b(t).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small).size().x;
+            let shown = members.len().min(6);
+            let frozen = members.iter().any(|m| m.frozen);
+            let mut fixed = shown as f32 * (12.0 + gap) + egui::WidgetText::from(first.lane.1.as_str()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x + gap;
+            if zoomed {
+                fixed += theme::badge_button_width(ui, "scale zoomed") + gap;
+            }
+            let avail = ui.available_width();
+            let show_smoothed = smoothed.as_deref().filter(|t| avail - fixed - (text_w(t) + 12.0 + gap) >= TITLE_LEAST);
+            if let Some(t) = show_smoothed {
+                fixed += text_w(t) + 12.0 + gap;
+            }
+            let show_frozen = frozen && avail - fixed - (text_w("FROZEN") + 12.0 + gap) >= TITLE_LEAST;
+            if show_frozen {
+                fixed += text_w("FROZEN") + 12.0 + gap;
+            }
             for m in members.iter().take(6) {
                 theme::square(ui, m.color, 12.0);
             }
-            let tag_w = |t: &str| egui::WidgetText::from(theme::b(t).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small).size().x + 20.0;
-            let mut reserve = egui::WidgetText::from(first.lane.1.as_str()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x + 8.0;
-            reserve += smoothed.as_deref().map_or(0.0, tag_w) + if zoomed { tag_w("scale zoomed") } else { 0.0 } + if members.iter().any(|m| m.frozen) { tag_w("FROZEN") } else { 0.0 };
             let title = if members.len() == 1 { first.name.clone() } else { format!("{} (+{} overlaid)", first.name, members.len() - 1) };
-            let room = (ui.available_width() - reserve).max(60.0);
+            let room = (avail - fixed).max(0.0);
             ui.allocate_ui_with_layout(egui::vec2(room, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(egui::Label::new(theme::b(title)).truncate());
             });
             ui.label(RichText::new(&first.lane.1).color(p.ink3));
-            if let Some(text) = &smoothed {
+            if let Some(text) = show_smoothed {
                 theme::badge(ui, text, p.ink2, "Smoothed on the screen only (the channel's options). Recordings and saved files keep every sample.");
             }
-            if zoomed {
-                theme::badge(ui, "scale zoomed", p.hold, "Ctrl + wheel or the buttons set this scale; 'reset scale' or a double-click gives the chart's own back.");
+            if zoomed && theme::badge_button(ui, "scale zoomed", p.hold, ZOOMED_TIP).clicked() {
+                act = TitleAct::ResetScale;
             }
-            if members.iter().any(|m| m.frozen) {
+            if show_frozen {
                 theme::badge(ui, "FROZEN", p.hold, "Holds the last RAPID path position; does not move while EGM drives the robot.");
             }
         });
@@ -1030,6 +1123,45 @@ pub fn with_mark(text: String, x: f64, tol: f64, marks: &[(f64, String)]) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn labelled(marks: &[egui_plot::GridMark], per_unit: f64, lo: f64, hi: f64) -> Vec<String> {
+        marks.iter().filter(|m| m.value >= lo && m.value <= hi && m.step_size * per_unit > f64::from(VALUE_LABEL_PX) - 1.0).map(|m| value_label(*m)).collect()
+    }
+
+    #[test]
+    fn every_chart_names_enough_values_to_read_its_scale() {
+        let ranges = [(0.0, 360.0), (-12.0, 375.0), (113.2, 118.9), (-210.9, 211.0), (346.6, 357.3), (0.0, 1.0), (-0.0004, 0.0003), (-1.0e6, 1.0e6), (99.999, 100.001), (-1.0, 1.0), (0.172, 0.828), (-3.3, 3.4)];
+        for h in [56.0, 70.0, 80.0, 90.0, 120.0, 200.0, 420.0] {
+            for (lo, hi) in ranges {
+                let input = egui_plot::GridInput { bounds: (lo, hi), base_step_size: (hi - lo) / h * f64::from(GRID_PX) };
+                let per_unit = h / (hi - lo);
+                let marks = value_marks(input);
+                let shown = labelled(&marks, per_unit, lo, hi);
+                let least = if h >= 80.0 { 3 } else { 2 };
+                assert!(shown.len() >= least, "{lo}..{hi} on {h} px names only {shown:?}");
+                if h >= 200.0 {
+                    assert!(shown.len() <= 9, "{lo}..{hi} on {h} px is crowded: {shown:?}");
+                }
+                let mut unique = shown.clone();
+                unique.dedup();
+                assert_eq!(unique, shown, "{lo}..{hi} on {h} px: two labels read the same");
+                for w in marks.windows(2) {
+                    assert!((w[1].value - w[0].value) * per_unit >= f64::from(VALUE_LABEL_PX) - 1e-6, "{lo}..{hi} on {h} px: labels {} px apart", (w[1].value - w[0].value) * per_unit);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_scale_label_carries_the_decimals_its_step_needs() {
+        let mark = |value: f64, step_size: f64| value_label(egui_plot::GridMark { value, step_size });
+        assert_eq!(mark(1.5, 1.5), "1.5");
+        assert_eq!(mark(3.0, 1.5), "3.0");
+        assert_eq!(mark(100.0, 100.0), "100");
+        assert_eq!(mark(0.0004, 0.0002), "0.0004");
+        assert_eq!(mark(-0.0, 0.5), "0.0");
+        assert_eq!(mark(-210.0, 30.0), "-210");
+    }
 
     #[test]
     fn a_hover_over_a_marks_line_names_it() {

@@ -76,7 +76,16 @@ fn menu(h: &mut Harness<'static, SpyApp>, menu: &str, entry: &str) {
     let _ = h.run_ok();
     h.get_by_label(entry).click();
     let _ = h.run_ok();
-    h.key_press(egui::Key::Escape);
+    if egui::Popup::is_any_open(&h.ctx) {
+        h.key_press(egui::Key::Escape);
+        let _ = h.run_ok();
+    }
+}
+
+fn save_menu(h: &mut Harness<'static, SpyApp>, entry: &str) {
+    h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "save").click();
+    let _ = h.run_ok();
+    h.get_by_label(entry).click();
     let _ = h.run_ok();
 }
 
@@ -176,11 +185,17 @@ fn the_other_clients_question_is_asked_and_answered() {
     let mut h = harness(&dir, AskPolicy::Always);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::AwaitingApproval));
-    assert!(h.query_by_label("Other programs are connected to this controller").is_some());
+    assert!(h.query_by_label("other programs are connected to this controller").is_some());
     assert!(h.query_all_by_label_contains("192.0.2.27").count() >= 2, "the other client is named");
     h.get_by_label("cancel").click();
     assert!(wait(&mut h, 3000, |a| matches!(phase(a), Phase::Stopped { .. })));
     assert!(fake.seen().is_empty(), "declining sends nothing");
+
+    h.get_by_label("connect").click();
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::AwaitingApproval));
+    h.key_press(egui::Key::Escape);
+    assert!(wait(&mut h, 3000, |a| matches!(phase(a), Phase::Stopped { .. })), "Esc is the safe answer: {:?}", phase(h.state()));
+    assert!(fake.seen().is_empty(), "Esc sent something");
 
     h.get_by_label("connect").click();
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::AwaitingApproval));
@@ -196,7 +211,7 @@ fn a_real_controllers_flexpendant_alone_asks_nothing() {
     let mut h = harness(&dir, AskPolicy::Always);
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "{:?}", phase(h.state()));
-    assert!(h.query_by_label("Other programs are connected to this controller").is_none());
+    assert!(h.query_by_label("other programs are connected to this controller").is_none());
     let _ = h.run_ok();
     assert_eq!(h.query_all_by_label_contains("192.168.126.10").count(), 0, "the pendant is named");
     assert_eq!(h.query_all_by_label_contains("FlexPendant").count(), 0, "the pendant is mentioned");
@@ -229,7 +244,7 @@ fn record_save_last_and_slow_log_write_their_folders() {
     h.get_by_label("slow log").click();
     assert!(wait(&mut h, 2000, |a| a.slow.is_some()));
     std::thread::sleep(Duration::from_millis(1500));
-    h.get_by_label_contains("stop slow log").click();
+    h.get_by_label_contains("stop log").click();
     assert!(wait(&mut h, 3000, |a| a.slow.is_none()));
 
     h.get_by_label_contains("save last").click();
@@ -272,8 +287,8 @@ fn pause_cursors_and_markers() {
     h.key_press(egui::Key::Space);
     let _ = h.run_ok();
     assert!(h.state().paused_at.is_some(), "Space pauses");
-    assert!(h.query_by_label("paused").is_some());
-    h.get_by_label("back to live").click();
+    assert!(h.query_by_label("go live").is_some(), "the charts do not say they are paused");
+    h.get_by_label("go live").click();
     let _ = h.run_ok();
     assert!(h.state().paused_at.is_none());
 
@@ -451,7 +466,7 @@ fn reset_infostream_asks_first() {
     let _ = h.run_ok();
     h.get_by_label("reset InfoStream...").click();
     let _ = h.run_ok();
-    assert!(h.query_by_label("Reset InfoStream?").is_some(), "it asks");
+    assert!(h.query_by_label("reset InfoStream?").is_some(), "it asks");
     assert!(!fake.seen_props().iter().any(|p| p == "StreamUndefineAll"), "nothing sent before the answer");
     h.get_by_label("reset InfoStream").click();
     let _ = h.run_ok();
@@ -666,7 +681,7 @@ fn a_recording_opens_for_review_and_is_never_shown_as_live() {
     h.get_by_label("close the recording").click();
     let _ = h.run_ok();
     assert!(h.state().review.is_none());
-    assert!(wait(&mut h, 2000, |a| a.review.is_none()) && h.query_by_label("live").is_some(), "back to live");
+    assert!(wait(&mut h, 2000, |a| a.review.is_none()) && h.query_by_label("live").is_some(), "go live");
 }
 
 fn files_ending(dir: &std::path::Path, suffix: &str) -> Vec<PathBuf> {
@@ -707,7 +722,7 @@ fn what_is_in_view_saves_as_csv_and_png() {
     add_via_dialog(&mut h, 4002, "add");
     add_via_dialog(&mut h, 6010, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 100) && a.view_ms.is_some()));
-    h.get_by_label("save csv").click();
+    save_menu(&mut h, "save csv");
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let rec = dir.join("recordings");
@@ -725,7 +740,7 @@ fn what_is_in_view_saves_as_csv_and_png() {
     let t: Vec<f64> = rows.iter().map(|r| r.split(',').nth(1).unwrap().parse().unwrap()).collect();
     assert!(t.windows(2).all(|w| w[0] <= w[1]), "rows in time order");
 
-    h.get_by_label("save png").click();
+    save_menu(&mut h, "save png");
     assert!(wait(&mut h, 10_000, |_| !files_ending(&rec, " charts.png").is_empty()), "no picture saved");
     assert_eq!(h.state().png_pending, None);
     let pngs = files_ending(&rec, " charts.png");
@@ -759,7 +774,7 @@ fn a_reviewed_stretch_saves_as_csv() {
     h.state_mut().open_recording(folder);
     assert!(wait(&mut h, 5000, |a| a.review.is_some()));
     let _ = h.run_ok();
-    h.get_by_label("save csv").click();
+    save_menu(&mut h, "save csv");
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let csvs = files_ending(&dir.join("recordings"), " view.csv");
@@ -808,7 +823,7 @@ fn a_reviewed_slow_log_gives_its_intervals_extremes_and_saves_them() {
     let r = h.state().review.as_ref().unwrap().review.clone();
     let s = crate::review_view::review_stats(&h.state().catalogue, r.channel("4002/ROB_1/J1").unwrap(), r.start, r.end + 1);
     assert_eq!((s.min, s.max), (300.0, 357.1), "the dip the slow log caught, contradicted by its statistics");
-    h.get_by_label("save csv").click();
+    save_menu(&mut h, "save csv");
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let text = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
@@ -825,7 +840,7 @@ fn a_reviewed_recordings_saves_carry_its_own_label() {
     h.state_mut().open_recording(folder);
     assert!(wait(&mut h, 5000, |a| a.review.is_some()));
     let _ = h.run_ok();
-    h.get_by_label("save csv").click();
+    save_menu(&mut h, "save csv");
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let saved = files_ending(&dir.join("recordings"), " view.csv");
@@ -936,7 +951,7 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
 
     h.get_by_label("add a set").click();
     let _ = h.run_ok();
-    h.get_by_label("Torques").click();
+    h.get_by_label("torques").click();
     let _ = h.run_ok();
     h.state_mut().sets.as_mut().unwrap().unit = "ROB_2".into();
     let _ = h.run_ok();
@@ -949,7 +964,7 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
 
     h.get_by_label("add a set").click();
     let _ = h.run_ok();
-    h.get_by_label("Resolver angles").click();
+    h.get_by_label("resolver angles").click();
     let _ = h.run_ok();
     assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("add")).is_disabled(), "greyed out, its hover saying why");
     h.get_by_label("add").click();
@@ -958,13 +973,16 @@ fn a_channel_set_adds_or_replaces_in_one_go() {
     assert!(h.state().sets.is_some());
     h.get_by_label("replace all 8 channels").click();
     let _ = h.run_ok();
+    assert_eq!(h.state().chans.len(), 8, "replaced without asking");
+    h.get_by_label("replace them").click();
+    let _ = h.run_ok();
     assert_eq!(ids(h.state()), (1..=6).map(|a| format!("5138/ROB_1/J{a}")).collect::<Vec<_>>());
     assert_eq!(h.state().lanes(&[true; 6]).len(), 6, "a chart each");
     assert!(wait(&mut h, 5000, |a| { let s = a.session.status(); s.channels.len() == 6 && s.channels.iter().all(|c| c.key.signal == 5138) }), "the session follows");
 
     h.get_by_label("add a set").click();
     let _ = h.run_ok();
-    h.get_by_label("Resolver angles").click();
+    h.get_by_label("resolver angles").click();
     let _ = h.run_ok();
     h.get_by_label("add").click();
     let _ = h.run_ok();
@@ -993,7 +1011,7 @@ fn a_resolver_turns_onto_its_target_and_a_stale_one_is_never_on_target() {
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5138, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    options(&mut h, 0, "Turn to a target...");
+    options(&mut h, 0, "turn to a target...");
     assert_eq!(h.state().derived.len(), 1);
     assert_eq!(derived_health(&h, 0), view::Health::Waiting, "no target yet");
     assert!(h.query_by_label("ON TARGET").is_none());
@@ -1072,7 +1090,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     let d_lane = (h.state().derived[0].lane, String::new());
     assert!(h.state().lanes(&[true; 3]).contains(&d_lane), "the sum has a chart of its own");
     assert!(wait(&mut h, 2000, |a| a.view_ms.is_some()));
-    h.get_by_label("save csv").click();
+    save_menu(&mut h, "save csv");
     let _ = h.run_ok();
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let csv = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
@@ -1083,7 +1101,7 @@ fn a_duty_sum_brings_its_legs_and_a_sag_needs_a_steady_plateau() {
     }
 
     add_via_dialog(&mut h, 5027, "add");
-    options(&mut h, 3, "Sag below a plateau");
+    options(&mut h, 3, "sag below a plateau");
     assert_eq!(h.state().derived.len(), 2);
     press(&mut h, "set the plateau");
     let _ = h.run_ok();
@@ -1209,7 +1227,7 @@ fn a_plateau_of_no_voltage_is_refused() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "add");
-    options(&mut h, 0, "Sag below a plateau");
+    options(&mut h, 0, "sag below a plateau");
     std::thread::sleep(Duration::from_millis(2300));
     let _ = h.run_ok();
     press(&mut h, "set the plateau");
@@ -1251,7 +1269,7 @@ fn a_plateau_is_refused_while_the_link_drains_or_charges() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "add");
-    options(&mut h, 0, "Sag below a plateau");
+    options(&mut h, 0, "sag below a plateau");
     let set = |h: &mut Harness<'static, SpyApp>| {
         let _ = h.run_ok();
         press(h, "set the plateau");
@@ -1318,7 +1336,7 @@ fn a_plateau_goes_when_another_controller_streams_and_is_said_once() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "add");
-    options(&mut h, 0, "Sag below a plateau");
+    options(&mut h, 0, "sag below a plateau");
     std::thread::sleep(Duration::from_millis(4500));
     let _ = h.run_ok();
     press(&mut h, "set the plateau");
@@ -1344,7 +1362,7 @@ fn the_deepest_sag_counts_from_its_plateau_on() {
     connect(&mut h, &fake);
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5027, "add");
-    options(&mut h, 0, "Sag below a plateau");
+    options(&mut h, 0, "sag below a plateau");
     std::thread::sleep(Duration::from_millis(800));
     fake.with(|b| b.signals.insert(5027, SignalDef { source: SignalSource::float(|_| 356.0), sample_ms: 4.032 }));
     std::thread::sleep(Duration::from_millis(4300));
@@ -1935,7 +1953,7 @@ fn a_minimised_window_keeps_the_phone_the_turn_and_the_title_current() {
     assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
     add_via_dialog(&mut h, 5138, "add");
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
-    options(&mut h, 0, "Turn to a target...");
+    options(&mut h, 0, "turn to a target...");
     h.state_mut().derived[0].target_text = "57.3".into();
     let _ = h.run_ok();
     press(&mut h, "set");
@@ -2003,9 +2021,11 @@ fn a_recording_that_closes_while_minimised_is_said_when_the_window_is_shown() {
     assert!(title.contains("STOPPED") && !title.contains("REC"), "the taskbar still says it records: {titles:?}");
     assert!(h.state().rws.is_none() && h.state().rws_form.password.is_empty(), "RWS and its password outlived the session");
 
-    minimised_until(&mut h, 6500, &mut titles, |_| false);
+    let closed = h.state().log.since(0).into_iter().find(|e| e.text.starts_with("Recording closed")).expect("not said at all");
+    let outlived = crate::app::toast_life(closed.level) + Duration::from_millis(500);
+    minimised_until(&mut h, outlived.as_millis() as u64, &mut titles, |_| false);
     let _ = h.run_ok();
-    let said = h.state().log.since(0).into_iter().find(|e| e.text.starts_with("Recording closed")).expect("not said at all").text;
+    let said = closed.text;
     assert!(h.state().toasts.iter().any(|t| t.text == said), "said while minimised, and its toast gone unseen (the footer's newest message is no stand-in for it)");
     assert!(h.query_by_label(&said).is_some(), "said while minimised, and gone unseen");
 
@@ -2295,11 +2315,11 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     assert!(h.query_by_label("None yet.").is_some());
     h.get_by_label("add your notes...").click();
     let _ = h.run_ok();
-    type_into(&mut h, Role::TextInput, "Name", "wrist configuration vector");
-    type_into(&mut h, Role::MultilineTextInput, "Evidence", "follows joint 5 at rest");
+    type_into(&mut h, Role::TextInput, "name", "wrist configuration vector");
+    type_into(&mut h, Role::MultilineTextInput, "evidence", "follows joint 5 at rest");
     h.get_by_label("probable").click();
     let _ = h.run_ok();
-    h.get_by_label("save").click();
+    h.get_by_label("save notes").click();
     let _ = h.run_ok();
     assert!(h.state().note_edit.is_none(), "the editor stays open after saving");
     assert_eq!(log_texts(&h).iter().filter(|t| t.contains("Your notes on 1403 are saved")).count(), 1, "said once: {:?}", log_texts(&h));
@@ -2308,7 +2328,7 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     assert!(saved.contains("\"wrist configuration vector\"") && saved.contains("\"follows joint 5 at rest\"") && saved.contains("\"probable\""), "{saved}");
     let _ = h.run_ok();
     assert!(h.query_by_label("wrist configuration vector").is_some(), "the name is not shown");
-    assert!(h.query_by_label("Evidence: follows joint 5 at rest").is_some(), "the evidence is not shown");
+    assert!(h.query_by_label("evidence: follows joint 5 at rest").is_some(), "the evidence is not shown");
     assert_eq!(h.query_all_by_label_contains("(notes)").count(), 0);
     h.state_mut().search = "1403".into();
     let _ = h.run_ok();
@@ -2322,9 +2342,9 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     assert!(h.query_by_label("wrist configuration vector").is_some(), "the notes did not come back");
     h.get_by_label("edit your notes...").click();
     let _ = h.run_ok();
-    assert!(h.query_by_label("Your notes on signal 1403").is_some(), "an unnamed signal's title");
-    assert_eq!(h.get_by_role_and_label(Role::TextInput, "Name").value().as_deref(), Some("wrist configuration vector"));
-    type_into(&mut h, Role::TextInput, "Name", " (maybe)");
+    assert!(h.query_by_label("your notes on signal 1403").is_some(), "an unnamed signal's title");
+    assert_eq!(h.get_by_role_and_label(Role::TextInput, "name").value().as_deref(), Some("wrist configuration vector"));
+    type_into(&mut h, Role::TextInput, "name", " (maybe)");
     assert!(h.state().note_edit.as_ref().is_some_and(|e| e.draft.name.contains("(maybe)")), "the typing did not reach the editor");
     h.get_by_label("cancel").click();
     let _ = h.run_ok();
@@ -2334,6 +2354,9 @@ fn your_notes_on_a_signal_are_kept_shown_and_there_next_time() {
     h.get_by_label("edit your notes...").click();
     let _ = h.run_ok();
     h.get_by_label("delete these notes").click();
+    let _ = h.run_ok();
+    assert!(h.state().notes.get(1403).is_some(), "deleted without asking");
+    h.get_by_label("delete them").click();
     let _ = h.run_ok();
     assert!(h.state().notes.get(1403).is_none());
     assert_eq!(log_texts(&h).iter().filter(|t| t.contains("Your notes on 1403 are deleted")).count(), 1, "said once: {:?}", log_texts(&h));
@@ -2405,7 +2428,7 @@ fn the_xy_plot_takes_a_recording_under_review_and_its_stretch_in_view() {
     h.get_by_label("xy plot").click();
     let recorded = h.state().review.as_ref().unwrap().review.channel("4001/ROB_1/J1").unwrap().v.len();
     assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some_and(|(_, p)| p.points.len() + 2 >= recorded)), "the whole recording is in view: {recorded} samples");
-    assert!(h.query_by_label("XY plot · reviewing, not live").is_some(), "the plot does not say it is not live");
+    assert!(h.query_by_label("xy plot · reviewing, not live").is_some(), "the plot does not say it is not live");
     let (_, p) = xy_pairs(h.state()).unwrap();
     assert!(on_the_line(p) && p.points.len() <= recorded);
     let titles: Vec<String> = h.state().xy_sources().0.iter().map(|c| c.title.clone()).collect();
@@ -2508,7 +2531,7 @@ fn smoothing_changes_the_screen_never_the_saved_samples() {
     let loaded = spy_core::recording::read(&folder).unwrap();
     let v = &loaded.data["4002/ROB_1/J1"];
     assert!(v.len() > 50 && v.iter().all(|&(_, x)| x == 0.0 || x == 10.0), "the recording is smoothed: {:?}", &v[..4]);
-    h.get_by_label("save csv").click();
+    save_menu(&mut h, "save csv");
     assert!(wait(&mut h, 5000, |a| a.export_job.is_none()));
     let csv = std::fs::read_to_string(&files_ending(&dir.join("recordings"), " view.csv")[0]).unwrap();
     let saved = saved_rows(&csv, "4002/ROB_1/J1", "Nm");
@@ -2583,10 +2606,12 @@ fn the_wheel_zooms_a_live_chart_and_ctrl_wheel_its_vertical_scale() {
     assert!(zoomed.1 - zoomed.0 < before.1 - before.0, "zoomed in: {zoomed:?} from {before:?}");
     assert_eq!(h.state().window_s, 30.0, "Ctrl + wheel left the window alone");
     let _ = h.run_ok();
-    assert!(h.query_by_label("scale zoomed").is_some(), "the chart says so");
-    h.get_by_label("reset scale").click();
+    assert!(h.query_by_label("reset scale").is_none(), "a second control for what the chip does");
+    let chip = h.query_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "scale zoomed");
+    chip.expect("the chip that says the scale is zoomed is not a button").click();
     let _ = h.run_ok();
-    assert!(h.state().lane_zoom.is_empty(), "reset scale");
+    assert!(h.state().lane_zoom.is_empty(), "clicking the chip gives the chart its own scale back");
+    assert!(h.query_by_label("scale zoomed").is_none());
     h.hover_at(c);
     let _ = h.run_ok();
     wheel(&mut h, 2.0, egui::Modifiers::CTRL);
@@ -2916,7 +2941,7 @@ fn a_folded_list_still_says_reviewing() {
     let _ = h.run_ok();
     assert!(h.query_by_label("REVIEWING").is_some(), "not live, even folded");
     assert!(h.query_by_label("not connected").is_none(), "the rail says the review, not the idle session");
-    h.get_by_label("Unfold the signal list").click();
+    h.get_by_label("add signals").click();
     let _ = h.run_ok();
     assert!(h.query_by_label("REVIEWING").is_some());
     h.get_by_label("close the recording").click();
@@ -3014,9 +3039,10 @@ fn escape_closes_a_signals_details() {
     h.state_mut().selected = Some(4002);
     h.state_mut().open_add(4002);
     let _ = h.run_ok();
+    assert_eq!(h.state().selected, None, "the details stay open beside the add dialog");
     h.key_press(egui::Key::Escape);
     let _ = h.run_ok();
-    assert_eq!(h.state().selected, Some(4002), "the details closed under the dialog");
+    assert!(h.state().add.is_none(), "Esc left the add dialog open");
 }
 
 #[test]
@@ -3241,12 +3267,15 @@ fn the_recordings_folder_is_chosen_in_the_window() {
     let _ = h.run_ok();
     assert_eq!(h.state().settings.record_dir.as_deref(), Some(target.as_path()));
     assert!(target.is_dir());
+    assert!(!h.state().show_record_dir, "the window stays open once its folder is taken");
+    menu(&mut h, "file", "recordings folder...");
     std::fs::write(dir.join("a file"), b"x").unwrap();
     set_value(&h, "Recordings folder path", dir.join("a file").to_str().unwrap());
     let _ = h.run_ok();
     h.get_by_label("use this folder").click();
     let _ = h.run_ok();
     assert_eq!(h.state().settings.record_dir.as_deref(), Some(target.as_path()), "a file taken for a folder");
+    assert!(h.state().show_record_dir, "a refused folder closed the window");
     h.get_by_label("back to Documents\\TestSignals").click();
     let _ = h.run_ok();
     assert_eq!(h.state().settings.record_dir, None);
@@ -3501,6 +3530,479 @@ fn the_controller_bar_fits_the_smallest_window() {
 }
 
 #[test]
+fn the_signal_list_opens_wide_where_there_is_room_and_leaves_the_charts_theirs() {
+    for (size, list_at_least, list_at_most) in [((1366.0, 768.0), 388.0, 400.0), ((900.0, 560.0), 262.0, 278.0)] {
+        let dir = temp_dir("list-width");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        let _ = h.run_ok();
+        let charts = h.state().charts_rect.expect("the charts are drawn");
+        let list = charts.left();
+        assert!(list >= list_at_least && list <= list_at_most, "at {size:?} the signal list opens {list} px wide, not {list_at_least}-{list_at_most}");
+    }
+}
+
+#[test]
+fn the_charts_tools_stay_inside_the_charts_paused_full_height_with_cursors() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    for size in [(1366.0, 700.0), (900.0, 560.0)] {
+        let dir = temp_dir("tools-fit");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        assert!(h.state_mut().add_channels(vec![chan(4002, 1), chan(4000, 1)], false));
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 2 && a.session.status().channels.iter().all(|c| c.samples > 30)));
+        let lane = (h.state().chans[0].lane, "Nm".to_string());
+        h.state_mut().expanded = Some(lane);
+        h.state_mut().toggle_pause();
+        h.state_mut().cursors_on = true;
+        let _ = h.run_ok();
+        let x = h.state().lane_transforms.first().map(|t| t.bounds().max()[0]).unwrap_or(0.0);
+        h.state_mut().cursor_a = Some(x - 6.0);
+        h.state_mut().cursor_b = Some(x - 2.5);
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let charts = h.state().charts_rect.expect("the charts are drawn");
+        let channels_left = h.get_by_label("reset all min/max").rect().left() - 10.0;
+        for name in ["go live", "cursors", "clear cursors", "marker", "save", "xy plot", "show all charts", "Zoom in the vertical scale", "Zoom out the vertical scale", "Back to all the charts"] {
+            let r = h.get_by(|n| name_of(n) == name && n.role() == egui::accesskit::Role::Button).rect();
+            assert!(r.left() >= charts.left() - 0.5 && r.right() <= channels_left, "at {size:?}, {name} at {r:?} runs under the channels panel, which starts at {channels_left}");
+        }
+        h.state_mut().session.disconnect();
+    }
+}
+
+#[test]
+fn the_channels_panel_keeps_its_width_and_its_header_reads_clean_whatever_the_rows_say() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("channels-width");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        assert!(h.state_mut().add_channels(vec![chan(4002, 1), chan(4001, 2), chan(4000, 3)], false));
+        assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: chan(4000, 3), target_deg: Some(90.0) }));
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 30)));
+        let _ = h.run_ok();
+        let left_live = h.get_by_label("reset all min/max").rect().left();
+        let count = h.query_all_by_label_contains("3 of 12").next().expect("the channel count").rect();
+        if let Some(hint) = h.query_by_label("click for options") {
+            assert!(!hint.rect().intersects(count), "at {size:?} the count {count:?} and 'click for options' {:?} overlap", hint.rect());
+        }
+        h.state_mut().session.disconnect();
+        assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let left_down = h.get_by_label("reset all min/max").rect().left();
+        assert!((left_down - left_live).abs() < 2.0, "at {size:?} the channels panel grew from {left_live} to {left_down} once the rows went old");
+        let mut csv = String::from("controller_ms,channel,value
+");
+        for t in (1000..2000).step_by(4) {
+            csv += &format!("{t},5005/ROB_1/J2,1
+{t},4002/ROB_1/J1,2
+");
+        }
+        let rec = recording_on_disk(&dir, "with a long controller name", "full", "a label long enough to need more room than a narrow panel has", &csv);
+        h.state_mut().open_recording(rec);
+        assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+        if let Some(rs) = &mut h.state_mut().review {
+            rs.cursors_on = true;
+            rs.cursor_a = Some(0.2);
+        }
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        h.state_mut().review = None;
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let left_after = h.get_by_label("reset all min/max").rect().left();
+        assert!((left_after - left_live).abs() < 2.0, "at {size:?} a review left the channels panel at {left_after}, from {left_live}");
+        let charts = h.state().charts_rect.expect("the charts are drawn");
+        assert!(charts.width() >= size.0 * 0.33, "at {size:?} the charts keep only {} px", charts.width());
+    }
+}
+
+#[test]
+fn a_long_message_in_the_footer_leaves_its_buttons_whole() {
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("footer");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        let folder = dir.join("recordings").join("a recording folder with a long name, 2026-10-06_09-19-43");
+        h.state_mut().last_folder = Some(folder.clone());
+        h.state_mut().log.info(format!("Saved 120000 samples in view to {}", folder.join("view.csv").display()));
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let open = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "open the folder").rect();
+        let messages = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n).starts_with("messages")).rect();
+        let text = h.query_all_by_label_contains("Saved 120000 samples").next().expect("the message shows").rect();
+        for (what, r) in [("open the folder", open), ("messages", messages)] {
+            assert!(r.left() >= 0.0 && r.right() <= size.0, "at {size:?} {what} at {r:?} is off the window");
+            assert!(!r.intersects(text.shrink(0.5)), "at {size:?} the message {text:?} runs under {what} {r:?}");
+        }
+        assert!(!open.intersects(messages), "at {size:?} the footer's buttons overlap");
+    }
+}
+
+#[test]
+fn a_charts_header_never_draws_its_tags_under_its_buttons() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("lane-head");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        assert!(h.state_mut().add_channels(vec![chan(4002, 2)], false));
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 30)));
+        h.state_mut().chans[0].smooth_ms = 100;
+        let lane = (h.state().chans[0].lane, "Nm".to_string());
+        h.state_mut().lane_zoom.insert(lane, (-50.0, 50.0));
+        let newest = h.state().session.store().newest().unwrap_or(0);
+        h.state_mut().markers.push(crate::app::Marker { t_ms: newest, label: "a very long label someone typed for the newest marker in view".into() });
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let buttons: Vec<egui::Rect> = ["Zoom in the vertical scale", "Zoom out the vertical scale", "Fill the middle with this chart"].iter().map(|b| h.get_by_label(b).rect()).collect();
+        let mut parts: Vec<(String, egui::Rect)> = h.query_all_by_label_contains("4002 \u{b7} Torque").map(|n| ("title".to_string(), n.rect())).filter(|(_, r)| r.top() > 150.0 && r.bottom() < buttons[0].bottom() + 10.0).collect();
+        for tag in ["scale zoomed", "smoothed 100 ms"] {
+            parts.extend(h.query_all_by_label(tag).map(|n| (tag.to_string(), n.rect())));
+        }
+        parts.extend(h.query_all_by_label_contains("a very long label").map(|n| ("marker".to_string(), n.rect())));
+        let charts = h.state().charts_rect.expect("the charts are drawn");
+        let left = h.state().signals_rect.map_or(charts.left(), |l| l.right().max(charts.left()));
+        assert!(parts.iter().any(|(w, _)| w == "scale zoomed"), "at {size:?} the zoomed chart lost its way back");
+        for (i, (what, r)) in parts.iter().enumerate() {
+            assert!(r.left() >= left, "at {size:?} the {what} {r:?} is pushed off the charts' left edge {left}");
+            for b in &buttons {
+                assert!(!r.intersects(b.shrink(0.5)), "at {size:?} the {what} {r:?} lies under a button {b:?}");
+            }
+            for (other, o) in parts.iter().skip(i + 1) {
+                assert!(!r.shrink(0.5).intersects(o.shrink(0.5)), "at {size:?} the {what} {r:?} and the {other} {o:?} overlap");
+            }
+        }
+        h.state_mut().session.disconnect();
+    }
+}
+
+#[test]
+fn a_reviewed_charts_header_keeps_its_chip_in_view() {
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("review-head");
+        let mut csv = String::from("controller_ms,channel,value
+");
+        for t in (1000..2000).step_by(4) {
+            csv += &format!("{t},5005/ROB_1/J2,1
+{t},4002/ROB_1/J1,2
+");
+        }
+        let rec = recording_on_disk(&dir, "r", "full", "", &csv);
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        h.state_mut().open_recording(rec);
+        assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+        let _ = h.run_ok();
+        let lane = h.state().review.as_ref().and_then(|r| r.review.channels.iter().find(|c| !c.v.is_empty() && c.key.as_ref().is_some_and(|k| k.signal == 5005)).map(|c| (c.key.as_ref().map_or(0, |k| k.signal), crate::review_view::display_of(c).0))).expect("a channel");
+        h.state_mut().review.as_mut().unwrap().zoom.insert(lane, (-1.0, 1.0));
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let chip = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "scale zoomed").rect();
+        let right = h.get_by_label("close the recording").rect().right().max(0.0);
+        let channels_left = size.0 - crate::app::channels_opening(size.0);
+        assert!(chip.left() > right && chip.right() <= channels_left, "at {size:?} the chip {chip:?} is off the charts (between {right} and {channels_left})");
+    }
+}
+
+#[test]
+fn every_dialog_fits_the_smallest_window_with_its_buttons_reachable() {
+    let size = (900.0, 560.0);
+    let dir = temp_dir("dialogs-fit");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+    let inside = |r: egui::Rect| r.top() >= -0.5 && r.bottom() <= size.1 + 0.5 && r.left() >= -0.5 && r.right() <= size.0 + 0.5;
+    h.state_mut().note_edit = Some(crate::notes::Edit { signal: 4002, draft: Default::default() });
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    for b in ["save notes", "cancel"] {
+        let r = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == b).rect();
+        assert!(inside(r), "the notes editor's {b} at {r:?} is off the window");
+    }
+    let head = h.query_all_by_label_contains("notes on").next().expect("the editor's heading").rect();
+    assert!(inside(head), "the notes editor's heading at {head:?} is off the window");
+    h.state_mut().note_edit = None;
+    let _ = h.run_ok();
+    for (open, title) in [(0, "quick guide"), (1, "about ABB Signal Spy"), (2, "connection details")] {
+        match open {
+            0 => h.state_mut().show_guide = true,
+            1 => h.state_mut().show_about = true,
+            _ => h.state_mut().show_diag = true,
+        }
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let t = h.query_all_by_label(title).next().unwrap_or_else(|| panic!("the {title} window")).rect();
+        assert!(inside(t), "the {title} window's title at {t:?} is off the window");
+        let all: Vec<egui::Rect> = h.query_all_by(|n| n.role() == egui::accesskit::Role::Window).map(|n| n.rect()).collect();
+        for w in all {
+            assert!(w.bottom() <= size.1 + 0.5, "the {title} window runs to {} on a {} px window", w.bottom(), size.1);
+        }
+        h.state_mut().show_guide = false;
+        h.state_mut().show_about = false;
+        h.state_mut().show_diag = false;
+        let _ = h.run_ok();
+    }
+}
+
+#[test]
+fn enter_in_the_address_or_port_connects() {
+    use egui::accesskit::Role;
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("enter-connects");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().host_input = "127.0.0.1".into();
+    h.state_mut().port_input = String::new();
+    let _ = h.run_ok();
+    type_into(&mut h, Role::TextInput, "Controller port", &fake.port().to_string());
+    h.key_press(egui::Key::Enter);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming), "Enter in the port field did not connect: {:?}", phase(h.state()));
+}
+
+#[test]
+fn esc_closes_the_newest_window_first_then_the_options_then_a_full_height_chart() {
+    let dir = temp_dir("esc-stack");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1)], false));
+    h.state_mut().options_for = Some(chan(4002, 1).id());
+    h.state_mut().expanded = Some((h.state().chans[0].lane, "Nm".to_string()));
+    h.state_mut().show_about = true;
+    let _ = h.run_ok();
+    h.state_mut().show_diag = true;
+    let _ = h.run_ok();
+    let esc = |h: &mut Harness<'static, SpyApp>| {
+        h.key_press(egui::Key::Escape);
+        let _ = h.run_ok();
+    };
+    h.get_all_by_label("view").next().expect("the view menu").click();
+    let _ = h.run_ok();
+    assert!(egui::Popup::is_any_open(&h.ctx), "the view menu opens");
+    esc(&mut h);
+    assert!(!egui::Popup::is_any_open(&h.ctx), "Esc closes the menu");
+    assert!(h.state().show_diag && h.state().show_about, "the Esc that closed a menu also closed a window");
+    esc(&mut h);
+    assert!(!h.state().show_diag && h.state().show_about, "the newest window goes first");
+    esc(&mut h);
+    assert!(!h.state().show_about);
+    assert!(h.state().options_for.is_some());
+    esc(&mut h);
+    assert!(h.state().options_for.is_none(), "then the channel's options");
+    assert!(h.state().expanded.is_some());
+    esc(&mut h);
+    assert!(h.state().expanded.is_none(), "then the chart filling the middle");
+}
+
+#[test]
+fn esc_cancels_the_reset_question() {
+    let dir = temp_dir("esc-reset");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().confirm_reset = true;
+    let _ = h.run_ok();
+    assert!(h.query_by_label("reset InfoStream?").is_some());
+    h.key_press(egui::Key::Escape);
+    let _ = h.run_ok();
+    assert!(!h.state().confirm_reset, "Esc left the reset question open");
+}
+
+#[test]
+fn a_typed_folder_is_taken_with_enter_and_its_window_closes() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("enter-folder");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().show_record_dir = true;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(h.get_by_role_and_label(Role::TextInput, "Recordings folder path").is_focused(), "the cursor is not in the folder field");
+    let target = dir.join("elsewhere");
+    h.get_by_role_and_label(Role::TextInput, "Recordings folder path").type_text(&target.display().to_string());
+    let _ = h.run_ok();
+    h.key_press(egui::Key::Enter);
+    let _ = h.run_ok();
+    assert_eq!(h.state().settings.record_dir.as_deref(), Some(target.as_path()));
+    assert!(!h.state().show_record_dir, "the window stays open after its folder is taken");
+}
+
+#[test]
+fn loading_a_catalogue_file_starts_in_its_path_field() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("catalogue-focus");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.get_by_label("catalogue").click();
+    let _ = h.run_ok();
+    h.get_by_label("load a catalogue file...").click();
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(h.get_by_role_and_label(Role::TextInput, "Catalogue file").is_focused(), "the cursor is not in the path field");
+}
+
+#[test]
+fn a_toast_lasts_by_its_weight_holds_under_the_pointer_and_closes_with_a_click() {
+    let dir = temp_dir("toasts-life");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 768.0));
+    h.state_mut().toast(spy_core::log::Level::Error, "an error worth reading");
+    h.state_mut().toast(spy_core::log::Level::Info, "a passing note");
+    let _ = h.run_ok();
+    let read = Instant::now() - Duration::from_secs(5);
+    for t in &mut h.state_mut().toasts {
+        t.shown = Some(read);
+    }
+    let _ = h.run_ok();
+    assert_eq!(h.state().toasts.len(), 2, "a note went before 5 s, too soon to read it");
+    let aged = Instant::now() - Duration::from_secs(7);
+    for t in &mut h.state_mut().toasts {
+        t.shown = Some(aged);
+    }
+    let _ = h.run_ok();
+    let texts: Vec<String> = h.state().toasts.iter().map(|t| t.text.clone()).collect();
+    assert_eq!(texts, ["an error worth reading"], "after 7 s an error stays and a note goes");
+    let at = h.get_by_label("an error worth reading").rect().center();
+    h.hover_at(at);
+    let _ = h.run_ok();
+    for t in &mut h.state_mut().toasts {
+        t.shown = Some(Instant::now() - Duration::from_secs(60));
+    }
+    let _ = h.run_ok();
+    assert_eq!(h.state().toasts.len(), 1, "a toast under the pointer went away");
+    let bottom_buttons = h.query_by_label("remove all").map(|n| n.rect());
+    let toast = h.get_by_label("an error worth reading").rect();
+    if let Some(b) = bottom_buttons {
+        assert!(!toast.intersects(b), "the toast {toast:?} covers the channels' buttons {b:?}");
+    }
+    click_at(&mut h, at);
+    assert!(h.state().toasts.is_empty(), "a click did not close the toast");
+}
+
+#[test]
+fn a_kind_picked_inside_the_filters_leaves_the_filters_open() {
+    let dir = temp_dir("filters-nested");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.get_by_label("filters").click();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("favourites only").is_some(), "the filters open");
+    let kind = h.get_by_label("drive / inverter").rect();
+    click_at(&mut h, kind.center());
+    assert_eq!(h.state().category.as_deref(), Some("drive / inverter"), "the kind was not taken");
+    assert!(h.query_by_label("favourites only").is_some(), "picking a kind closed the filters");
+}
+
+#[test]
+fn a_robot_picked_from_its_list_leaves_the_add_dialog_open() {
+    let dir = temp_dir("add-unit-list");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().settings.units = vec!["ROB_1".into(), "ROB_2".into()];
+    h.state_mut().open_add(4002);
+    let _ = h.run_ok();
+    h.get_by_label("Mechanical unit: the known ones").click();
+    let _ = h.run_ok();
+    let item = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "ROB_2").rect();
+    click_at(&mut h, item.center());
+    assert!(h.state().add.is_some(), "picking a robot closed the add dialog");
+    assert_eq!(h.state().add.as_ref().map(|d| d.unit.as_str()), Some("ROB_2"));
+}
+
+#[test]
+fn a_signal_looked_up_by_number_is_scrolled_into_view() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("lookup-scroll");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 768.0));
+    let _ = h.run_ok();
+    type_into(&mut h, Role::TextInput, "Raw signal number", "7578");
+    h.key_press(egui::Key::Enter);
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.state().selected, Some(7578));
+    let list = h.state().signals_rect.expect("the list is drawn");
+    let row = h.query_all_by(|n| name_of(n).starts_with("7578 ")).map(|n| n.rect()).find(|r| r.left() < list.right()).expect("the looked-up signal is not in view");
+    assert!(list.contains_rect(row), "the row {row:?} is outside the list {list:?}");
+}
+
+#[test]
+fn a_reviews_saved_picture_has_its_charts_in_it() {
+    let dir = temp_dir("review-png");
+    let rec = recording_on_disk(&dir, "r", "full", "", &full_csv());
+    let mut h = Harness::builder().with_size((1366.0, 768.0)).with_max_steps(20).wgpu().build_eframe({
+        let dir = dir.to_path_buf();
+        move |cc| {
+            let mut app = SpyApp::with_options(cc, dir.clone(), crate::net::Windows::none(), Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() });
+            app.settings.record_dir = Some(dir.join("recordings"));
+            app.show_guide = false;
+            app
+        }
+    });
+    h.state_mut().open_recording(rec.clone());
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    save_menu(&mut h, "save png");
+    let folder = dir.join("recordings");
+    assert!(wait(&mut h, 10_000, |_| !files_ending(&folder, " charts.png").is_empty()), "no picture saved");
+    let file = files_ending(&folder, " charts.png").remove(0);
+    let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&file).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let px = info.color_type.samples();
+    let colours: std::collections::HashSet<&[u8]> = buf[..info.buffer_size()].chunks(px).collect();
+    assert!(colours.len() > 20, "the saved picture is blank: {} colours", colours.len());
+}
+
+#[test]
+fn a_login_that_hangs_can_be_cancelled() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("rws-cancel");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().settings.rws_port = silent.local_addr().unwrap().port();
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    log_in(&mut h, "robotics");
+    assert!(h.query_all_by_label_contains("Logging in to").next().is_some(), "the login is waiting");
+    h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "cancel").click();
+    let _ = h.run_ok();
+    assert!(h.state().rws.is_none(), "the hanging login could not be cancelled");
+    assert!(h.query_by_label("log in").is_some(), "the login form is back");
+}
+
+#[test]
+fn compare_forgets_what_is_no_longer_charted() {
+    let fake = FakeController::start(xy_signals()).unwrap();
+    let dir = temp_dir("compare-removed");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    for n in [4001, 4002, 318] {
+        add_via_dialog(&mut h, n, "add");
+    }
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 3 && a.session.status().channels.iter().all(|c| c.samples > 100)));
+    options(&mut h, 1, "compare...");
+    assert!(wait(&mut h, 3000, |a| a.compare.as_ref().is_some_and(|c| c.result.as_ref().is_some_and(|r| r.rows.len() == 2))));
+    h.state_mut().options_for = None;
+    h.state_mut().chans.retain(|c| c.key.signal != 318);
+    let _ = h.run_ok();
+    let rows: Vec<String> = h.state().compare.as_ref().and_then(|c| c.result.as_ref()).map(|r| r.rows.iter().map(|x| x.id.clone()).collect()).unwrap_or_default();
+    assert_eq!(rows, ["4001/ROB_1/J1"], "a removed channel stays in the results");
+    h.state_mut().chans.retain(|c| c.key.signal != 4002);
+    let _ = h.run_ok();
+    assert!(h.state().compare.as_ref().is_some_and(|c| c.result.is_none()), "the results of a removed channel stay up");
+    assert!(h.query_all_by_label_contains("no longer charted").next().is_some(), "and it is not said why");
+}
+
+#[test]
+fn a_button_inside_a_derived_row_does_only_its_own_job() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("derived-row-buttons");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(4000, 1)], false));
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: chan(4000, 1), target_deg: None }));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let set = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "set").rect();
+    click_at(&mut h, set.center());
+    assert_eq!(h.state().options_for, None, "pressing set inside the row also opened its options");
+}
+
+#[test]
 fn a_five_digit_port_fits_its_field() {
     let dir = temp_dir("port-width");
     let mut h = harness(&dir, AskPolicy::Remote);
@@ -3602,6 +4104,85 @@ fn a_double_click_on_a_reviewed_chart_leaves_cursor_a_where_it_was() {
     assert_eq!(h.state().review.as_ref().and_then(|r| r.cursor_a), Some(0.25), "the double-click that shows the whole recording moved cursor A");
 }
 
+fn details_open(h: &mut Harness<'static, SpyApp>, n: u32) {
+    h.state_mut().selected = Some(n);
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+}
+
+fn click_at(h: &mut Harness<'static, SpyApp>, pos: egui::Pos2) {
+    h.hover_at(pos);
+    let _ = h.run_ok();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.step();
+    let _ = h.run_ok();
+}
+
+#[test]
+fn a_signals_long_name_stops_short_of_the_buttons_beside_it() {
+    let dir = temp_dir("details-head");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 768.0));
+    details_open(&mut h, 520);
+    let list = h.state().signals_rect.expect("the list is drawn");
+    let name = h.query_all_by_label_contains("TCP pose, path level (world frame)").map(|n| n.rect()).find(|r| r.left() > list.right()).expect("the details show the name");
+    let fav = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n).contains("favourite")).rect();
+    let close = h.get_by_label("Close (Esc)").rect();
+    assert!(name.right() <= fav.left() + 0.5, "the name {name:?} runs under the favourite button {fav:?}");
+    assert!(fav.right() <= close.left() + 0.5);
+}
+
+#[test]
+fn a_signals_details_go_once_its_channel_is_being_added_or_the_person_clicks_elsewhere() {
+    let dir = temp_dir("details-close");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 768.0));
+    details_open(&mut h, 4002);
+    h.get_by_label("add as a channel...").click();
+    let _ = h.run_ok();
+    assert!(h.state().add.is_some(), "the add dialog opens");
+    assert_eq!(h.state().selected, None, "the details stay open beside the add dialog");
+    h.state_mut().add = None;
+
+    details_open(&mut h, 4002);
+    let charts = h.state().charts_rect.expect("the charts are drawn");
+    click_at(&mut h, charts.right_center() - egui::vec2(40.0, 0.0));
+    assert_eq!(h.state().selected, None, "a click on the charts left the details open");
+
+    details_open(&mut h, 4002);
+    let search = h.get_by_label("Search the signals").rect().center();
+    click_at(&mut h, search);
+    assert_eq!(h.state().selected, Some(4002), "a click in the list's own sheet closed them");
+
+    let list = h.state().signals_rect.expect("the list is drawn");
+    let other = h.query_all_by(|n| name_of(n).starts_with("103 ")).map(|n| n.rect()).find(|r| list.contains_rect(*r)).expect("103 is listed near the top");
+    click_at(&mut h, other.center());
+    assert_eq!(h.state().selected, Some(103), "a click on another signal shows that one");
+
+    double_click(&mut h, other.center());
+    assert!(h.state().add.is_some(), "a double-click adds it");
+    assert_eq!(h.state().selected, None, "the details stay open beside the add dialog");
+}
+
+#[test]
+fn a_reviewed_charts_zoomed_scale_goes_back_with_a_click_on_its_chip() {
+    let dir = temp_dir("review-zoom");
+    let rec = recording_on_disk(&dir, "r", "full", "", &full_csv());
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().open_recording(rec);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    h.hover_at(h.state().lane_transforms[0].frame().center());
+    let _ = h.run_ok();
+    wheel(&mut h, 2.0, egui::Modifiers::CTRL);
+    assert!(h.state().review.as_ref().is_some_and(|r| !r.zoom.is_empty()), "Ctrl + wheel held no scale");
+    let _ = h.run_ok();
+    let chip = h.query_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "scale zoomed");
+    chip.expect("the chip that says the scale is zoomed is not a button").click();
+    let _ = h.run_ok();
+    assert!(h.state().review.as_ref().is_some_and(|r| r.zoom.is_empty()), "clicking the chip gives the chart its own scale back");
+}
+
 #[cfg(windows)]
 #[test]
 fn settings_that_could_not_be_read_at_the_start_are_never_saved_over() {
@@ -3618,4 +4199,428 @@ fn settings_that_could_not_be_read_at_the_start_are_never_saved_over() {
     h.state_mut().settings.dark = false;
     h.state_mut().save_settings();
     assert_eq!(std::fs::read_to_string(&p).unwrap(), kept, "the defaults read in place of a held file were saved over it");
+}
+
+fn drawn(dir: &Path, dark: bool, size: (f32, f32)) -> Harness<'static, SpyApp> {
+    let dir = dir.to_path_buf();
+    Harness::builder().with_size(size).with_max_steps(20).with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light }).wgpu().build_eframe(move |cc| {
+        let mut app = SpyApp::with_options(cc, dir.clone(), crate::net::Windows::none(), Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() });
+        app.settings.record_dir = Some(dir.join("recordings"));
+        app.settings.dark = dark;
+        crate::theme::apply(&app.ctx, dark, 1.0);
+        app.recolor();
+        app.show_guide = false;
+        app
+    })
+}
+
+fn contrast_of(a: [u8; 4], b: [u8; 4]) -> f64 {
+    let lum = |c: [u8; 4]| {
+        let f = |u: u8| {
+            let c = f64::from(u) / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+    };
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+#[test]
+fn an_unticked_box_in_a_menu_shows_its_box() {
+    let size = (1366.0, 768.0);
+    for dark in [true, false] {
+        let dir = temp_dir("menu-box");
+        let mut h = drawn(&dir, dark, size);
+        let _ = h.run_ok();
+        h.get_all_by_label("view").next().expect("the view menu").click();
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let r = h.get_by(|n| n.role() == egui::accesskit::Role::CheckBox && name_of(n) == "live dashboard").rect();
+        let img = h.render().expect("the window renders");
+        let scale = img.width() as f32 / size.0;
+        let at = |x: f32, y: f32| img.get_pixel((x * scale) as u32, (y * scale) as u32).0;
+        let ground = at(r.left() - 3.0, r.center().y);
+        let side = r.height().min(24.0);
+        let mut best = 1.0f64;
+        let mut y = r.top();
+        while y < r.bottom() {
+            let mut x = r.left();
+            while x < r.left() + side {
+                best = best.max(contrast_of(at(x, y), ground));
+                x += 0.5;
+            }
+            y += 0.5;
+        }
+        assert!(best >= 3.0, "{}: the unticked box in the view menu stands out from the menu at only {best:.2}:1", if dark { "dark" } else { "light" });
+    }
+}
+
+fn open_window(h: &mut Harness<'static, SpyApp>, title: &str) {
+    let app = h.state_mut();
+    match title {
+        "about ABB Signal Spy" => app.show_about = true,
+        "quick guide" => app.show_guide = true,
+        "catalogue" => app.show_catalogue_info = true,
+        "recordings folder" => app.show_record_dir = true,
+        "connection details" => app.show_diag = true,
+        "recordings" => app.show_recordings = true,
+        "controller details (RWS)" => app.show_rws = true,
+        "compare" => app.compare = Some(crate::compare::CompareState::new(String::new())),
+        _ => app.xy = Some(crate::xy::XyState::default()),
+    }
+}
+
+fn close_windows(h: &mut Harness<'static, SpyApp>) {
+    let app = h.state_mut();
+    (app.show_about, app.show_guide, app.show_catalogue_info, app.show_record_dir, app.show_diag, app.show_recordings, app.show_rws) = (false, false, false, false, false, false, false);
+    app.compare = None;
+    app.xy = None;
+}
+
+#[test]
+fn every_window_opens_whole_and_clear_of_the_menu_bar() {
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("windows-placed");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        let _ = h.run_ok();
+        let menu_bottom = h.get_all_by_label("file").next().expect("the file menu").rect().bottom();
+        for title in ["about ABB Signal Spy", "quick guide", "catalogue", "recordings folder", "connection details", "recordings", "controller details (RWS)", "compare", "xy plot"] {
+            open_window(&mut h, title);
+            for _ in 0..3 {
+                let _ = h.run_ok();
+            }
+            let w = h.get_by(|n| n.role() == egui::accesskit::Role::Window && name_of(n) == title).rect();
+            assert!(w.top() >= menu_bottom - 0.5, "at {size:?} the {title} window at {w:?} covers the menu bar, which ends at {menu_bottom}");
+            assert!(w.left() >= -0.5 && w.right() <= size.0 + 0.5 && w.bottom() <= size.1 + 0.5, "at {size:?} the {title} window at {w:?} runs off the window");
+            close_windows(&mut h);
+            let _ = h.run_ok();
+        }
+    }
+}
+
+#[test]
+fn a_split_button_keeps_its_arrow_beside_it_at_every_width() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("split-whole");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1400.0, 700.0));
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1), chan(4000, 1)], false));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 30)));
+    for paused in [false, true] {
+        if paused {
+            h.state_mut().toggle_pause();
+            h.state_mut().cursors_on = true;
+            let _ = h.run_ok();
+            let x = h.state().lane_transforms.first().map(|t| t.bounds().max()[0]).unwrap_or(0.0);
+            h.state_mut().cursor_a = Some(x - 6.0);
+            h.state_mut().cursor_b = Some(x - 2.5);
+        }
+        let mut w = 1400.0;
+        while w >= 900.0 {
+            h.set_size(egui::vec2(w, 700.0));
+            let _ = h.run_ok();
+            let _ = h.run_ok();
+            let marker = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "marker").rect();
+            let arrow = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "Marker label").rect();
+            assert!((marker.center().y - arrow.center().y).abs() < 1.0 && (arrow.left() - marker.right()).abs() < 1.5, "at {w} px wide (paused: {paused}) the marker button {marker:?} and its arrow {arrow:?} come apart");
+            w -= 8.0;
+        }
+        h.set_size(egui::vec2(1400.0, 700.0));
+    }
+    h.state_mut().session.disconnect();
+}
+
+#[test]
+fn the_side_panels_never_squeeze_the_charts() {
+    use crate::app::CHARTS_LEAST;
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("panels-capped");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 768.0));
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1)], false));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let drag = |h: &mut Harness<'static, SpyApp>, from: egui::Pos2, to: egui::Pos2| {
+        h.hover_at(from);
+        let _ = h.run_ok();
+        h.drag_at(from);
+        let _ = h.run_ok();
+        for k in 1..=8 {
+            h.hover_at(from + (to - from) * (k as f32 / 8.0));
+            let _ = h.run_ok();
+        }
+        h.drop_at(to);
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+    };
+    let charts = h.state().charts_rect.expect("the charts are drawn");
+    let mid = charts.center().y;
+    drag(&mut h, egui::pos2(charts.right(), mid), egui::pos2(60.0, mid));
+    let wide = h.state().charts_rect.expect("the charts are drawn");
+    assert!(wide.right() < charts.right() - 40.0, "the channels panel did not take the drag: {charts:?} to {wide:?}");
+    assert!(wide.width() >= CHARTS_LEAST - 1.0, "the channels panel pulled wide leaves the charts {} px", wide.width());
+    drag(&mut h, egui::pos2(wide.left(), mid), egui::pos2(1300.0, mid));
+    let both = h.state().charts_rect.expect("the charts are drawn");
+    assert!(both.left() > wide.left() + 40.0, "the signal list did not take the drag: {wide:?} to {both:?}");
+    assert!(both.width() >= CHARTS_LEAST - 1.0, "both panels pulled wide leave the charts {} px", both.width());
+    h.set_size(egui::vec2(900.0, 560.0));
+    for _ in 0..3 {
+        let _ = h.run_ok();
+    }
+    let small = h.state().charts_rect.expect("the charts are drawn");
+    assert!(small.width() >= CHARTS_LEAST - 1.0, "made smaller, the window leaves the charts {} px", small.width());
+    h.state_mut().session.disconnect();
+}
+
+#[test]
+fn a_channels_options_fit_its_panel() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("options-fit");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        assert!(h.state_mut().add_channels(vec![chan(4002, 1), chan(4002, 2), chan(4000, 3)], false));
+        assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: chan(4000, 3), target_deg: Some(90.0) }));
+        h.state_mut().chans[1].lane = h.state().chans[0].lane;
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 30)));
+        let _ = h.run_ok();
+        let edge = h.state().charts_rect.expect("the charts are drawn").right();
+        for name in ["reset all min/max", "remove all"] {
+            let r = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == name).rect();
+            assert!(r.left() >= edge && r.right() <= size.0 - 8.0 + 0.5, "at {size:?} {name} at {r:?} runs out of the channels sheet ({edge} to {})", size.0 - 8.0);
+        }
+        let mut ids: Vec<String> = h.state().chans.iter().map(|c| c.key.id()).collect();
+        ids.push(h.state().derived[0].live.def().id());
+        for id in ids {
+            h.state_mut().options_for = Some(id.clone());
+            for _ in 0..3 {
+                let _ = h.run_ok();
+            }
+            let now = h.state().charts_rect.expect("the charts are drawn").right();
+            assert!((now - edge).abs() < 1.0, "at {size:?} the options of {id} pushed the channels panel from {edge} to {now}");
+            let footer = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n).starts_with("messages")).rect().top();
+            let reset = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "reset min/max").rect();
+            assert!(reset.bottom() <= footer - 8.0 + 0.5, "at {size:?} the options of {id} put reset min/max at {reset:?}, under the sheet's foot ({})", footer - 8.0);
+            let bar = h.query_all_by(|n| n.role() == egui::accesskit::Role::ScrollBar).map(|n| n.rect()).filter(|r| r.left() > edge).map(|r| r.left()).fold(reset.right(), f32::min);
+            let chips: Vec<egui::Rect> = h.query_all_by(|n| ["fit, at least", "fixed", "around zero, ±"].contains(&name_of(n).as_str())).map(|n| n.rect()).collect();
+            for field in h.query_all_by(|n| n.role() == egui::accesskit::Role::TextInput && (name_of(n).contains("of the scale") || name_of(n).contains("span in") || name_of(n).contains("the scale in"))).map(|n| n.rect()).collect::<Vec<_>>() {
+                assert!(field.width() >= 63.0, "at {size:?} a scale field of {id} is squeezed to {field:?}");
+                assert!(field.left() >= edge && field.right() <= bar + 1.5, "at {size:?} a scale field of {id} at {field:?} runs past the options' visible width ({edge} to {bar})");
+                assert!(chips.iter().all(|c| !c.intersects(field.shrink(0.5))), "at {size:?} a scale field of {id} at {field:?} lies over a scale's chip");
+            }
+            let back = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "all channels").rect();
+            let gone = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "remove").rect();
+            assert!(!back.intersects(gone) && back.left() >= edge && gone.right() <= size.0 - 8.0 + 0.5, "at {size:?} the options' header buttons {back:?} and {gone:?} overlap or leave the sheet");
+            if size.0 >= 1366.0
+                && let Some(top) = h.query_by(|n| n.role() == egui::accesskit::Role::TextInput && name_of(n) == "Top of the scale in Nm")
+            {
+                let fixed = h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "fixed").rect();
+                assert!((top.rect().center().y - fixed.center().y).abs() < 1.0, "at {size:?} the fixed scale's numbers sit under its chip though they fit beside it");
+            }
+            h.state_mut().options_for = None;
+            let _ = h.run_ok();
+        }
+        h.state_mut().session.disconnect();
+    }
+}
+
+#[test]
+fn the_signal_list_shows_two_rows_and_its_last_line_whole_scrolled_if_it_must() {
+    let mut filters_w = Vec::new();
+    for size in [(1366.0, 700.0), (crate::SMALLEST[0], crate::SMALLEST[1]), (900.0, 520.0)] {
+        let dir = temp_dir("list-rows");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        if size.1 >= crate::SMALLEST[1] {
+            h.state_mut().show_log = true;
+            let _ = h.run_ok();
+            let _ = h.run_ok();
+            h.state_mut().show_log = false;
+            let _ = h.run_ok();
+            let _ = h.run_ok();
+            let sheet = h.state().signals_rect.expect("the list is drawn");
+            let whole_rows = h.query_all_by(|n| ["102 ", "103 ", "215 ", "221 "].iter().any(|s| name_of(n).starts_with(s))).map(|n| n.rect()).filter(|r| sheet.contains_rect(*r)).count();
+            let look = h.get_by_label("look it up").rect();
+            assert!(whole_rows >= 2 && sheet.contains_rect(look), "at {size:?}, as small as the window goes, the list shows {whole_rows} whole rows and its lookup at {look:?} in {sheet:?} without scrolling");
+            assert!(sheet.bottom() - look.bottom() < 12.0, "at {size:?} the list stops short and leaves {} px empty under its lookup", sheet.bottom() - look.bottom());
+            let chips: Vec<egui::Rect> = ["identified", "not yet", "filters"].iter().map(|c| h.get_by(|n| name_of(n) == *c && n.role() != egui::accesskit::Role::Label).rect()).collect();
+            assert!(chips.iter().all(|r| (r.center().y - chips[0].center().y).abs() < 1.0), "at {size:?} the filter chips take two lines: {chips:?}");
+        }
+        let sheet = h.state().signals_rect.expect("the list is drawn");
+        let chips: Vec<egui::Rect> = ["identified", "not yet", "filters"].iter().map(|c| h.get_by(|n| name_of(n) == *c && n.role() != egui::accesskit::Role::Label).rect()).collect();
+        assert!(chips.iter().all(|r| r.left() >= sheet.left() - 0.5 && r.right() <= sheet.right() + 0.5), "at {size:?} a filter chip runs out of the sheet {sheet:?}: {chips:?}");
+        filters_w.push((size, h.get_by(|n| n.role() == egui::accesskit::Role::Button && name_of(n) == "filters").rect().width()));
+        h.hover_at(h.get_by_label("add a set").rect().center());
+        let _ = h.run_ok();
+        wheel(&mut h, -20.0, egui::Modifiers::NONE);
+        let _ = h.run_ok();
+        let sheet = h.state().signals_rect.expect("the list is drawn");
+        let whole_rows = h.query_all_by(|n| ["102 ", "103 ", "215 ", "221 "].iter().any(|s| name_of(n).starts_with(s))).map(|n| n.rect()).filter(|r| sheet.contains_rect(*r)).count();
+        assert!(whole_rows >= 2, "at {size:?} the list shows {whole_rows} whole rows");
+        for name in ["look it up", "Raw signal number"] {
+            let r = h.get_by(|n| name_of(n) == name).rect();
+            assert!(sheet.contains_rect(r), "at {size:?} {name} at {r:?} is cut off by the sheet {sheet:?}");
+        }
+        h.state_mut().category = Some("torque".into());
+        h.state_mut().settings.show_inert = true;
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let filters = h.get_by(|n| name_of(n).starts_with("filters (") && n.role() != egui::accesskit::Role::Label).rect();
+        assert!(filters.left() >= sheet.left() - 0.5 && filters.right() <= sheet.right() + 0.5, "at {size:?} the filters button, two of them on, runs out of the sheet {sheet:?}: {filters:?}");
+        if size == (crate::SMALLEST[0], crate::SMALLEST[1]) {
+            h.state_mut().show_log = true;
+            let _ = h.run_ok();
+            let _ = h.run_ok();
+            let sheet = h.state().signals_rect.expect("the list is drawn");
+            let bar = h.query_all_by(|n| n.role() == egui::accesskit::Role::ScrollBar).map(|n| n.rect()).find(|r| r.left() >= sheet.right() - 24.0 && r.right() <= sheet.right() + 0.5 && r.height() >= sheet.height() * 0.5);
+            let edge = bar.map_or(sheet.right(), |b| b.left());
+            let filters = h.get_by(|n| name_of(n).starts_with("filters (") && n.role() != egui::accesskit::Role::Label).rect();
+            assert!(bar.is_some(), "at {size:?} with the messages open the sheet does not scroll, so this case is not reached");
+            assert!(filters.left() >= sheet.left() - 0.5 && filters.right() <= edge + 0.5, "at {size:?} with the messages open, the filters button, two of them on, runs under the sheet's scroll bar at {edge}: {filters:?}");
+            assert!((filters.height() - crate::theme::SMALL_H).abs() < 1.0, "at {size:?} with the messages open, the filters button, two of them on, breaks over lines: {filters:?}");
+            h.state_mut().show_log = false;
+        }
+    }
+    let tighter = 2.0 * (crate::theme::BUTTON_PAD - crate::theme::CHIP_FITS[crate::theme::CHIP_FITS.len() - 1].button_pad);
+    for &(size, w) in &filters_w[1..] {
+        assert!(w >= filters_w[0].1 - tighter - 0.5, "at {size:?} the filters button is {w} px wide, from {} at {:?}: its word broke over two lines", filters_w[0].1, filters_w[0].0);
+    }
+}
+
+#[test]
+fn the_dashboard_titles_read_and_its_ranges_line_up() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    for size in [(1366.0, 768.0), (900.0, 560.0)] {
+        let dir = temp_dir("dashboard-lines");
+        let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        assert!(h.state_mut().add_channels(vec![chan(5027, 1), chan(4002, 1), chan(4001, 2), chan(4003, 1), chan(6040, 1)], false));
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 5 && a.session.status().channels.iter().all(|c| c.samples > 30)));
+        h.state_mut().dashboard = true;
+        assert!(wait(&mut h, 3000, |a| a.chans.iter().all(|c| c.stats.n > 0)));
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let board = h.state().charts_rect.expect("the dashboard is drawn");
+        let titles: Vec<egui::Rect> = h.query_all_by_label_contains(" · ").map(|n| n.rect()).filter(|r| board.contains_rect(*r)).collect();
+        assert_eq!(titles.len(), 5, "at {size:?}");
+        for t in &titles {
+            assert!(t.width() >= crate::dashboard::TITLE_LEAST - 1.0, "at {size:?} a card's title has {} px", t.width());
+        }
+        let mut tops: Vec<f32> = h.query_all_by_label_contains(" to ").map(|n| n.rect()).filter(|r| board.contains_rect(*r)).map(|r| r.top()).collect();
+        assert_eq!(tops.len(), 5, "at {size:?} every card shows its range");
+        tops.sort_by(f32::total_cmp);
+        for pair in tops.windows(2) {
+            assert!(pair[1] - pair[0] < 0.5 || pair[1] - pair[0] > 60.0, "at {size:?} the ranges of one row sit at {} and {}", pair[0], pair[1]);
+        }
+        h.state_mut().session.disconnect();
+    }
+}
+
+#[test]
+fn the_not_streaming_line_wraps_inside_the_charts() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("not-streaming-wraps");
+    let size = (900.0, 560.0);
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1)], false));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 30)));
+    h.state_mut().session.disconnect();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+    let _ = h.run_ok();
+    let channels = h.get_by_label("reset all min/max").rect().left() - 10.0;
+    let line = h.query_all_by_label_contains("Not streaming").next().expect("the line is shown").rect();
+    assert!(line.right() <= channels + 0.5, "the line at {line:?} runs under the channels panel, which starts at {channels}");
+}
+
+fn edge_breaks(h: &mut Harness<'static, SpyApp>, size: (f32, f32), r: egui::Rect) -> usize {
+    let img = h.render().expect("the window renders");
+    let scale = img.width() as f32 / size.0;
+    let y = ((r.top() + 0.5) * scale) as u32;
+    let lum: Vec<f64> = ((r.left() + 2.0) as u32..(r.right() - 2.0) as u32)
+        .map(|x| {
+            let c = img.get_pixel((x as f32 * scale) as u32, y).0;
+            0.2126 * f64::from(c[0]) + 0.7152 * f64::from(c[1]) + 0.0722 * f64::from(c[2])
+        })
+        .collect();
+    let (lo, hi) = lum.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    if hi - lo < 20.0 {
+        return 0;
+    }
+    let mid = (lo + hi) / 2.0;
+    lum.windows(2).filter(|w| (w[0] > mid) != (w[1] > mid)).count()
+}
+
+#[test]
+fn a_locked_button_wears_the_dashed_edge_of_a_locked_field() {
+    use egui::accesskit::Role;
+    let size = (1366.0, 768.0);
+    for dark in [true, false] {
+        let dir = temp_dir("locked-look");
+        let mut h = drawn(&dir, dark, size);
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        let record = h.get_by(|n| n.role() == Role::Button && name_of(n) == "record").rect();
+        let save_last = h.get_by(|n| n.role() == Role::Button && name_of(n).starts_with("save last")).rect();
+        assert!(edge_breaks(&mut h, size, save_last) >= 6, "dark {dark}: save last, locked until connected, has a solid edge");
+        let go = h.get_by(|n| n.role() == Role::Button && name_of(n) == "connect").rect();
+        assert!(edge_breaks(&mut h, size, record) >= 6, "dark {dark}: record, locked until connected, has a solid edge");
+        assert!(edge_breaks(&mut h, size, go) <= 2, "dark {dark}: connect, which works, has a broken edge");
+        let fake = FakeController::start(Behaviour::default()).unwrap();
+        connect(&mut h, &fake);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+        let _ = h.run_ok();
+        let list = h.get_by(|n| n.role() == Role::Button && name_of(n) == "list").rect();
+        assert!(edge_breaks(&mut h, size, list) >= 6, "dark {dark}: the controller list, locked while connected, has a solid edge");
+        h.state_mut().session.disconnect();
+    }
+}
+
+#[test]
+fn the_messages_pane_at_its_largest_leaves_the_channels_buttons_whole() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let size = (crate::SMALLEST[0], crate::SMALLEST[1]);
+    let dir = temp_dir("messages-largest");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1), chan(4001, 2), chan(4000, 3)], false));
+    h.state_mut().show_log = true;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let top = h.get_by(|n| name_of(n) == "warnings only").rect().top() - 14.0;
+    let from = egui::pos2(size.0 / 2.0, top);
+    let to = egui::pos2(size.0 / 2.0, 20.0);
+    h.hover_at(from);
+    let _ = h.run_ok();
+    h.drag_at(from);
+    let _ = h.run_ok();
+    for k in 1..=8 {
+        h.hover_at(from + (to - from) * (k as f32 / 8.0));
+        let _ = h.run_ok();
+    }
+    h.drop_at(to);
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let pane_top = h.get_by(|n| name_of(n) == "warnings only").rect().top();
+    assert!(pane_top < top, "the messages pane did not take the drag");
+    let floor = h.get_by_label("Close the messages").rect().top() - 10.0;
+    for view in ["table", "options"] {
+        if view == "options" {
+            h.state_mut().options_for = Some(chan(4002, 1).id());
+            let _ = h.run_ok();
+            let _ = h.run_ok();
+        }
+        for b in h.query_all_by(|n| n.role() == egui::accesskit::Role::Button && ["reset all min/max", "remove all", "compare...", "reset min/max"].contains(&name_of(n).as_str())).map(|n| n.rect()).collect::<Vec<_>>() {
+            assert!(b.bottom() <= floor + 0.5, "in the {view} view a button at {b:?} runs under the messages pane, which starts at {floor}");
+        }
+    }
+    h.state_mut().session.disconnect();
 }

@@ -316,6 +316,7 @@ impl SpyApp {
             return;
         }
         self.png_pending = Some(what);
+        self.selected = None;
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
     }
 

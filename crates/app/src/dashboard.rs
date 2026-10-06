@@ -16,6 +16,11 @@ const UNITS_MIN: f32 = 16.0;
 const PROBE: f32 = 100.0;
 const FIT_MARGIN: f32 = 0.97;
 const AGE_PROBE: std::time::Duration = std::time::Duration::from_secs(100);
+const SQUARE: f32 = 16.0;
+const STATUS_ROOM: f32 = 80.0;
+pub const TITLE_LEAST: f32 = 130.0;
+const AVERAGED: &str = "means of the last 150 ms";
+const AVERAGED_TIP: &str = "Each number is the mean of its last 150 ms, or of its smoothing if that is longer.";
 
 struct Tile {
     name: String,
@@ -49,7 +54,11 @@ fn typical_value(decimals: Option<usize>) -> String {
     }
 }
 
-pub fn grid(n: usize, area: Vec2, number: impl Fn(Vec2) -> Fit) -> (usize, Vec2) {
+pub fn tile_least_w(spacing: f32) -> f32 {
+    2.0 * PAD.x + SQUARE + 2.0 * spacing + STATUS_ROOM + TITLE_LEAST
+}
+
+pub fn grid(n: usize, area: Vec2, least_w: f32, number: impl Fn(Vec2) -> Fit) -> (usize, Vec2) {
     let n = n.max(1);
     let layouts: Vec<(usize, Vec2, Fit)> = (1..=n)
         .rev()
@@ -58,6 +67,7 @@ pub fn grid(n: usize, area: Vec2, number: impl Fn(Vec2) -> Fit) -> (usize, Vec2)
             let tile = vec2(((area.x - GAP * (cols - 1) as f32) / cols as f32).floor(), ((area.y - GAP * (rows - 1) as f32) / rows as f32).floor());
             (cols, tile, number(tile))
         })
+        .filter(|(cols, tile, _)| *cols == 1 || tile.x >= least_w)
         .collect();
     let fits_across = layouts.iter().any(|l| l.2.across >= MIN_NUMBER);
     layouts
@@ -194,10 +204,22 @@ impl SpyApp {
     pub fn dashboard_ui(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         let st = self.session.status().clone();
+        let mut averaged_below = false;
         theme::section(ui, "02", "live dashboard", false, |ui| {
-            self.status_line(ui);
-            ui.add(egui::Label::new(RichText::new("each number is the mean of its last 150 ms, or of its smoothing if longer").color(p.ink2)).truncate());
+            ui.horizontal_wrapped(|ui| {
+                self.status_line(ui);
+                let averaged = egui::WidgetText::from(RichText::new(AVERAGED)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x;
+                if theme::VRULE_W + 2.0 * ui.spacing().item_spacing.x + averaged <= ui.available_size_before_wrap().x {
+                    theme::vrule(ui, 26.0);
+                    ui.label(RichText::new(AVERAGED).color(p.ink2)).on_hover_text(AVERAGED_TIP);
+                } else {
+                    averaged_below = true;
+                }
+            });
         });
+        if averaged_below {
+            ui.add(egui::Label::new(RichText::new(AVERAGED).color(p.ink2)).wrap()).on_hover_text(AVERAGED_TIP);
+        }
         let tiles = self.tiles(&st);
         if tiles.is_empty() {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Add channels to see their numbers here.").color(p.ink2)));
@@ -219,7 +241,7 @@ impl SpyApp {
 
 fn layout(ui: &egui::Ui, tiles: &[Tile], area: Vec2) -> (usize, Vec2) {
     let fit = |area: Vec2| {
-        grid(tiles.len(), area, |tile| {
+        grid(tiles.len(), area, tile_least_w(ui.spacing().item_spacing.x), |tile| {
             let room = number_room(tile, foot_of(tiles, ui, tile));
             let fits = tiles.iter().map(|t| {
                 let mut values = vec![t.typical.as_str()];
@@ -260,7 +282,7 @@ fn tile(ui: &mut egui::Ui, t: &Tile, size: Vec2, all: &[Tile]) {
     h.spacing_mut().interact_size.y = HEAD_H;
     crate::channels::status_word(&mut h, t.health);
     h.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        theme::square(ui, t.color, 16.0);
+        theme::square(ui, t.color, SQUARE);
         ui.add(egui::Label::new(theme::b(&t.name).size(20.0)).truncate());
     });
     let mut values: Vec<&str> = std::iter::once(t.value.as_str()).chain(t.extremes.iter().map(String::as_str)).collect();
@@ -268,7 +290,10 @@ fn tile(ui: &mut egui::Ui, t: &Tile, size: Vec2, all: &[Tile]) {
     let foot = foot_of(all, ui, size);
     let fit = number_fit(ui, &values, &t.sized_units, number_room(size, foot));
     let number = fit.number.floor().max(MIN_NUMBER);
-    let row = egui::Rect::from_min_size(egui::pos2(inner.left(), head.bottom() + GAP), vec2(inner.width(), (number * fit.height_per_px).ceil()));
+    let foot_top = inner.bottom() - foot;
+    let number_h = (number * fit.height_per_px).ceil();
+    let between = (foot_top - GAP) - (head.bottom() + GAP);
+    let row = egui::Rect::from_min_size(egui::pos2(inner.left(), head.bottom() + GAP + ((between - number_h) / 2.0).max(0.0)), vec2(inner.width(), number_h));
     let mut n = slot(ui, row, egui::Layout::left_to_right(egui::Align::Center));
     let mut v = theme::num(&t.value, number);
     if t.old {
@@ -282,7 +307,7 @@ fn tile(ui: &mut egui::Ui, t: &Tile, size: Vec2, all: &[Tile]) {
     if !t.units.is_empty() {
         n.label(units_text(&t.units, number).color(p.ink2));
     }
-    let below = egui::Rect::from_min_max(egui::pos2(inner.left(), row.bottom() + GAP), inner.max);
+    let below = egui::Rect::from_min_max(egui::pos2(inner.left(), foot_top.max(row.bottom() + GAP)), inner.max);
     let mut f = slot(ui, below, egui::Layout::top_down(egui::Align::Min));
     if let Some(note) = &t.note {
         f.add(egui::Label::new(foot_text(note, false).color(p.hold)).wrap());
@@ -302,19 +327,38 @@ mod tests {
 
     #[test]
     fn the_grid_gives_the_numbers_the_most_room() {
-        assert_eq!(grid(6, vec2(1340.0, 520.0), eight_characters_wide).0, 3, "a wide window: three across");
-        assert_eq!(grid(6, vec2(1340.0, 805.0), eight_characters_wide).0, 2, "a taller one: two across, bigger numbers");
-        assert_eq!(grid(1, vec2(1340.0, 805.0), eight_characters_wide), (1, vec2(1340.0, 805.0)), "one number has it all");
-        assert_eq!(grid(0, vec2(1340.0, 805.0), eight_characters_wide).0, 1, "no tiles is never no columns");
-        let (cols, tile) = grid(5, vec2(1340.0, 520.0), eight_characters_wide);
+        assert_eq!(grid(6, vec2(1340.0, 520.0), 0.0, eight_characters_wide).0, 3, "a wide window: three across");
+        assert_eq!(grid(6, vec2(1340.0, 805.0), 0.0, eight_characters_wide).0, 2, "a taller one: two across, bigger numbers");
+        assert_eq!(grid(1, vec2(1340.0, 805.0), 0.0, eight_characters_wide), (1, vec2(1340.0, 805.0)), "one number has it all");
+        assert_eq!(grid(0, vec2(1340.0, 805.0), 0.0, eight_characters_wide).0, 1, "no tiles is never no columns");
+        let (cols, tile) = grid(5, vec2(1340.0, 520.0), 0.0, eight_characters_wide);
         assert!(tile.x * cols as f32 + GAP * (cols - 1) as f32 <= 1340.0, "the tiles and their gaps fit across");
     }
 
     #[test]
     fn a_layout_whose_numbers_would_run_out_of_their_cards_is_not_taken() {
         let short_and_wide = |tile: Vec2| Fit { number: (tile.y / 4.0).min(tile.x / 6.0), across: tile.x / 6.0, height_per_px: 1.3 };
-        let (cols, tile) = grid(12, vec2(880.0, 60.0), short_and_wide);
+        let (cols, tile) = grid(12, vec2(880.0, 60.0), 0.0, short_and_wide);
         assert!(tile.x / 6.0 >= MIN_NUMBER, "{cols} across: numbers {} px wide at most, under the {MIN_NUMBER} px floor", tile.x / 6.0);
         assert!(cols < 12);
+    }
+
+    #[test]
+    fn a_numbers_room_leaves_the_whole_foot_however_many_lines_it_takes() {
+        let tile = vec2(300.0, 200.0);
+        for foot in [22.0, 48.0, 75.0] {
+            let room = number_room(tile, foot);
+            assert!(room.y + foot + HEAD_H + 2.0 * PAD.y + 2.0 * GAP <= tile.y + 0.01, "a {foot} px foot: the number's room of {} px leaves it no space", room.y);
+        }
+    }
+
+    #[test]
+    fn a_card_too_narrow_for_its_title_is_never_chosen() {
+        let wide_numbers = |tile: Vec2| Fit { number: tile.y / 2.0, across: tile.x, height_per_px: 1.3 };
+        let least = tile_least_w(8.0);
+        let (cols, tile) = grid(5, vec2(860.0, 280.0), least, wide_numbers);
+        assert!(tile.x >= least, "{cols} across leaves {} px a card, under the {least} px a title needs", tile.x);
+        assert_eq!(grid(5, vec2(860.0, 280.0), 0.0, wide_numbers).0, 5, "without the floor the five would go in one row");
+        assert_eq!(grid(3, vec2(200.0, 600.0), least, wide_numbers).0, 1, "a window narrower than one card still gets its column");
     }
 }

@@ -6,6 +6,28 @@ pub const HEIGHT: f32 = 40.0;
 const MARGIN: Margin = Margin::symmetric(10, 4);
 const CURSOR_ROOM: f32 = 2.0;
 
+pub fn with_choices(ui: &mut Ui, text: &mut String, name: &str, choices: &[String], width: f32) -> Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let r = line(ui, text, name, |t| t.desired_width(width));
+        let arrow = theme::icon_button(ui, theme::Icon::Down, &format!("{name}: the known ones"), egui::vec2(32.0, HEIGHT));
+        egui::Popup::menu(&arrow).show(|ui| {
+            for c in choices {
+                if ui.add(egui::Button::selectable(text == c, c.as_str()).min_size(egui::vec2(width, theme::TOOL_H))).clicked() {
+                    *text = c.clone();
+                    ui.close();
+                }
+            }
+        });
+        r
+    })
+    .inner
+}
+
+pub fn entered(ui: &Ui, r: &Response) -> bool {
+    r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
 pub fn width_for(ui: &Ui, widest: &str) -> f32 {
     let font = egui::TextStyle::Body.resolve(ui.style());
     ui.fonts_mut(|f| f.layout_no_wrap(widest.to_string(), font, egui::Color32::WHITE).size().x) + MARGIN.sum().x + CURSOR_ROOM

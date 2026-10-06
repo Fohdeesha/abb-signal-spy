@@ -215,7 +215,7 @@ fn readme() {
 #[ignore = "pictures for a person to look at: run with ABB_SIGNAL_SPY_SHOTS set"]
 fn crowded() {
     let fake = FakeController::start(showcase()).unwrap();
-    for (name, size, log) in [("crowded-1-smallest", (900.0, 560.0), false), ("crowded-2-messages-open", FIELD_LAPTOP, true)] {
+    for (name, size, log) in [("crowded-1-smallest", (crate::SMALLEST[0], crate::SMALLEST[1]), false), ("crowded-2-messages-open", FIELD_LAPTOP, true)] {
         let dir = TestDir::new("shots-crowded");
         let mut h = window(&dir, true, size);
         h.state_mut().host_input = "127.0.0.1".into();
@@ -335,5 +335,122 @@ fn shots() {
         save(&mut h, "light-2-options");
         h.state_mut().session.disconnect();
         settle(&mut h, 300);
+    }
+}
+
+fn snap(h: &mut Harness<'static, SpyApp>, size: (f32, f32), n: &mut u32, name: &str) {
+    settle(h, 300);
+    *n += 1;
+    save(h, &format!("audit-{}-{:02}-{name}", size.0 as u32, n));
+}
+
+fn press(h: &mut Harness<'static, SpyApp>, label: &str) {
+    if let Some(at) = h.query_by_label(label).map(|n| n.rect().center()) {
+        h.hover_at(at);
+        let _ = h.run_ok();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        }
+        let _ = h.run_ok();
+    }
+    settle(h, 200);
+}
+
+fn escape(h: &mut Harness<'static, SpyApp>) {
+    h.key_press(egui::Key::Escape);
+    settle(h, 200);
+}
+
+#[test]
+#[ignore = "pictures for a person to look at: run with ABB_SIGNAL_SPY_SHOTS set"]
+fn audit() {
+    let fake = FakeController::start(showcase()).unwrap();
+    for size in [(1366.0, 768.0), (crate::SMALLEST[0], crate::SMALLEST[1])] {
+        let dir = TestDir::new("shots-audit");
+        let mut n = 0;
+        let mut h = window(&dir, true, size);
+        snap(&mut h, size, &mut n, "idle");
+        drop(h);
+        let mut h = connected(&fake, &dir, true, size);
+        settle(&mut h, 3_000);
+        snap(&mut h, size, &mut n, "live");
+        press(&mut h, "list");
+        snap(&mut h, size, &mut n, "controller-list");
+        escape(&mut h);
+        press(&mut h, "filters");
+        snap(&mut h, size, &mut n, "filters");
+        escape(&mut h);
+        press(&mut h, "view");
+        snap(&mut h, size, &mut n, "view-menu");
+        escape(&mut h);
+        h.state_mut().selected = Some(520);
+        snap(&mut h, size, &mut n, "details-long-name");
+        h.state_mut().selected = None;
+        h.state_mut().open_add(4002);
+        snap(&mut h, size, &mut n, "add");
+        h.state_mut().add = None;
+        h.state_mut().open_sets();
+        snap(&mut h, size, &mut n, "sets");
+        h.state_mut().sets = None;
+        h.state_mut().note_edit = Some(crate::notes::Edit { signal: 4002, draft: Default::default() });
+        snap(&mut h, size, &mut n, "notes-editor");
+        h.state_mut().note_edit = None;
+        h.state_mut().options_for = Some(key(4002, "ROB_1", 2).id());
+        snap(&mut h, size, &mut n, "options");
+        h.state_mut().options_for = None;
+        pause_with_cursors(&mut h, 1, "Nm");
+        snap(&mut h, size, &mut n, "paused-full-height");
+        back_to_live(&mut h);
+        h.state_mut().dashboard = true;
+        snap(&mut h, size, &mut n, "dashboard");
+        h.state_mut().dashboard = false;
+        for (flag, name) in [(0, "connection-details"), (1, "messages"), (2, "about"), (3, "guide"), (4, "catalogue"), (5, "recordings-folder"), (6, "rws")] {
+            let set = |a: &mut SpyApp, on: bool| match flag {
+                0 => a.show_diag = on,
+                1 => a.show_log = on,
+                2 => a.show_about = on,
+                3 => a.show_guide = on,
+                4 => a.show_catalogue_info = on,
+                5 => a.show_record_dir = on,
+                _ => a.show_rws = on,
+            };
+            set(h.state_mut(), true);
+            snap(&mut h, size, &mut n, name);
+            set(h.state_mut(), false);
+        }
+        h.state_mut().open_compare(key(4002, "ROB_1", 2).id());
+        snap(&mut h, size, &mut n, "compare");
+        h.state_mut().compare = None;
+        h.state_mut().xy = Some(crate::xy::XyState { x: Some(key(4001, "ROB_1", 2).id()), y: Some(key(4002, "ROB_1", 2).id()), ..Default::default() });
+        snap(&mut h, size, &mut n, "xy");
+        h.state_mut().xy = None;
+        assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: key(5138, "ROB_1", 3), target_deg: Some(90.0) }));
+        snap(&mut h, size, &mut n, "derived");
+        h.state_mut().settings.signals_folded = true;
+        snap(&mut h, size, &mut n, "folded");
+        h.state_mut().settings.signals_folded = false;
+        h.state_mut().toggle_recording();
+        settle(&mut h, 2_000);
+        snap(&mut h, size, &mut n, "recording");
+        h.state_mut().toggle_recording();
+        settle(&mut h, 800);
+        h.state_mut().show_recordings = true;
+        snap(&mut h, size, &mut n, "recordings");
+        h.state_mut().show_recordings = false;
+        let rec = h.state().last_folder.clone().expect("a recording");
+        h.state_mut().open_recording(rec);
+        let end = Instant::now() + Duration::from_secs(10);
+        while h.state().review.is_none() && Instant::now() < end {
+            settle(&mut h, 100);
+        }
+        if let Some(rs) = &mut h.state_mut().review {
+            rs.cursors_on = true;
+            rs.cursor_a = Some(0.6);
+        }
+        snap(&mut h, size, &mut n, "review");
+        h.state_mut().review = None;
+        h.state_mut().session.disconnect();
+        settle(&mut h, 500);
+        snap(&mut h, size, &mut n, "disconnected-with-channels");
     }
 }

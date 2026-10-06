@@ -266,6 +266,12 @@ fn guid_at(b: &[u8], i: usize) -> bool {
     g.iter().enumerate().all(|(k, &c)| if dash(k) { c == b'-' } else { c.is_ascii_hexdigit() }) && !b.get(i + 36).is_some_and(|c| c.is_ascii_hexdigit())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesAsk {
+    Discard,
+    Delete,
+}
+
 pub struct Edit {
     pub signal: u32,
     pub draft: Note,
@@ -307,7 +313,7 @@ impl SpyApp {
         if !note.description.is_empty() {
             ui.label(&note.description);
         }
-        for (title, text) in [("Evidence", &note.evidence), ("Ruled out", &note.ruled_out), ("Open question", &note.open_question), ("Next test", &note.next_test)] {
+        for (title, text) in [("evidence", &note.evidence), ("ruled out", &note.ruled_out), ("open question", &note.open_question), ("next test", &note.next_test)] {
             if !text.is_empty() {
                 ui.label(RichText::new(format!("{title}: {text}")).small());
             }
@@ -324,55 +330,103 @@ impl SpyApp {
             _ => format!("signal {}", e.signal),
         };
         let existed = self.notes.get(e.signal).is_some();
+        let unchanged = self.notes.get(e.signal).cloned().unwrap_or_default() == e.draft;
+        let ask_id = egui::Id::new("notes-editor-asking");
+        let mut asking: Option<NotesAsk> = ctx.data(|d| d.get_temp(ask_id));
+        let first_id = egui::Id::new("notes-editor-focused");
+        let fresh = ctx.data(|d| d.get_temp::<u32>(first_id)) != Some(e.signal);
         let (mut save, mut delete, mut close) = (false, false, false);
+        let room = (ctx.content_rect().height() - 230.0).max(140.0);
         let modal = egui::Modal::new(egui::Id::new("notes-editor")).show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.heading(format!("Your notes on {title}"));
-            ui.label(RichText::new("Kept on this PC. Write what you would want the next person to know; leave out addresses and names of your cell (an export refuses them).").small().weak());
+            let p = theme::pal(ui);
+            ui.set_width(560.0f32.min(ctx.content_rect().width() - 60.0));
+            ui.heading(format!("your notes on {title}"));
+            ui.label(RichText::new("Kept on this PC. Write what you would want the next person to know; leave out addresses and names of your cell (an export refuses them).").size(14.0).color(p.ink2));
             ui.add_space(4.0);
             let d = &mut e.draft;
-            egui::Grid::new("notes-fields").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                let line = |ui: &mut egui::Ui, label: &str, hint: &str, text: &mut String| {
-                    let l = ui.label(label);
-                    fields::line(ui, text, label, |t| t.hint_text(hint).desired_width(f32::INFINITY)).labelled_by(l.id);
+            egui::ScrollArea::vertical().id_salt("notes-fields-scroll").max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+                egui::Grid::new("notes-fields").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    let line = |ui: &mut egui::Ui, label: &str, hint: &str, text: &mut String| -> egui::Response {
+                        let l = ui.label(label);
+                        let r = fields::line(ui, text, label, |t| t.hint_text(hint).desired_width(f32::INFINITY)).labelled_by(l.id);
+                        ui.end_row();
+                        r
+                    };
+                    let name = line(ui, "name", "a name, if you have one", &mut d.name);
+                    if fresh {
+                        name.request_focus();
+                    }
+                    line(ui, "description", "what it seems to be", &mut d.description);
+                    line(ui, "units", "e.g. rad, Nm, A", &mut d.units);
+                    line(ui, "category", "e.g. motor, drive, unknown", &mut d.category);
+                    ui.label("confidence");
+                    ui.horizontal(|ui| {
+                        if theme::chip(ui, d.confidence == Leaning::Open, "open").on_hover_text("It responds, but what it is remains open").clicked() {
+                            d.confidence = Leaning::Open;
+                        }
+                        if theme::chip(ui, d.confidence == Leaning::Probable, "probable").on_hover_text("It fits, and no alternative survives, but it is not forced").clicked() {
+                            d.confidence = Leaning::Probable;
+                        }
+                    });
                     ui.end_row();
-                };
-                line(ui, "Name", "a name, if you have one", &mut d.name);
-                line(ui, "Description", "what it seems to be", &mut d.description);
-                line(ui, "Units", "e.g. rad, Nm, A", &mut d.units);
-                line(ui, "Category", "e.g. motor, drive, unknown", &mut d.category);
-                ui.label("confidence");
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut d.confidence, Leaning::Open, "open").on_hover_text("It responds, but what it is remains open");
-                    ui.radio_value(&mut d.confidence, Leaning::Probable, "probable").on_hover_text("It fits, and no alternative survives, but it is not forced");
+                    let block = |ui: &mut egui::Ui, label: &str, hint: &str, text: &mut String| {
+                        let l = ui.label(label);
+                        fields::lines(ui, text, label, |t| t.hint_text(hint).desired_rows(2).desired_width(f32::INFINITY)).labelled_by(l.id);
+                        ui.end_row();
+                    };
+                    block(ui, "evidence", "what was seen, and against what", &mut d.evidence);
+                    block(ui, "ruled out", "what it is not, and why", &mut d.ruled_out);
+                    block(ui, "open question", "what is still not known", &mut d.open_question);
+                    block(ui, "next test", "the experiment that would settle it", &mut d.next_test);
                 });
-                ui.end_row();
-                let block = |ui: &mut egui::Ui, label: &str, hint: &str, text: &mut String| {
-                    let l = ui.label(label);
-                    fields::lines(ui, text, label, |t| t.hint_text(hint).desired_rows(2).desired_width(f32::INFINITY)).labelled_by(l.id);
-                    ui.end_row();
-                };
-                block(ui, "Evidence", "what was seen, and against what", &mut d.evidence);
-                block(ui, "Ruled out", "what it is not, and why", &mut d.ruled_out);
-                block(ui, "Open question", "what is still not known", &mut d.open_question);
-                block(ui, "Next test", "the experiment that would settle it", &mut d.next_test);
             });
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("save").strong())).clicked() {
-                    save = true;
+            match asking {
+                Some(NotesAsk::Discard) => {
+                    ui.label(theme::b("Close without saving what you typed?").color(p.hold));
+                    ui.horizontal(|ui| {
+                        if theme::red_button(ui, egui::Button::new("discard it").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                            close = true;
+                        }
+                        if ui.add(egui::Button::new("keep editing").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                            asking = None;
+                        }
+                    });
                 }
-                if ui.button("cancel").clicked() {
-                    close = true;
+                Some(NotesAsk::Delete) => {
+                    ui.label(theme::b(format!("Delete your notes on {title}? This cannot be undone.")).color(p.red));
+                    ui.horizontal(|ui| {
+                        if theme::red_button(ui, egui::Button::new("delete them").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                            delete = true;
+                        }
+                        if ui.add(egui::Button::new("keep them").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                            asking = None;
+                        }
+                    });
                 }
-                if existed && ui.button("delete these notes").clicked() {
-                    delete = true;
+                None => {
+                    ui.horizontal(|ui| {
+                        if theme::primary(ui, "save notes", fields::HEIGHT).clicked() {
+                            save = true;
+                        }
+                        if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                            close = true;
+                        }
+                        if existed && theme::red_button(ui, egui::Button::new("delete these notes").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                            asking = Some(NotesAsk::Delete);
+                        }
+                    });
                 }
-            });
+            }
         });
-        if modal.should_close() {
-            close = true;
+        if modal.should_close() && asking.is_none() {
+            if unchanged {
+                close = true;
+            } else {
+                asking = Some(NotesAsk::Discard);
+            }
         }
+        ctx.data_mut(|d| d.insert_temp(first_id, e.signal));
         if save || delete {
             let n = e.signal;
             let note = if delete { Note::default() } else { Note { saved: spy_core::util::local_stamp(std::time::SystemTime::now()), ..e.draft.clone() } };
@@ -385,7 +439,20 @@ impl SpyApp {
                 Err(why) => self.toast(Level::Error, format!("Your notes on {n} were not saved: {why}")),
             }
         }
-        if !close {
+        if close {
+            ctx.data_mut(|d| {
+                d.remove::<u32>(first_id);
+                d.remove::<NotesAsk>(ask_id);
+            });
+        } else {
+            ctx.data_mut(|d| match asking {
+                Some(a) => {
+                    d.insert_temp(ask_id, a);
+                }
+                None => {
+                    d.remove::<NotesAsk>(ask_id);
+                }
+            });
             self.note_edit = Some(e);
         }
     }
@@ -428,8 +495,7 @@ impl SpyApp {
 
     pub(crate) fn export_notes_button(&mut self, ui: &mut egui::Ui) {
         let any = !self.notes.map.is_empty();
-        if ui
-            .add_enabled(any, egui::Button::new("export your notes..."))
+        if theme::lockable(ui, any, egui::Button::new("export your notes..."))
             .on_hover_text("Your notes on signals, as a file in the catalogue's own columns (in the recordings folder), to send to whoever keeps the catalogue. It names this program's version, the date and the RobotWare version (when logged in to RWS), nothing else about the controller.")
             .on_disabled_hover_text("No notes yet: add yours in a signal's details.")
             .clicked()

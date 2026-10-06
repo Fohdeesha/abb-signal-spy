@@ -429,7 +429,7 @@ impl SpyApp {
         let mut login = false;
         let mut logout = false;
         let mut dirty = false;
-        egui::Window::new("Controller details (RWS)").open(&mut open).collapsible(false).default_width(460.0).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
+        theme::window("controller details (RWS)", ctx).open(&mut open).vscroll(true).default_width(460.0).show(ctx, |ui| {
             ui.label(RichText::new("Read-only: the controller's name and RobotWare version, its event log on the charts, and a motor's commutator offset. The login is not stored anywhere.").small().weak());
             let st = self.session.status().clone();
             match &self.rws {
@@ -443,7 +443,24 @@ impl SpyApp {
                         ui.label(RichText::new(&target.host).monospace());
                         ui.end_row();
                         ui.label("RWS port");
-                        ui.add(egui::DragValue::new(&mut self.settings.rws_port).range(1..=65535)).on_hover_text("80 on a real IRC5; a virtual controller's may differ");
+                        ui.horizontal(|ui| {
+                            let id = egui::Id::new("rws-port-text");
+                            let mut text = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| self.settings.rws_port.to_string());
+                            let width = fields::width_for(ui, "65535");
+                            let r = fields::line(ui, &mut text, "RWS port", |t| t.desired_width(width).char_limit(5)).on_hover_text("80 on a real IRC5; a virtual controller's may differ");
+                            match text.trim().parse::<u16>() {
+                                Ok(port) if port > 0 => {
+                                    if r.changed() && port != self.settings.rws_port {
+                                        self.settings.rws_port = port;
+                                        self.mark_settings_dirty();
+                                    }
+                                }
+                                _ => {
+                                    ui.colored_label(theme::pal(ui).red, "a port is 1 to 65535");
+                                }
+                            }
+                            ui.data_mut(|d| d.insert_temp(id, text));
+                        });
                         ui.end_row();
                         ui.label("user");
                         fields::line(ui, &mut self.rws_form.user, "RWS user", |t| t);
@@ -482,7 +499,7 @@ impl SpyApp {
                             ui.end_row();
                         });
                         let mut on = self.settings.rws_events;
-                        if ui.checkbox(&mut on, "event log on the charts and in recordings (a look every 5 s)").changed() {
+                        if theme::check(ui, &mut on, "event log on the charts and in recordings (a look every 5 s)").changed() {
                             self.settings.rws_events = on;
                             l.events_on.store(on, Ordering::SeqCst);
                             dirty = true;
@@ -495,7 +512,13 @@ impl SpyApp {
                         }
                     }
                     None => {
-                        ui.label(format!("Logging in to {}:{} ...", l.target.host, l.port));
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(format!("Logging in to {}:{} ...", l.target.host, l.port));
+                        });
+                        if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Stop waiting for the controller's answer").clicked() {
+                            logout = true;
+                        }
                     }
                 },
             }

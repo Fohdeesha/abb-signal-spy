@@ -34,6 +34,9 @@ pub struct Pal {
     pub stale_face: Color32,
     pub stale_edge: Color32,
     pub picked: Color32,
+    pub strong: Color32,
+    pub open: Color32,
+    pub teal: Color32,
 }
 
 pub const DARK: Pal = Pal {
@@ -44,7 +47,7 @@ pub const DARK: Pal = Pal {
     ink2: Color32::from_rgb(0xc9, 0xc8, 0xc2),
     ink3: Color32::from_rgb(0xba, 0xb9, 0xb3),
     red: Color32::from_rgb(0xff, 0x56, 0x46),
-    link: Color32::from_rgb(0xff, 0x6a, 0x5a),
+    link: Color32::from_rgb(0x8a, 0xb4, 0xff),
     live: Color32::from_rgb(0x52, 0xd9, 0x8a),
     hold: Color32::from_rgb(0xff, 0xb5, 0x41),
     field: Color32::from_rgb(0x11, 0x11, 0x11),
@@ -69,6 +72,9 @@ pub const DARK: Pal = Pal {
     stale_face: Color32::from_rgb(0x24, 0x1d, 0x0e),
     stale_edge: Color32::from_rgb(0x8a, 0x64, 0x20),
     picked: Color32::from_rgb(0x2c, 0x2c, 0x2a),
+    strong: Color32::from_rgb(0x6a, 0xa7, 0xff),
+    open: Color32::from_rgb(0xd6, 0x9b, 0xd0),
+    teal: Color32::from_rgb(0x76, 0xb7, 0xb2),
 };
 
 pub const LIGHT: Pal = Pal {
@@ -79,7 +85,7 @@ pub const LIGHT: Pal = Pal {
     ink2: Color32::from_rgb(0x3a, 0x39, 0x35),
     ink3: Color32::from_rgb(0x3f, 0x3e, 0x3a),
     red: Color32::from_rgb(0xa8, 0x1c, 0x10),
-    link: Color32::from_rgb(0xa8, 0x1c, 0x10),
+    link: Color32::from_rgb(0x0b, 0x4f, 0xb3),
     live: Color32::from_rgb(0x0f, 0x5f, 0x30),
     hold: Color32::from_rgb(0x7a, 0x49, 0x00),
     field: Color32::from_rgb(0xff, 0xff, 0xff),
@@ -104,6 +110,9 @@ pub const LIGHT: Pal = Pal {
     stale_face: Color32::from_rgb(0xfb, 0xf1, 0xda),
     stale_edge: Color32::from_rgb(0xb0, 0x7a, 0x10),
     picked: Color32::from_rgb(0xd9, 0xd8, 0xd2),
+    strong: Color32::from_rgb(0x17, 0x4a, 0x96),
+    open: Color32::from_rgb(0x8a, 0x3d, 0x80),
+    teal: Color32::from_rgb(0x14, 0x5a, 0x55),
 };
 
 pub fn pal_of(dark: bool) -> &'static Pal {
@@ -210,7 +219,7 @@ pub fn keep_together(text: &str) -> String {
 }
 
 pub const TOOL_H: f32 = 36.0;
-pub const SMALL_H: f32 = 30.0;
+pub const SMALL_H: f32 = TOOL_H;
 
 fn style(dark: bool) -> egui::Style {
     let p = pal_of(dark);
@@ -229,7 +238,7 @@ fn style(dark: bool) -> egui::Style {
     s.interaction.selectable_labels = false;
     let sp = &mut s.spacing;
     sp.item_spacing = vec2(8.0, 6.0);
-    sp.button_padding = vec2(12.0, 6.0);
+    sp.button_padding = vec2(BUTTON_PAD, 6.0);
     sp.interact_size = vec2(40.0, TOOL_H);
     sp.window_margin = Margin::same(14);
     sp.menu_margin = Margin::same(6);
@@ -243,8 +252,9 @@ fn style(dark: bool) -> egui::Style {
     sp.menu_width = 360.0;
     sp.combo_height = 400.0;
     sp.scroll = egui::style::ScrollStyle::solid();
-    sp.scroll.bar_width = 12.0;
-    sp.scroll.handle_min_length = 32.0;
+    sp.scroll.bar_width = 16.0;
+    sp.scroll.handle_min_length = 40.0;
+    sp.scroll.foreground_color = true;
 
     let v = &mut s.visuals;
     *v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
@@ -261,7 +271,7 @@ fn style(dark: bool) -> egui::Style {
     v.selection.bg_fill = p.picked;
     v.selection.stroke = Stroke::new(1.0, p.ink);
     v.hyperlink_color = p.link;
-    v.faint_bg_color = if dark { Color32::from_rgb(0x22, 0x22, 0x21) } else { Color32::from_rgb(0xee, 0xed, 0xe8) };
+    v.faint_bg_color = if dark { Color32::from_rgb(0x2a, 0x2a, 0x28) } else { Color32::from_rgb(0xe6, 0xe5, 0xdf) };
     v.extreme_bg_color = p.field;
     v.text_edit_bg_color = Some(p.field);
     v.code_bg_color = p.field;
@@ -298,7 +308,6 @@ pub enum Icon {
     Right,
     Left,
     FoldLeft,
-    FoldRight,
     Expand,
     Collapse,
     Plus,
@@ -318,7 +327,6 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
         Icon::Right => vec![line(&[(-2.5, -5.0), (2.5, 0.0), (-2.5, 5.0)])],
         Icon::Left => vec![line(&[(2.5, -5.0), (-2.5, 0.0), (2.5, 5.0)])],
         Icon::FoldLeft => vec![line(&[(-0.5, -5.0), (-5.0, 0.0), (-0.5, 5.0)]), line(&[(5.5, -5.0), (1.0, 0.0), (5.5, 5.0)])],
-        Icon::FoldRight => vec![line(&[(0.5, -5.0), (5.0, 0.0), (0.5, 5.0)]), line(&[(-5.5, -5.0), (-1.0, 0.0), (-5.5, 5.0)])],
         Icon::Expand => vec![
             line(&[(1.0, -5.5), (5.5, -5.5), (5.5, -1.0)]),
             line(&[(5.5, -5.5), (1.0, -1.0)]),
@@ -375,9 +383,64 @@ pub fn dashed_rect(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
     painter.extend(egui::Shape::dashed_line(&pts, stroke, 5.0, 3.0));
 }
 
-pub fn primary(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response {
+pub fn make_room(ui: &mut egui::Ui, natural: f32) {
+    let row_started = ui.cursor().left() > ui.max_rect().left() + 0.5;
+    if ui.layout().main_wrap && row_started && ui.available_size_before_wrap().x < natural {
+        ui.end_row();
+    }
+}
+
+pub fn lockable(ui: &mut egui::Ui, enabled: bool, button: egui::Button<'_>) -> egui::Response {
+    if enabled && ui.is_enabled() {
+        return ui.add(button);
+    }
+    let under = ui.painter().add(egui::Shape::Noop);
+    let r = ui.add_enabled(false, unframed(button));
+    paint_locked(ui, under, r.rect);
+    r
+}
+
+fn unframed(button: egui::Button<'_>) -> egui::Button<'_> {
+    button.fill(Color32::TRANSPARENT).stroke(Stroke::NONE)
+}
+
+pub fn paint_locked(ui: &egui::Ui, under: egui::layers::ShapeIdx, rect: Rect) {
     let p = pal(ui);
-    filled(ui, egui::Button::new(text).min_size(vec2(0.0, height)), (p.primary, p.primary_hover, p.primary_pressed), p.on_primary)
+    ui.painter().set(under, egui::Shape::rect_filled(rect, 0.0, p.off_face));
+    dashed_rect(ui.painter(), rect, Stroke::new(1.0, p.off_edge));
+}
+
+pub fn primary(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response {
+    primary_sized(ui, text, vec2(0.0, height))
+}
+
+pub fn primary_sized(ui: &mut egui::Ui, text: &str, size: Vec2) -> egui::Response {
+    let p = pal(ui);
+    filled(ui, egui::Button::new(text).min_size(size), (p.primary, p.primary_hover, p.primary_pressed), p.on_primary)
+}
+
+pub fn save_menu(ui: &mut egui::Ui, csv_tip: &str, png_tip: &str) -> (bool, bool) {
+    let (mut csv, mut png) = (false, false);
+    let r = drop_button(ui, "save", TOOL_H).on_hover_text("Save the samples in view (CSV) or a picture of the charts (PNG) to the recordings folder");
+    egui::Popup::menu(&r).show(|ui| {
+        if ui.add(egui::Button::new("save csv").min_size(vec2(220.0, TOOL_H))).on_hover_text(csv_tip).clicked() {
+            csv = true;
+            ui.close();
+        }
+        if ui.add(egui::Button::new("save png").min_size(vec2(220.0, TOOL_H))).on_hover_text(png_tip).clicked() {
+            png = true;
+            ui.close();
+        }
+    });
+    (csv, png)
+}
+
+pub fn save_menu_width(ui: &egui::Ui) -> f32 {
+    button_width(ui, "save") + 12.0 + ui.spacing().icon_spacing
+}
+
+pub fn widest_button(ui: &egui::Ui, texts: &[&str]) -> f32 {
+    texts.iter().map(|t| button_width(ui, t)).fold(0.0, f32::max)
 }
 
 pub fn red_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response {
@@ -386,6 +449,9 @@ pub fn red_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response
 }
 
 fn filled(ui: &mut egui::Ui, button: egui::Button<'_>, (rest, hover, pressed): (Color32, Color32, Color32), text: Color32) -> egui::Response {
+    if !ui.is_enabled() {
+        return lockable(ui, false, button);
+    }
     ui.scope(|ui| {
         let w = &mut ui.visuals_mut().widgets;
         for (v, fill) in [(&mut w.inactive, rest), (&mut w.hovered, hover), (&mut w.active, pressed)] {
@@ -407,13 +473,23 @@ pub fn drop_button(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response
     drop_button_text(ui, egui::WidgetText::from(text), height)
 }
 
+const CHEVRON: Vec2 = vec2(12.0, 10.0);
+
 pub fn small_drop_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    drop_button_text(ui, b(text).size(14.0).into(), SMALL_H)
+    drop_button_text(ui, b(text).into(), SMALL_H)
 }
 
 fn drop_button_text(ui: &mut egui::Ui, text: egui::WidgetText, height: f32) -> egui::Response {
+    let natural = text.clone().into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button).size().x + 2.0 * ui.spacing().button_padding.x + ui.spacing().icon_spacing + CHEVRON.x;
+    make_room(ui, natural);
     let id = ui.next_auto_id().with("chevron");
-    let r = egui::Button::new((text, egui::Atom::custom(id, vec2(12.0, 10.0)))).min_size(vec2(0.0, height)).atom_ui(ui);
+    let enabled = ui.is_enabled();
+    let under = ui.painter().add(egui::Shape::Noop);
+    let button = egui::Button::new((text, egui::Atom::custom(id, CHEVRON))).min_size(vec2(0.0, height));
+    let r = if enabled { button } else { unframed(button) }.atom_ui(ui);
+    if !enabled {
+        paint_locked(ui, under, r.response.rect);
+    }
     if let Some(rect) = r.rect(id) {
         let color = ui.style().interact(&r.response).fg_stroke.color;
         paint_icon(ui.painter(), rect, Icon::Down, color);
@@ -433,10 +509,21 @@ pub fn outline_button(ui: &mut egui::Ui, text: &str, color: Color32, height: f32
     .inner
 }
 
+const BUTTON_ICON: f32 = 16.0;
+
+pub fn icon_text_button_width(ui: &egui::Ui, text: &str) -> f32 {
+    button_width(ui, text) + BUTTON_ICON + ui.spacing().icon_spacing
+}
+
+pub fn heading_width(ui: &egui::Ui, text: &str) -> f32 {
+    egui::WidgetText::from(RichText::new(text).font(FontId::new(18.0, bold()))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Body).size().x
+}
+
 pub fn icon_text_button(ui: &mut egui::Ui, icon: Icon, text: &str, height: f32, on: bool) -> egui::Response {
+    make_room(ui, icon_text_button_width(ui, text));
     let id = ui.next_auto_id().with("icon");
     let p = pal(ui);
-    let button = egui::Button::new((egui::Atom::custom(id, vec2(16.0, 16.0)), text)).min_size(vec2(0.0, height));
+    let button = egui::Button::new((egui::Atom::custom(id, vec2(BUTTON_ICON, BUTTON_ICON)), text)).min_size(vec2(0.0, height));
     let r = if on {
         ui.scope(|ui| {
             let w = &mut ui.visuals_mut().widgets;
@@ -467,16 +554,45 @@ pub fn time_axis<'a>(p: &Pal, fmt: impl Fn(egui_plot::GridMark, &std::ops::Range
     egui_plot::AxisHints::new_x().formatter(fmt).label_spacing(92.0..=93.0).tick_label_font(FontId::monospace(14.0)).tick_label_color(p.ink2)
 }
 
-pub fn value_axis<'a>(p: &Pal) -> egui_plot::AxisHints<'a> {
-    egui_plot::AxisHints::new_y().label_spacing(22.0..=23.0).min_thickness(52.0).tick_label_font(FontId::monospace(14.0)).tick_label_color(p.ink2)
+pub fn window_room(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - 90.0).max(200.0)
 }
+
+pub fn window<'a>(title: impl Into<egui::WidgetText>, ctx: &egui::Context) -> egui::Window<'a> {
+    egui::Window::new(title).collapsible(false).max_height(window_room(ctx)).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center())
+}
+
+pub fn legend() -> egui_plot::Legend {
+    egui_plot::Legend::default().position(egui_plot::Corner::LeftTop).background_alpha(1.0).hidden_items(std::iter::empty::<egui::Id>())
+}
+
+pub fn value_axis<'a>(p: &Pal) -> egui_plot::AxisHints<'a> {
+    let px = crate::charts::VALUE_LABEL_PX;
+    egui_plot::AxisHints::new_y().formatter(|mark, _| crate::charts::value_label(mark)).label_spacing((px - 1.0)..=px).min_thickness(52.0).tick_label_font(FontId::monospace(14.0)).tick_label_color(p.ink2)
+}
+
+pub fn value_axis_across<'a>(p: &Pal) -> egui_plot::AxisHints<'a> {
+    let px = crate::charts::VALUE_LABEL_ACROSS_PX;
+    egui_plot::AxisHints::new_x().formatter(|mark, _| crate::charts::value_label(mark)).label_spacing((px - 1.0)..=px).tick_label_font(FontId::monospace(14.0)).tick_label_color(p.ink2)
+}
+
+pub fn collapse_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
+    let icon = if openness > 0.5 { Icon::Down } else { Icon::Right };
+    let color = ui.style().interact(response).fg_stroke.color;
+    paint_icon(ui.painter(), Rect::from_center_size(response.rect.left_center() + vec2(10.0, 0.0), vec2(12.0, 12.0)), icon, color);
+}
+
+pub const COMBO_ICON_W: f32 = 14.0;
+pub const COMBO_ICON_GAP: f32 = 6.0;
 
 pub fn combo_icon(ui: &egui::Ui, rect: Rect, visuals: &egui::style::WidgetVisuals, _open: bool) {
     paint_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(12.0, 10.0)), Icon::Down, visuals.fg_stroke.color);
 }
 
+pub const VRULE_W: f32 = 9.0;
+
 pub fn vrule(ui: &mut egui::Ui, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(9.0, height), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(VRULE_W, height), Sense::hover());
     ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, pal(ui).line));
 }
 
@@ -505,12 +621,57 @@ pub fn upright_label(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Res
     r
 }
 
-pub fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
-    chip_sized(ui, on, b(text), (24.0, 34.0))
+pub fn check(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let edge = Stroke::new(1.0, pal(ui).ink);
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for v in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+            v.bg_stroke = edge;
+        }
+        ui.checkbox(on, text)
+    })
+    .inner
 }
 
+pub fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
+    chip_sized(ui, on, b(text), (24.0, TOOL_H))
+}
+
+pub fn chip_tall(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
+    chip_sized(ui, on, b(text), (24.0, 40.0))
+}
+
+pub fn chip_tall_width(ui: &egui::Ui, text: &str) -> f32 {
+    egui::WidgetText::from(b(text)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button).size().x + 24.0
+}
+
+pub const CHIP_PAD: f32 = 18.0;
+pub const BUTTON_PAD: f32 = 12.0;
+pub const LIST_LEAST_H: f32 = 60.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChipFit {
+    pub pad: f32,
+    pub button_pad: f32,
+    pub gap: f32,
+}
+
+pub const CHIP_FITS: [ChipFit; 3] = [ChipFit { pad: CHIP_PAD, button_pad: BUTTON_PAD, gap: 6.0 }, ChipFit { pad: 10.0, button_pad: 6.0, gap: 6.0 }, ChipFit { pad: 6.0, button_pad: 4.0, gap: 4.0 }];
+
 pub fn small_chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
-    chip_sized(ui, on, b(text).size(14.0), (18.0, SMALL_H))
+    small_chip_padded(ui, on, text, CHIP_PAD)
+}
+
+pub fn small_chip_padded(ui: &mut egui::Ui, on: bool, text: &str, pad: f32) -> egui::Response {
+    chip_sized(ui, on, b(text), (pad, SMALL_H))
+}
+
+pub fn bold_text_w(ui: &egui::Ui, text: &str) -> f32 {
+    egui::WidgetText::from(b(text)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button).size().x
+}
+
+pub fn drop_button_width(ui: &egui::Ui, text: &str, padding: f32) -> f32 {
+    bold_text_w(ui, text) + 2.0 * padding + ui.spacing().icon_spacing + CHEVRON.x
 }
 
 fn chip_sized(ui: &mut egui::Ui, on: bool, text: RichText, (pad, height): (f32, f32)) -> egui::Response {
@@ -527,7 +688,7 @@ fn chip_sized(ui: &mut egui::Ui, on: bool, text: RichText, (pad, height): (f32, 
             if r.hovered() {
                 ui.painter().rect_filled(rect, 0.0, p.face_hover);
             }
-            dashed_rect(ui.painter(), rect, Stroke::new(1.0, p.field_edge_hover));
+            ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, p.field_edge_hover), egui::StrokeKind::Inside);
             p.ink
         };
         ui.painter().galley(rect.center() - galley.size() / 2.0, galley, text_color);
@@ -535,13 +696,17 @@ fn chip_sized(ui: &mut egui::Ui, on: bool, text: RichText, (pad, height): (f32, 
     r
 }
 
-pub fn split(ui: &mut egui::Ui, arrow_name: &str, main: impl FnOnce(&mut egui::Ui) -> egui::Response, settings: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+pub const SPLIT_ARROW_W: f32 = 32.0;
+
+pub fn split(ui: &mut egui::Ui, arrow_name: &str, main_w: f32, main: impl FnOnce(&mut egui::Ui) -> egui::Response, settings: impl FnOnce(&mut egui::Ui, bool)) -> egui::Response {
+    make_room(ui, main_w + SPLIT_ARROW_W);
     let r = main(ui);
     ui.add_space(-ui.spacing().item_spacing.x);
-    let arrow = icon_button(ui, Icon::Down, arrow_name, vec2(32.0, r.rect.height()));
+    let arrow = icon_button(ui, Icon::Down, arrow_name, vec2(SPLIT_ARROW_W, r.rect.height()));
+    let opened = arrow.clicked();
     egui::Popup::from_toggle_button_response(&arrow).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_min_width(260.0);
-        settings(ui);
+        settings(ui, opened);
     });
     r
 }
@@ -568,7 +733,9 @@ pub fn section<R>(ui: &mut egui::Ui, number: &str, title: &str, strong: bool, ri
 
 fn heading(ui: &mut egui::Ui, number: &str, title: &str) {
     let p = pal(ui);
-    ui.label(RichText::new(number).font(FontId::new(18.0, bold())).color(p.red));
+    if !number.is_empty() {
+        ui.label(RichText::new(number).font(FontId::new(18.0, bold())).color(p.red));
+    }
     if !title.is_empty() {
         ui.label(RichText::new(title).font(FontId::new(18.0, bold())).color(p.ink));
     }
@@ -579,7 +746,7 @@ pub fn section_tools(ui: &mut egui::Ui, number: &str, title: &str, left_w: f32, 
     let title_w = [number, title].iter().filter(|t| !t.is_empty()).map(|t| egui::WidgetText::from(RichText::new(*t).font(FontId::new(18.0, bold()))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Body).size().x + ui.spacing().item_spacing.x).sum::<f32>();
     let one_row = title_w + left_w + right_w + 24.0 <= ui.available_width();
     let mut right = Some(right);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.set_min_height(TOOL_H);
         heading(ui, number, title);
         left(ui);
@@ -593,6 +760,32 @@ pub fn section_tools(ui: &mut egui::Ui, number: &str, title: &str, left_w: f32, 
     let y = ui.cursor().top() + 1.0;
     ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, p.line));
     ui.add_space(8.0);
+}
+
+pub fn pair_fits(ui: &egui::Ui, texts: [&str; 2]) -> bool {
+    texts.iter().map(|t| button_width(ui, t)).sum::<f32>() + ui.spacing().item_spacing.x <= ui.available_width()
+}
+
+pub fn pair(ui: &mut egui::Ui, texts: [&str; 2], height: f32, mut add: impl FnMut(&mut egui::Ui, usize, Vec2)) {
+    let room = ui.available_width();
+    let half = ((room - ui.spacing().item_spacing.x) / 2.0).floor();
+    if texts.iter().all(|t| button_width(ui, t) <= half) {
+        ui.horizontal(|ui| {
+            for k in 0..2 {
+                add(ui, k, vec2(half, height));
+            }
+        });
+    } else if pair_fits(ui, texts) {
+        ui.horizontal(|ui| {
+            for k in 0..2 {
+                add(ui, k, vec2(0.0, height));
+            }
+        });
+    } else {
+        for k in 0..2 {
+            add(ui, k, vec2(room, height));
+        }
+    }
 }
 
 pub fn buttons_width(ui: &egui::Ui, texts: &[&str], extra: f32) -> f32 {
@@ -616,6 +809,28 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32, tip: &str) -> egui::
     ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     if tip.is_empty() { r } else { r.on_hover_text(tip) }
+}
+
+pub const CHIP_H: f32 = 28.0;
+
+pub fn badge_button_width(ui: &egui::Ui, text: &str) -> f32 {
+    egui::WidgetText::from(b(text).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Small).size().x + 10.0 + 6.0 + 14.0 + 8.0
+}
+
+pub fn badge_button(ui: &mut egui::Ui, text: &str, color: Color32, tip: &str) -> egui::Response {
+    let galley = egui::WidgetText::from(b(text).size(14.0)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Small);
+    let mark = 14.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(10.0 + galley.size().x + 6.0 + mark + 8.0, CHIP_H), Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), galley.text()));
+    if ui.is_rect_visible(rect) {
+        let p = pal(ui);
+        let (fill, edge) = if r.is_pointer_button_down_on() { (p.face_pressed, 2.0) } else if r.hovered() { (p.face_hover, 2.0) } else { (Color32::TRANSPARENT, 1.0) };
+        ui.painter().rect(rect, 0.0, fill, Stroke::new(edge, color), egui::StrokeKind::Inside);
+        ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, color);
+        let at = Rect::from_center_size(pos2(rect.right() - 8.0 - mark / 2.0, rect.center().y), vec2(mark, mark));
+        paint_icon(ui.painter(), at, Icon::Close, color);
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
 #[cfg(test)]
@@ -643,12 +858,22 @@ mod tests {
                     assert!(c >= 7.0, "{name}: {text} on {bg} is {c:.2}:1");
                 }
             }
-            for (word, t) in [("red", p.red), ("link", p.link), ("live", p.live), ("hold", p.hold)] {
+            assert!(p.link.b() > p.link.r(), "{name}: a link reads as an error when it is red");
+            for (word, t) in [("red", p.red), ("link", p.link), ("live", p.live), ("hold", p.hold), ("strong", p.strong), ("open", p.open), ("teal", p.teal)] {
                 for (bg, g) in [("sheet", p.sheet), ("page", p.page), ("stale face", p.stale_face)] {
                     let c = contrast(t, g);
                     assert!(c >= 4.5, "{name}: {word} on {bg} is {c:.2}:1");
                 }
             }
+            let faint = style(name == "dark").visuals.faint_bg_color;
+            assert!(contrast(faint, p.sheet) >= 1.15, "{name}: striped rows do not show: {:.2}:1", contrast(faint, p.sheet));
+            for t in [p.ink, p.ink2, p.ink3] {
+                assert!(contrast(t, faint) >= 7.0, "{name}: text on a stripe is {:.2}:1", contrast(t, faint));
+            }
+            let a = crate::charts::STALE_SHADE;
+            let mix = |h: u8, g: u8| (f32::from(h) * a + f32::from(g) * (1.0 - a)).round() as u8;
+            let shaded = Color32::from_rgb(mix(p.hold.r(), p.plot.r()), mix(p.hold.g(), p.plot.g()), mix(p.hold.b(), p.plot.b()));
+            assert!(contrast(shaded, p.plot) >= 1.35, "{name}: the stale shading is {:.2}:1 on the plot", contrast(shaded, p.plot));
             assert!(contrast(p.on_primary, p.primary) >= 7.0, "{name}: a primary button's label");
             assert!(contrast(p.on_primary, p.primary_hover) >= 7.0 && contrast(p.on_primary, p.primary_pressed) >= 7.0, "{name}: a primary button's label, pressed or hovered");
             for f in [p.panic, p.panic_hover, p.panic_pressed] {
@@ -691,6 +916,67 @@ mod tests {
         for name in &fallbacks {
             let credited = [("Ubuntu", "Ubuntu"), ("Hack", "Hack"), ("NotoEmoji", "Noto Emoji"), ("emoji-icon-font", "emoji-icon-font")].iter().any(|(k, c)| name.contains(k) && FALLBACK_FACES.contains(c));
             assert!(credited, "egui compiles in {name}, which is not credited");
+        }
+    }
+
+    #[test]
+    fn the_window_wears_the_programs_own_icon() {
+        let icon = eframe::icon_data::from_png_bytes(crate::WINDOW_ICON).expect("the window icon decodes");
+        assert_eq!((icon.width, icon.height), (64, 64));
+        let alpha = |x: u32, y: u32| icon.rgba[((y * icon.width + x) * 4 + 3) as usize];
+        assert_eq!(alpha(0, 0), 0, "the tile's rounded corner is see-through");
+        assert_eq!(alpha(32, 32), 255);
+        let viewport = crate::options(eframe::Renderer::Glow).viewport;
+        assert_eq!(viewport.icon.map(|i| (i.width, i.height)), Some((64, 64)), "the window opens with egui's own icon");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_program_file_carries_its_icon_for_explorer() {
+        use windows_sys::Win32::System::LibraryLoader::{FindResourceW, GetModuleHandleW};
+        use windows_sys::Win32::UI::WindowsAndMessaging::RT_GROUP_ICON;
+        let first_icon_group = 1usize as windows_sys::core::PCWSTR;
+        let found = unsafe { FindResourceW(GetModuleHandleW(std::ptr::null()), first_icon_group, RT_GROUP_ICON) };
+        assert!(!found.is_null(), "the program file has no icon, so Explorer and the taskbar show a blank one");
+    }
+
+    #[test]
+    fn the_exe_icon_holds_every_size_windows_asks_for() {
+        let ico: &[u8] = include_bytes!("../assets/icon.ico");
+        let u16_at = |i: usize| u16::from_le_bytes([ico[i], ico[i + 1]]);
+        let u32_at = |i: usize| u32::from_le_bytes([ico[i], ico[i + 1], ico[i + 2], ico[i + 3]]);
+        assert_eq!((u16_at(0), u16_at(2)), (0, 1), "an icon file");
+        let mut sizes = Vec::new();
+        for i in 0..usize::from(u16_at(4)) {
+            let at = 6 + 16 * i;
+            let side = if ico[at] == 0 { 256 } else { u32::from(ico[at]) };
+            let (len, offset) = (u32_at(at + 8) as usize, u32_at(at + 12) as usize);
+            let png = &ico[offset..offset + len];
+            let image = eframe::icon_data::from_png_bytes(png).expect("each size decodes");
+            assert_eq!((image.width, image.height), (side, side), "the directory and the picture disagree");
+            sizes.push(side);
+        }
+        for side in [16, 20, 24, 32, 40, 48, 64, 256] {
+            assert!(sizes.contains(&side), "no {side} px picture: {sizes:?}");
+        }
+    }
+
+    #[test]
+    fn a_scroll_bar_is_plain_to_see_and_to_grab() {
+        for (name, dark, p) in [("dark", true, DARK), ("light", false, LIGHT)] {
+            let s = style(dark);
+            let bar = &s.spacing.scroll;
+            assert!(!bar.floating, "{name}: a floating bar hides until the pointer finds it");
+            assert!(bar.bar_width >= 16.0, "{name}: {} px is hard to grab on a touchpad", bar.bar_width);
+            let track = s.visuals.extreme_bg_color;
+            let w = &s.visuals.widgets;
+            for (state, v) in [("at rest", &w.inactive), ("hovered", &w.hovered), ("dragged", &w.active)] {
+                let handle = if bar.foreground_color { v.fg_stroke.color } else { v.bg_fill };
+                for (under, g) in [("its track", track), ("a sheet", p.sheet), ("the page", p.page)] {
+                    let c = contrast(handle, g);
+                    assert!(c >= 4.5, "{name}: the scroll handle {state} on {under} is {c:.2}:1");
+                }
+            }
         }
     }
 

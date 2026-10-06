@@ -57,9 +57,9 @@ pub fn file_name(def: &Derived) -> String {
 
 pub fn offer_text(d: &Derived) -> &'static str {
     match d {
-        Derived::Turn { .. } => "Turn to a target...",
+        Derived::Turn { .. } => "turn to a target...",
         Derived::DutySum { .. } => "PWM duty sum of this axis",
-        Derived::Sag { .. } => "Sag below a plateau",
+        Derived::Sag { .. } => "sag below a plateau",
     }
 }
 
@@ -378,7 +378,7 @@ impl SpyApp {
                         ui.add(egui::Label::new(theme::b(&label)).truncate()).on_hover_text(&formula);
                     });
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let (text, on_target) = value_text(&def, value, h.is_live());
                     let mut rt = theme::num(text, 28.0);
                     if old {
@@ -411,7 +411,7 @@ impl SpyApp {
                 }
                 match &def {
                     Derived::Turn { target_deg, .. } => {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(theme::b("target").size(14.0));
                             let hint = target_deg.map(view::fmt).unwrap_or_else(|| "deg".into());
                             let r = fields::line(ui, &mut self.derived[i].target_text, &format!("Target of {label}"), |t| t.desired_width(80.0).hint_text(hint).char_limit(TARGET_CHARS));
@@ -428,8 +428,7 @@ impl SpyApp {
                                 Err(why) => why,
                                 Ok(_) => "Log in to the controller's RWS first (controller menu).",
                             };
-                            if ui
-                                .add_enabled(rws && instance.is_ok(), egui::Button::new("commutator offset").min_size(egui::vec2(0.0, theme::SMALL_H)))
+                            if theme::lockable(ui, rws && instance.is_ok(), egui::Button::new("commutator offset").min_size(egui::vec2(0.0, theme::SMALL_H)))
                                 .on_hover_text("Read this motor's Commutator Offset (MOTOR_CALIB com_offset) from the controller as the target: what the resolver reads at the commutation position.")
                                 .on_disabled_hover_text(why)
                                 .clicked()
@@ -483,37 +482,39 @@ impl SpyApp {
         let p = theme::pal(ui);
         let def = self.derived[i].live.def().clone();
         let label = self.derived_label(&def);
-        let mut back = false;
-        let mut remove = false;
-        theme::section(ui, "03", "", true, |ui| {
-            if theme::icon_text_button(ui, theme::Icon::Left, "all channels", theme::SMALL_H, false).clicked() {
-                back = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::outline_button(ui, "remove", p.red, theme::SMALL_H).on_hover_text(format!("Remove {label}")).clicked() {
-                    remove = true;
-                }
+        let (back, remove) = crate::channels::options_header(ui, &format!("Remove {label}"));
+        let pair = ["its own chart", "reset min/max"];
+        let rows = if theme::pair_fits(ui, pair) { 1.0 } else { 2.0 };
+        let bottom = 6.0 + rows * (fields::HEIGHT + ui.spacing().item_spacing.y) + 4.0;
+        let formula = self.derived_formula(&def);
+        let color = self.derived[i].color;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height((ui.available_height() - bottom).max(theme::LIST_LEAST_H)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                theme::square(ui, color, 14.0);
+                ui.add(egui::Label::new(RichText::new(&label).font(egui::FontId::new(20.0, theme::bold()))).wrap());
             });
+            ui.add(egui::Label::new(RichText::new(formula).size(14.0).color(p.ink2)).wrap());
+            ui.label(RichText::new("Computed here from its inputs; never streamed, and never written into a recording as data (a recording keeps how, and a review computes it again).").size(14.0).color(p.ink3));
         });
-        ui.horizontal(|ui| {
-            theme::square(ui, self.derived[i].color, 14.0);
-            ui.add(egui::Label::new(RichText::new(&label).font(egui::FontId::new(20.0, theme::bold()))).wrap());
-        });
-        ui.add(egui::Label::new(RichText::new(self.derived_formula(&def)).size(14.0).color(p.ink2)).wrap());
-        ui.label(RichText::new("Computed here from its inputs; never streamed, and never written into a recording as data (a recording keeps how, and a review computes it again).").size(14.0).color(p.ink3));
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         let own = !self.chans.iter().any(|c| c.lane == self.derived[i].lane) && self.derived.iter().filter(|d| d.lane == self.derived[i].lane).count() == 1;
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!own, egui::Button::new("its own chart").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
-                self.derived[i].lane = self.next_lane;
-                self.next_lane += 1;
-                self.mark_settings_dirty();
-            }
-            if ui.add(egui::Button::new("reset min/max").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
-                let upto = self.derived[i].stats.upto;
-                self.derived[i].stats = Stats { upto, ..Stats::default() };
+        let (mut alone, mut reset) = (false, false);
+        theme::pair(ui, pair, fields::HEIGHT, |ui, k, size| {
+            if k == 0 {
+                alone = theme::lockable(ui, !own, egui::Button::new(pair[0]).min_size(size)).on_disabled_hover_text("It has a chart of its own already.").clicked();
+            } else {
+                reset = ui.add(egui::Button::new(pair[1]).min_size(size)).clicked();
             }
         });
+        if alone {
+            self.derived[i].lane = self.next_lane;
+            self.next_lane += 1;
+            self.mark_settings_dirty();
+        }
+        if reset {
+            let upto = self.derived[i].stats.upto;
+            self.derived[i].stats = Stats { upto, ..Stats::default() };
+        }
         if back {
             self.options_for = None;
         }

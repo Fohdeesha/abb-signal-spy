@@ -53,9 +53,19 @@ fn install_crash_file(dir: PathBuf) {
 fn options(renderer: eframe::Renderer) -> eframe::NativeOptions {
     eframe::NativeOptions {
         renderer,
-        viewport: egui::ViewportBuilder::default().with_title("ABB Signal Spy").with_inner_size([1400.0, 860.0]).with_min_inner_size([900.0, 560.0]),
+        viewport: with_icon(egui::ViewportBuilder::default().with_title("ABB Signal Spy").with_inner_size([1400.0, 860.0]).with_min_inner_size(SMALLEST)),
         persist_window: true,
         ..Default::default()
+    }
+}
+
+pub const SMALLEST: [f32; 2] = [900.0, 600.0];
+pub const WINDOW_ICON: &[u8] = include_bytes!("../assets/icon-64.png");
+
+fn with_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    match eframe::icon_data::from_png_bytes(WINDOW_ICON) {
+        Ok(icon) => viewport.with_icon(std::sync::Arc::new(icon)),
+        Err(_) => viewport,
     }
 }
 

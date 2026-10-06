@@ -140,13 +140,21 @@ impl SpyApp {
                 self.toast(spy_core::log::Level::Warn, e);
             }
         }
+        let subject_gone = !cands.iter().any(|(id, _)| *id == st.subject);
+        if let Some(res) = &mut st.result {
+            if subject_gone {
+                st.result = None;
+            } else {
+                res.rows.retain(|r| cands.iter().any(|(id, _)| *id == r.id));
+            }
+        }
         let mut open = true;
         let mut plot: Option<(String, String)> = None;
-        egui::Window::new("Compare").id(egui::Id::new("compare-window")).open(&mut open).default_size([640.0, 420.0]).resizable(true).show(ctx, |ui| {
+        theme::window("compare", ctx).id(egui::Id::new("compare-window")).open(&mut open).default_size([640.0, 420.0]).resizable(true).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("channel").strong());
                 let text = cands.iter().find(|(id, _)| *id == st.subject).map_or_else(|| "choose a channel".to_string(), |(_, t)| t.clone());
-                egui::ComboBox::from_id_salt("compare-subject").selected_text(text).width(220.0).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("compare-subject").selected_text(text).width(220.0).icon(theme::combo_icon).truncate().show_ui(ui, |ui| {
                     for (id, title) in &cands {
                         if ui.selectable_label(st.subject == *id, title).clicked() {
                             st.subject = id.clone();
@@ -164,7 +172,14 @@ impl SpyApp {
                     .weak(),
             );
             let Some(res) = &st.result else {
-                ui.label(RichText::new(if cands.len() < 2 { "Chart at least two channels to compare one with the others." } else { "Nothing compared yet." }).weak());
+                let why = if subject_gone && !st.subject.is_empty() {
+                    "That channel is no longer charted: choose one above."
+                } else if cands.len() < 2 {
+                    "Chart at least two channels to compare one with the others."
+                } else {
+                    "Nothing compared yet."
+                };
+                ui.label(RichText::new(why).weak());
                 return;
             };
             let when = clock(res.at);
@@ -181,17 +196,17 @@ impl SpyApp {
             }
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("compare-rows").striped(true).num_columns(5).show(ui, |ui| {
-                    for h in ["Channel (this)", "pairs", "", &format!("{} =", res.subject_title), ""] {
+                    for h in ["channel (this)", "pairs", "", &format!("{} =", res.subject_title), ""] {
                         ui.label(RichText::new(h).strong());
                     }
                     ui.end_row();
                     for r in &res.rows {
                         let stale = r.health.is_some_and(|h| h != Health::Live);
-                        let mut name = RichText::new(&r.title);
+                        let mut name = RichText::new(if stale { format!("{} (stale)", r.title) } else { r.title.clone() });
                         if stale {
                             name = name.color(theme::pal(ui).hold);
                         }
-                        let name = ui.label(name);
+                        let name = ui.add_sized([210.0, 22.0], egui::Label::new(name).truncate()).on_hover_text(&r.title);
                         if let Some(h) = r.health.filter(|_| stale) {
                             name.on_hover_text(format!("{}: its samples in view are the last received.", h.word()));
                         }
@@ -202,13 +217,18 @@ impl SpyApp {
                         match (r.r(), r.fit) {
                             (Some(_), Some(f)) => {
                                 let sign = if f.offset < 0.0 { "−" } else { "+" };
-                                ui.label(RichText::new(format!("{} × this {sign} {} {}", view::fmt(f.slope), view::fmt(f.offset.abs()), res.subject_units)).monospace());
+                                let formula = format!("{} × this {sign} {} {}", view::fmt(f.slope), view::fmt(f.offset.abs()), res.subject_units);
+                                ui.add_sized([250.0, 22.0], egui::Label::new(RichText::new(&formula).monospace()).truncate()).on_hover_text(&formula);
                             }
                             _ => {
                                 ui.label("");
                             }
                         }
-                        if ui.add_enabled(r.pairs > 0, egui::Button::new("show in xy plot")).on_hover_text(format!("Plot {} (Y) against {} (X)", res.subject_title, r.title)).clicked() {
+                        if theme::lockable(ui, r.pairs > 0, egui::Button::new("show in xy plot"))
+                            .on_hover_text(format!("Plot {} (Y) against {} (X)", res.subject_title, r.title))
+                            .on_disabled_hover_text("No samples of the two at the same controller tick in view.")
+                            .clicked()
+                        {
                             plot = Some((r.id.clone(), res.subject.clone()));
                         }
                         ui.end_row();

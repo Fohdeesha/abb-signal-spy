@@ -43,22 +43,30 @@ pub fn seconds_text(s: f64) -> String {
     SAVE_LAST.iter().find(|(v, _)| (v - s).abs() < 1e-9).map(|(_, t)| t.to_string()).unwrap_or_else(|| format!("{s:.0} s"))
 }
 
-fn red_with_mark(ui: &mut egui::Ui, text: &str, square: bool, enabled: bool) -> egui::Response {
+fn red_with_mark(ui: &mut egui::Ui, text: &str, square: bool, enabled: bool, min_w: f32) -> egui::Response {
     let id = ui.next_auto_id().with("mark");
     let p = theme::pal(ui);
+    let under = ui.painter().add(egui::Shape::Noop);
     let r = ui
         .add_enabled_ui(enabled, |ui| {
+            let button = egui::Button::new((egui::Atom::custom(id, egui::vec2(12.0, 12.0)), text)).min_size(egui::vec2(min_w, fields::HEIGHT));
+            if !enabled {
+                return button.fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE).atom_ui(ui);
+            }
             let w = &mut ui.visuals_mut().widgets;
             for (v, fill) in [(&mut w.inactive, p.panic), (&mut w.hovered, p.panic_hover), (&mut w.active, p.panic_pressed)] {
                 v.weak_bg_fill = fill;
                 v.bg_stroke = egui::Stroke::new(1.0, p.panic);
                 v.fg_stroke = egui::Stroke::new(1.5, p.on_panic);
             }
-            egui::Button::new((egui::Atom::custom(id, egui::vec2(12.0, 12.0)), text)).min_size(egui::vec2(0.0, fields::HEIGHT)).atom_ui(ui)
+            button.atom_ui(ui)
         })
         .inner;
+    if !enabled {
+        theme::paint_locked(ui, under, r.response.rect);
+    }
     if let Some(rect) = r.rect(id) {
-        let c = if enabled { p.on_panic } else { p.on_panic.gamma_multiply(0.75) };
+        let c = if enabled { p.on_panic } else { p.off_edge };
         if square {
             ui.painter().rect_filled(rect, 0.0, c);
         } else {
@@ -76,18 +84,26 @@ impl SpyApp {
         let dir = self.record_dir();
         let mut clicked = false;
         let mut label = std::mem::take(&mut self.rec_label);
+        let record_w = theme::button_width(ui, "stop 00:00:00") + 12.0 + ui.spacing().icon_spacing;
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let r = match &status {
-                None => red_with_mark(ui, "record", false, have).on_hover_text("Record every sample of every channel to a new folder").on_disabled_hover_text(why_not),
-                Some(s) => red_with_mark(ui, &format!("stop {}", clock(s.started.elapsed().as_secs())), true, true).on_hover_text(format!("Recording to {}: {} rows, {}", s.dir.display(), s.rows, size_text(s.bytes))),
+                None => red_with_mark(ui, "record", false, have, record_w).on_hover_text("Record every sample of every channel to a new folder").on_disabled_hover_text(why_not),
+                Some(s) => red_with_mark(ui, &format!("stop {}", clock(s.started.elapsed().as_secs())), true, true, record_w).on_hover_text(format!("Recording to {}: {} rows, {}", s.dir.display(), s.rows, size_text(s.bytes))),
             };
             clicked = r.clicked();
             let arrow = theme::icon_button(ui, theme::Icon::Down, "Recording settings", egui::vec2(32.0, fields::HEIGHT));
+            let opened = arrow.clicked();
             egui::Popup::from_toggle_button_response(&arrow).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.set_min_width(320.0);
-                ui.label(theme::b("name for the next recording"));
-                fields::line(ui, &mut label, "Recording name", |t| t.hint_text("optional, e.g. J2 dip").desired_width(300.0));
+                ui.label(theme::b("name for what is saved next"));
+                let r = fields::line(ui, &mut label, "Recording name", |t| t.hint_text("optional, e.g. J2 dip").desired_width(300.0)).on_hover_text("Names the next recording, slow log, save-last, CSV or picture");
+                if opened {
+                    r.request_focus();
+                }
+                if fields::entered(ui, &r) {
+                    ui.close();
+                }
                 ui.label(RichText::new(format!("in {}", dir.display())).weak());
                 if let Some(s) = &status {
                     ui.separator();
@@ -121,8 +137,7 @@ impl SpyApp {
         let mut chosen = None;
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            let r = ui
-                .add_enabled(have && !busy, egui::Button::new(format!("save last {}", seconds_text(secs))).min_size(egui::vec2(0.0, fields::HEIGHT)))
+            let r = theme::lockable(ui, have && !busy, egui::Button::new(format!("save last {}", seconds_text(secs))).min_size(egui::vec2(0.0, fields::HEIGHT)))
                 .on_hover_text("Save the last seconds of every channel from the live history, e.g. right after a trip")
                 .on_disabled_hover_text(if busy { "Saving..." } else { why_not });
             save = r.clicked();
@@ -152,12 +167,12 @@ impl SpyApp {
         let slow = self.slow.as_ref().map(|r| r.status());
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            let slow_w = theme::button_width(ui, "stop log 00:00:00") + 12.0 + ui.spacing().icon_spacing;
             let r = match &slow {
-                None => ui
-                    .add_enabled(have, egui::Button::new("slow log").min_size(egui::vec2(0.0, fields::HEIGHT)))
+                None => theme::lockable(ui, have, egui::Button::new("slow log").min_size(egui::vec2(slow_w, fields::HEIGHT)))
                     .on_hover_text("Log count, mean, min and max per interval instead of every sample: for runs of hours")
                     .on_disabled_hover_text(why_not),
-                Some(s) => red_with_mark(ui, &format!("stop slow log {}", clock(s.started.elapsed().as_secs())), true, true).on_hover_text(format!("{}: {} rows", s.dir.display(), s.rows)),
+                Some(s) => red_with_mark(ui, &format!("stop log {}", clock(s.started.elapsed().as_secs())), true, true, slow_w).on_hover_text(format!("{}: {} rows", s.dir.display(), s.rows)),
             };
             toggle = r.clicked();
             let arrow = theme::icon_button(ui, theme::Icon::Down, "Slow log interval", egui::vec2(32.0, fields::HEIGHT));
@@ -245,7 +260,7 @@ impl SpyApp {
 
     pub fn phone_switch(&mut self, ui: &mut egui::Ui) {
         let mut on = self.phone.is_some();
-        if ui.checkbox(&mut on, "phone view").on_hover_text("A read-only page for a phone on the same network. Off until switched on; it opens a listening port on this PC while it is on.").changed() {
+        if theme::check(ui, &mut on, "phone view").on_hover_text("A read-only page for a phone on the same network. Off until switched on; it opens a listening port on this PC while it is on.").changed() {
             if on {
                 match PhoneServer::start(self.settings.phone_port, Arc::clone(&self.phone_snapshot)) {
                     Ok(s) => {
