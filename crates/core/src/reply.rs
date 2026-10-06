@@ -5,7 +5,7 @@ pub const MAX_CLIENTS: usize = 64;
 
 pub fn latin1(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    b[..end.min(MAX_REPLY_TEXT)].iter().map(|&c| c as char).collect()
+    b[..end.min(MAX_REPLY_TEXT)].iter().map(|&c| c as char).map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,6 +280,11 @@ mod tests {
         let plain = reply(0, "");
         assert!(!plain.is_failure());
         assert_eq!(plain.stream_id(), None);
+    }
+
+    #[test]
+    fn a_reply_holds_no_control_characters() {
+        assert_eq!(latin1(b"ERROR: x\r\nINFO forged\t\x85\xe9\x00tail"), "ERROR: x  INFO forged  \u{e9}");
     }
 
     #[test]

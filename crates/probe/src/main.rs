@@ -13,7 +13,8 @@ use spy_core::session::{AskPolicy, ChannelState, Options, Phase, SampleBatch, Se
 use spy_core::store::{ChannelKey, Store};
 
 const USAGE: &str = "\
-signal-spy-probe: read-only console probe for ABB IRC5 InfoStream
+signal-spy-probe: console probe for ABB IRC5 InfoStream. It reads test signals: it sets up
+streams for them, and never commands motion or writes RAPID, configuration or I/O.
 
 usage:
   signal-spy-probe list
@@ -24,13 +25,16 @@ usage:
   signal-spy-probe stream HOST[:PORT] [--unit ROB_1] [--seconds 5] [--take] SIGNAL[:AXIS] ...
         define the signals (axis one-based, default 1), stream, and report rates,
         timestamp steps, record types and values
-  signal-spy-probe typed HOST[:PORT] [--unit ROB_1] [--seconds 1.5] [--take] NUMBERS
+  signal-spy-probe typed HOST[:PORT] [--unit ROB_1] [--seconds 1.5] [--take] [--allow-remote] NUMBERS
         stream NUMBERS (e.g. 523-526,849,9869) twelve at a time and report which
-        record type carries each: float, int, string, silent or refused
+        record type carries each: float, int, string, silent or refused. At most
+        20000 numbers; more than 120 on a controller that is not on this PC only
+        with --allow-remote (each refused number is an entry in its event log)
   signal-spy-probe tenancy HOST[:PORT] [--unit ROB_1] [--allow-remote]
         two sessions at once: the first should stop, quietly, as soon as the
         second starts; the second gets nothing until it connects again, and then
-        streams. Loopback only unless --allow-remote.
+        streams. It disturbs every other program streaming from the controller.
+        Loopback only unless --allow-remote.
   signal-spy-probe selftest
         run 'stream' against the built-in fake controller; touches no real controller
   signal-spy-probe rws HOST[:PORT] [USER]
@@ -40,9 +44,15 @@ usage:
         from SPY_RWS_PASSWORD; USER defaults to RobotWare's default user
 
 PORT defaults to 5515 (an IRC5). A virtual controller uses its own port; see 'list'.
---take answers yes to taking InfoStream when other RobAPI clients are connected;
-without it the probe lists them and stops. Every refused signal number writes one
-50228 entry into the controller's event log.";
+--take answers yes to taking InfoStream when other RobAPI clients are connected to a
+controller elsewhere; without it the probe lists them and stops. A virtual controller on
+this PC is not asked about: the probe takes InfoStream from it without asking. Every
+refused signal number writes one 50228 entry into the controller's event log.
+Exit status: 0 when the run went through, 1 when the session stopped or failed, 2 for a
+mistake in the command.";
+
+const TYPED_MAX: usize = 20_000;
+const TYPED_REMOTE_FREE: usize = 120;
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -63,6 +73,10 @@ fn install_ctrl_c() {}
 
 fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
+}
+
+fn ended(stopped: bool) -> ExitCode {
+    if stopped { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
 struct Args {
@@ -127,6 +141,9 @@ fn numbers(spec: &str) -> Result<Vec<u32>, String> {
             out.extend(a..=b);
         } else {
             out.push(part.parse().map_err(|_| format!("bad number {part}"))?);
+        }
+        if out.len() > TYPED_MAX {
+            return Err(format!("at most {TYPED_MAX} numbers in one run"));
         }
     }
     out.dedup();
@@ -334,7 +351,7 @@ impl RunStats {
     }
 
     fn drain(&mut self, tap: &Tap) {
-        while let Ok(ev) = tap.rx.try_recv() {
+        while let Ok(ev) = tap.try_recv() {
             if let TapEvent::Samples(b) = ev {
                 self.feed(&b);
             }
@@ -432,10 +449,11 @@ fn cmd_stream(t: Target, a: &Args, keys: Vec<ChannelKey>) -> ExitCode {
     if let Phase::Stopped { reason } = &st.phase {
         println!("  STOPPED: {reason}");
     }
+    let stopped = matches!(st.phase, Phase::Stopped { .. });
     let ok = s.shutdown(Duration::from_secs(5));
     tail.pump(&log);
     println!("{}", if ok { "torn down cleanly" } else { "teardown did not finish in time" });
-    ExitCode::SUCCESS
+    ended(stopped || !ok)
 }
 
 fn cmd_typed(t: Target, a: &Args, nums: Vec<u32>, unit: MechUnit) -> ExitCode {
@@ -448,6 +466,7 @@ fn cmd_typed(t: Target, a: &Args, nums: Vec<u32>, unit: MechUnit) -> ExitCode {
         return ExitCode::from(1);
     }
     let mut results: Vec<(u32, String, Option<String>, String)> = Vec::new();
+    let mut stopped = false;
     for batch in nums.chunks(12) {
         if interrupted() {
             break;
@@ -469,6 +488,7 @@ fn cmd_typed(t: Target, a: &Args, nums: Vec<u32>, unit: MechUnit) -> ExitCode {
         let st = s.status().clone();
         if matches!(st.phase, Phase::Stopped { .. }) {
             println!("the session stopped; results so far below");
+            stopped = true;
             break;
         }
         for k in &keys {
@@ -498,7 +518,7 @@ fn cmd_typed(t: Target, a: &Args, nums: Vec<u32>, unit: MechUnit) -> ExitCode {
     }
     println!("# {by:?}");
     println!("{}", if ok { "torn down cleanly" } else { "teardown did not finish in time" });
-    ExitCode::SUCCESS
+    ended(stopped || !ok)
 }
 
 fn cmd_tenancy(t: Target, a: &Args, unit: MechUnit) -> ExitCode {
@@ -535,6 +555,7 @@ fn cmd_tenancy(t: Target, a: &Args, unit: MechUnit) -> ExitCode {
     ta.pump(&la);
     tb.pump(&lb);
     let sa_st = sa.status().clone();
+    let a_stopped = matches!(sa_st.phase, Phase::Stopped { .. });
     match &sa_st.phase {
         Phase::Stopped { reason } => println!("A stopped: {reason}"),
         other => println!("A is still {other:?}: it should have stopped when B started"),
@@ -561,7 +582,7 @@ fn cmd_tenancy(t: Target, a: &Args, unit: MechUnit) -> ExitCode {
     }
     let ok_b = sb.shutdown(Duration::from_secs(5));
     println!("{}", if ok_a && ok_b { "both torn down" } else { "a teardown did not finish in time" });
-    ExitCode::SUCCESS
+    ended(!(b_up && a_stopped && ok_a && ok_b))
 }
 
 fn cmd_selftest() -> ExitCode {
@@ -579,47 +600,47 @@ fn cmd_selftest() -> ExitCode {
     cmd_stream(Target { host: "127.0.0.1".into(), port: fake.port() }, &args, keys)
 }
 
-fn main() -> ExitCode {
-    install_ctrl_c();
-    let raw: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = raw.first().cloned() else {
-        println!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    let a = match parse_args(&raw[1..]) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}\n\n{USAGE}");
-            return ExitCode::from(2);
-        }
-    };
-    let unit = match MechUnit::new(&a.unit) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
-    };
+enum Plan {
+    List,
+    Hello(Target),
+    Stream(Target, Vec<ChannelKey>),
+    Typed(Target, Vec<u32>, MechUnit),
+    Tenancy(Target, MechUnit),
+    Selftest,
+    Rws { host: String, port: u16, user: String },
+    Help,
+}
+
+fn plan(cmd: &str, a: &Args) -> Result<Plan, String> {
+    let unit = MechUnit::new(&a.unit).map_err(|e| e.to_string())?;
     let need_target = || -> Result<Target, String> { target(a.rest.first().ok_or("a controller address is needed")?) };
-    let result: Result<ExitCode, String> = (|| match cmd.as_str() {
-        "list" => Ok(cmd_list()),
-        "hello" => Ok(cmd_hello(&need_target()?)),
+    Ok(match cmd {
+        "list" => Plan::List,
+        "hello" => Plan::Hello(need_target()?),
         "stream" => {
-            let keys: Vec<ChannelKey> = a.rest[1..].iter().map(|s| channel(s, &unit)).collect::<Result<_, _>>()?;
+            let t = need_target()?;
+            let keys: Vec<ChannelKey> = a.rest.get(1..).unwrap_or_default().iter().map(|s| channel(s, &unit)).collect::<Result<_, _>>()?;
             if keys.is_empty() {
                 return Err("name at least one SIGNAL[:AXIS]".into());
             }
             if keys.len() > 12 {
                 return Err("at most 12 channels".into());
             }
-            Ok(cmd_stream(need_target()?, &a, keys))
+            Plan::Stream(t, keys)
         }
         "typed" => {
+            let t = need_target()?;
             let nums = numbers(a.rest.get(1).ok_or("give the signal numbers, e.g. 523-526,849")?)?;
-            Ok(cmd_typed(need_target()?, &a, nums, unit.clone()))
+            if nums.len() > TYPED_REMOTE_FREE && !a.allow_remote && !is_loopback(&t) {
+                return Err(format!(
+                    "{} numbers on a controller that is not on this PC: each one it refuses is an entry in its event log. At most {TYPED_REMOTE_FREE} without --allow-remote.",
+                    nums.len()
+                ));
+            }
+            Plan::Typed(t, nums, unit)
         }
-        "tenancy" => Ok(cmd_tenancy(need_target()?, &a, unit.clone())),
-        "selftest" => Ok(cmd_selftest()),
+        "tenancy" => Plan::Tenancy(need_target()?, unit),
+        "selftest" => Plan::Selftest,
         "rws" => {
             let spec = a.rest.first().ok_or("a controller address is needed")?;
             let (host, port) = match spec.rsplit_once(':') {
@@ -627,20 +648,47 @@ fn main() -> ExitCode {
                 None => (spec.clone(), spy_core::rws::DEFAULT_PORT),
             };
             let user = a.rest.get(1).cloned().unwrap_or_else(|| spy_core::rws::DEFAULT_USER.to_string());
-            let password = std::env::var("SPY_RWS_PASSWORD").map_err(|_| "set SPY_RWS_PASSWORD to the RWS password")?;
-            Ok(cmd_rws(&host, port, &user, &password))
+            Plan::Rws { host, port, user }
         }
-        "help" | "--help" | "-h" => {
-            println!("{USAGE}");
-            Ok(ExitCode::SUCCESS)
-        }
-        other => Err(format!("unknown command {other}")),
-    })();
-    match result {
-        Ok(c) => c,
+        "help" | "--help" | "-h" => Plan::Help,
+        other => return Err(format!("unknown command {other}")),
+    })
+}
+
+fn main() -> ExitCode {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let Some(cmd) = raw.first().cloned() else {
+        println!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let planned = parse_args(&raw[1..]).and_then(|a| plan(&cmd, &a).map(|p| (a, p)));
+    let (a, p) = match planned {
+        Ok(x) => x,
         Err(e) => {
             eprintln!("{e}\n\n{USAGE}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
+        }
+    };
+    if matches!(p, Plan::Stream(..) | Plan::Typed(..) | Plan::Tenancy(..) | Plan::Selftest) {
+        install_ctrl_c();
+    }
+    match p {
+        Plan::List => cmd_list(),
+        Plan::Hello(t) => cmd_hello(&t),
+        Plan::Stream(t, keys) => cmd_stream(t, &a, keys),
+        Plan::Typed(t, nums, unit) => cmd_typed(t, &a, nums, unit),
+        Plan::Tenancy(t, unit) => cmd_tenancy(t, &a, unit),
+        Plan::Selftest => cmd_selftest(),
+        Plan::Rws { host, port, user } => match std::env::var("SPY_RWS_PASSWORD") {
+            Ok(password) => cmd_rws(&host, port, &user, &password),
+            Err(_) => {
+                eprintln!("set SPY_RWS_PASSWORD to the RWS password");
+                ExitCode::from(2)
+            }
+        },
+        Plan::Help => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
         }
     }
 }
@@ -659,6 +707,62 @@ mod tests {
             values: BatchValues::Number(vec![0.0; stamps.len()]),
             arrived: SystemTime::UNIX_EPOCH + Duration::from_millis(arrived_ms),
         }
+    }
+
+    fn args(rest: &[&str], allow_remote: bool) -> Args {
+        Args { rest: rest.iter().map(|s| s.to_string()).collect(), unit: "ROB_1".into(), seconds: 0.0, take: false, allow_remote }
+    }
+
+    fn refused(cmd: &str, a: &Args) -> String {
+        match plan(cmd, a) {
+            Err(e) => e,
+            Ok(_) => panic!("{cmd} {:?} was taken", a.rest),
+        }
+    }
+
+    #[test]
+    fn a_command_missing_its_parts_is_refused_not_a_crash() {
+        assert_eq!(refused("stream", &args(&[], false)), "a controller address is needed");
+        assert_eq!(refused("stream", &args(&["127.0.0.1"], false)), "name at least one SIGNAL[:AXIS]");
+        assert!(matches!(plan("stream", &args(&["127.0.0.1", "4002:2"], false)), Ok(Plan::Stream(_, k)) if k.len() == 1));
+        assert_eq!(refused("typed", &args(&[], false)), "a controller address is needed");
+        assert_eq!(refused("hello", &args(&[], false)), "a controller address is needed");
+        assert_eq!(refused("rws", &args(&[], false)), "a controller address is needed");
+        assert!(refused("dance", &args(&[], false)).contains("unknown command"));
+    }
+
+    #[test]
+    fn a_long_typed_run_on_a_controller_elsewhere_needs_saying_so() {
+        let e = refused("typed", &args(&["192.0.2.77", "1-200"], false));
+        assert!(e.contains("200 numbers") && e.contains("--allow-remote"), "{e}");
+        assert!(matches!(plan("typed", &args(&["192.0.2.77", "1-200"], true)), Ok(Plan::Typed(_, n, _)) if n.len() == 200));
+        assert!(matches!(plan("typed", &args(&["192.0.2.77", "1-120"], false)), Ok(Plan::Typed(..))));
+        assert!(matches!(plan("typed", &args(&["127.0.0.1:61000", "1-200"], false)), Ok(Plan::Typed(..))), "a virtual controller on this PC");
+        assert!(numbers("1-20000,20001-40000").unwrap_err().contains("at most 20000"));
+        assert_eq!(numbers("1-20000").map(|n| n.len()), Ok(20_000));
+    }
+
+    #[test]
+    fn a_stream_the_session_stops_ends_with_a_failure() {
+        let fake = spy_core::fake::FakeController::start(spy_core::fake::Behaviour::default()).unwrap();
+        let port = fake.port();
+        let other = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            use std::io::Write;
+            for frame in [spy_core::request::hello(1), spy_core::request::Command::StreamConnect.frame(2, "127.0.0.1"), spy_core::request::Command::UndefineAll.frame(3, "127.0.0.1")] {
+                s.write_all(&frame).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::thread::sleep(Duration::from_secs(6));
+        });
+        let unit = MechUnit::new("ROB_1").unwrap();
+        let a = Args { seconds: 6.0, ..args(&[], false) };
+        let code = cmd_stream(Target { host: "127.0.0.1".into(), port }, &a, vec![channel("6000", &unit).unwrap()]);
+        assert_eq!(code, ExitCode::from(1), "a session another program stopped ended as a success");
+        other.join().unwrap();
+        let fine = cmd_stream(Target { host: "127.0.0.1".into(), port }, &Args { seconds: 1.0, ..args(&[], false) }, vec![channel("6000", &unit).unwrap()]);
+        assert_eq!(fine, ExitCode::SUCCESS);
     }
 
     #[test]

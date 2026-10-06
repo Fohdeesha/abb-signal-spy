@@ -44,7 +44,7 @@ impl LogBook {
     }
 
     pub fn push(&self, level: Level, text: impl Into<String>) {
-        let text = text.into();
+        let text = one_line(text.into());
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next;
         g.next += 1;
@@ -78,5 +78,28 @@ impl LogBook {
 
     pub fn next_seq(&self) -> u64 {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).next
+    }
+}
+
+fn one_line(text: String) -> String {
+    if text.chars().any(char::is_control) { text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect() } else { text }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_text_cannot_write_lines_of_its_own() {
+        let dir = crate::testdir::TestDir::new("log-lines");
+        let path = dir.join("signal-spy.log");
+        let log = LogBook::new();
+        log.attach_file(File::create(&path).unwrap());
+        log.warn("The controller refused SetProtocol: no\r\n2026-10-06T00:00:00.000Z ERROR forged\u{85}x\u{0}y");
+        log.info("next");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        assert!(text.lines().next().unwrap().ends_with("refused SetProtocol: no  2026-10-06T00:00:00.000Z ERROR forged x y"), "{text:?}");
+        assert!(!log.since(0)[0].text.chars().any(char::is_control));
     }
 }

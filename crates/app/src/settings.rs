@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use spy_core::session::Target;
 
+pub const FILE: &str = "settings.json";
+pub const FORMAT: &str = "abb-signal-spy-settings";
+const KEYS_SINCE_0_2: [&str; 4] = ["phone_port", "slow_interval_ms", "snapshot_s", "rws_port"];
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SavedController {
     pub name: String,
@@ -38,6 +42,7 @@ pub struct SavedDerived {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub format: String,
     pub version: u32,
     pub controllers: Vec<SavedController>,
     pub recent: Vec<Target>,
@@ -66,6 +71,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
+            format: FORMAT.into(),
             version: 1,
             controllers: Vec::new(),
             recent: Vec::new(),
@@ -93,28 +99,89 @@ impl Default for Settings {
     }
 }
 
+pub struct Loaded {
+    pub settings: Settings,
+    pub note: Option<String>,
+    pub locked: Option<String>,
+    pub base: serde_json::Map<String, serde_json::Value>,
+}
+
+fn text_of(bytes: &[u8]) -> Result<String, String> {
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return String::from_utf16(&units).map_err(|_| "it is not UTF-16 throughout".to_string());
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        return String::from_utf16(&units).map_err(|_| "it is not UTF-16 throughout".to_string());
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| "it is not UTF-8 text".to_string())
+}
+
+fn object_of(bytes: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let text = text_of(bytes)?;
+    match serde_json::from_str::<serde_json::Value>(spy_core::util::strip_bom(&text)) {
+        Ok(serde_json::Value::Object(m)) => Ok(m),
+        Ok(_) => Err("it is not a settings object".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+pub fn is_ours(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    match obj.get("format") {
+        Some(f) => f == FORMAT,
+        None => KEYS_SINCE_0_2.iter().all(|k| obj.contains_key(*k)),
+    }
+}
+
+pub fn is_ours_file(path: &Path) -> bool {
+    std::fs::read(path).ok().and_then(|b| object_of(&b).ok()).is_some_and(|o| is_ours(&o))
+}
+
+fn as_map(s: &Settings) -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::to_value(s) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    }
+}
+
 impl Settings {
+    #[cfg(test)]
     pub fn load(path: &Path) -> (Settings, Option<String>) {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
-            Err(e) => return (Settings::default(), Some(format!("Could not read the settings ({e}); using defaults."))),
+        let l = Settings::load_full(path);
+        (l.settings, l.note)
+    }
+
+    pub fn load_full(path: &Path) -> Loaded {
+        let fresh = |note: Option<String>, locked: Option<String>| {
+            let settings = Settings::default();
+            Loaded { base: as_map(&settings), settings, note, locked }
         };
-        let obj = match serde_json::from_str::<serde_json::Value>(spy_core::util::strip_bom(&text)) {
-            Ok(serde_json::Value::Object(m)) => m,
-            other => {
-                let why = match other {
-                    Err(e) => e.to_string(),
-                    Ok(_) => "it is not a settings object".into(),
-                };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return fresh(None, None),
+            Err(e) => {
+                let why = format!("The settings file ({}) could not be read ({e}): defaults are in use this time, and nothing will be saved over it. Close whatever holds it, then start the program again.", path.display());
+                return fresh(Some(why.clone()), Some(why));
+            }
+        };
+        let obj = match object_of(&bytes) {
+            Ok(m) => m,
+            Err(why) => {
                 let aside = path.with_extension(format!("json.bad-{}", spy_core::util::local_stamp(std::time::SystemTime::now())));
-                let _ = std::fs::rename(path, &aside);
-                return (Settings::default(), Some(format!("The settings file could not be read ({why}); it was kept as {} and defaults are in use.", aside.display())));
+                return match std::fs::rename(path, &aside) {
+                    Ok(()) => fresh(Some(format!("The settings file could not be read ({why}); it was kept as {} and defaults are in use.", aside.display())), None),
+                    Err(e) => {
+                        let locked = format!("The settings file ({}) could not be read ({why}), nor set aside ({e}): defaults are in use this time, and nothing will be saved over it.", path.display());
+                        fresh(Some(locked.clone()), Some(locked))
+                    }
+                };
             }
         };
         let mut notes: Vec<String> = Vec::new();
         let d = Settings::default();
         let mut s = Settings {
+            format: FORMAT.into(),
             version: field(&obj, "version", d.version, &mut notes),
             controllers: field(&obj, "controllers", d.controllers, &mut notes),
             recent: field(&obj, "recent", d.recent, &mut notes),
@@ -141,7 +208,8 @@ impl Settings {
         };
         s.sanitize(&mut notes);
         let note = (!notes.is_empty()).then(|| format!("Parts of the settings file ({}) could not be used and were left out (the rest loaded): {}.", path.display(), notes.join("; ")));
-        (s, note)
+        let base = if notes.is_empty() { as_map(&s) } else { serde_json::Map::new() };
+        Loaded { settings: s, note, locked: None, base }
     }
 
     fn sanitize(&mut self, notes: &mut Vec<String>) {
@@ -263,11 +331,32 @@ fn derived(obj: &serde_json::Map<String, serde_json::Value>, notes: &mut Vec<Str
 }
 
 impl Settings {
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, body).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+        spy_core::util::write_whole(path, body.as_bytes())
+    }
+
+    pub fn save_changes(&self, path: &Path, base: &mut serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+        let ours = as_map(self);
+        let mut merged = match std::fs::read(path) {
+            Ok(bytes) => object_of(&bytes).map_err(|why| format!("the settings file was changed outside this window and cannot be read now ({why}); nothing was saved over it"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(e) => return Err(format!("cannot read {} ({e}); nothing was saved over it", path.display())),
+        };
+        if !merged.is_empty() && !is_ours(&merged) {
+            return Err(format!("{} is not this program's settings file any more; nothing was saved over it", path.display()));
+        }
+        for (k, v) in &ours {
+            if base.get(k) != Some(v) || !merged.contains_key(k) {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        merged.insert("format".into(), FORMAT.into());
+        let body = serde_json::to_string_pretty(&serde_json::Value::Object(merged)).map_err(|e| e.to_string())? + "\n";
+        spy_core::util::write_whole(path, body.as_bytes())?;
+        *base = ours;
+        Ok(())
     }
 
     pub fn remember(&mut self, t: &Target) {
@@ -305,6 +394,87 @@ mod tests {
         assert!(!p.exists(), "the bad file is set aside, not overwritten");
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).0, s);
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_never_saved_over() {
+        let dir = TestDir::new("settings-locked");
+        let p = dir.join(FILE);
+        std::fs::create_dir(&p).unwrap();
+        let l = Settings::load_full(&p);
+        assert!(l.locked.is_some() && l.note.as_deref().is_some_and(|n| n.contains("nothing will be saved over it")), "{:?}", l.note);
+        assert!(p.is_dir(), "left as it was");
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let p = dir.join("held.json");
+            std::fs::write(&p, r#"{"dark": false, "controllers": [{"name": "cell", "host": "192.0.2.77", "port": 5515}]}"#).unwrap();
+            let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&p).unwrap();
+            let l = Settings::load_full(&p);
+            assert!(l.locked.is_some(), "a file another program holds open read as defaults to be saved over");
+            drop(held);
+            assert_eq!(Settings::load(&p).0.controllers.len(), 1, "the saved controllers are still there");
+        }
+    }
+
+    #[test]
+    fn a_settings_file_saved_as_utf16_loads() {
+        let dir = TestDir::new("settings-utf16");
+        let p = dir.join(FILE);
+        let text = r#"{"dark": false, "controllers": [{"name": "Jörg's cell", "host": "192.0.2.77", "port": 5515}]}"#;
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&p, bytes).unwrap();
+        let l = Settings::load_full(&p);
+        assert_eq!(l.note, None);
+        assert_eq!(l.settings.controllers[0].name, "Jörg's cell");
+        assert!(!l.settings.dark);
+        std::fs::write(&p, b"{\"dark\": false, \"units\": [\"J\xf6rg\"]}").unwrap();
+        let l = Settings::load_full(&p);
+        assert!(l.note.as_deref().is_some_and(|n| n.contains("kept as")), "{:?}", l.note);
+        assert!(!p.exists());
+    }
+
+    #[test]
+    fn two_windows_keep_each_others_changes() {
+        let dir = TestDir::new("settings-two");
+        let p = dir.join(FILE);
+        Settings::default().save(&p).unwrap();
+        let mut a = Settings::load_full(&p);
+        let mut b = Settings::load_full(&p);
+        a.settings.controllers.push(SavedController { name: "cell".into(), host: "192.0.2.77".into(), port: 5515 });
+        a.settings.save_changes(&p, &mut a.base).unwrap();
+        b.settings.dark = false;
+        b.settings.save_changes(&p, &mut b.base).unwrap();
+        let back = Settings::load(&p).0;
+        assert_eq!(back.controllers.len(), 1, "the controller saved in one window was lost when the other saved");
+        assert!(!back.dark);
+        a.settings.window_s = 30.0;
+        a.settings.save_changes(&p, &mut a.base).unwrap();
+        let back = Settings::load(&p).0;
+        assert!(!back.dark && back.window_s == 30.0, "a window put back what it had not changed");
+    }
+
+    #[test]
+    fn only_this_programs_settings_file_is_taken_for_one() {
+        let dir = TestDir::new("settings-ours");
+        let p = dir.join(FILE);
+        std::fs::write(&p, r#"{"theme": "dark", "recent": ["a.txt"]}"#).unwrap();
+        assert!(!is_ours_file(&p), "another program's settings.json");
+        std::fs::write(&p, "[1, 2]").unwrap();
+        assert!(!is_ours_file(&p));
+        let mut old = as_map(&Settings::default());
+        old.remove("format");
+        old.remove("status_open");
+        std::fs::write(&p, serde_json::to_string(&old).unwrap()).unwrap();
+        assert!(is_ours_file(&p), "one written by 0.2 to 0.4");
+        Settings::default().save(&p).unwrap();
+        assert!(is_ours_file(&p));
+        let mut l = Settings::load_full(&p);
+        std::fs::write(&p, r#"{"theme": "dark"}"#).unwrap();
+        l.settings.dark = false;
+        assert!(l.settings.save_changes(&p, &mut l.base).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), r#"{"theme": "dark"}"#, "another program's file saved over");
     }
 
     fn load_text(tag: &str, text: &str) -> (Settings, Option<String>) {
@@ -372,6 +542,7 @@ mod tests {
     #[test]
     fn every_setting_survives_a_save_and_a_load() {
         let s = Settings {
+            format: FORMAT.into(),
             version: 3,
             controllers: vec![SavedController { name: "cell".into(), host: "192.0.2.77".into(), port: 5515 }],
             recent: vec![Target { host: "10.0.0.2".into(), port: 5515 }],

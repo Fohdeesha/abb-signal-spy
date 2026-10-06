@@ -25,9 +25,13 @@ pub fn display(sig: Option<&Signal>, radians: bool) -> Display {
     let wraps = s.has(catalogue::flag::WRAPPING);
     let (units, factor) = match catalogue::angle_unit(&s.units) {
         Some((deg, k)) if !radians => (deg.to_string(), k),
-        _ => (s.units.clone(), 1.0),
+        _ => (shown_units(&s.units).to_string(), 1.0),
     };
     Display { decimals: auto_decimals(&units), units, factor, wraps }
+}
+
+pub fn shown_units(units: &str) -> &str {
+    if units.trim() == "-" { "" } else { units }
 }
 
 pub const MAX_DECIMALS: u8 = 6;
@@ -47,9 +51,11 @@ pub fn decimals_text(n: usize) -> String {
     if n == 1 { "1 decimal".into() } else { format!("{n} decimals") }
 }
 
+pub const FIXED_UP_TO: f64 = 1e12;
+
 pub fn fmt_to(v: f64, decimals: Option<usize>) -> String {
     match decimals {
-        Some(n) if v.is_finite() => {
+        Some(n) if v.is_finite() && v.abs() < FIXED_UP_TO => {
             let s = format!("{v:.n$}");
             match s.strip_prefix('-') {
                 Some(rest) if rest.chars().all(|c| c == '0' || c == '.') => rest.to_string(),
@@ -58,6 +64,11 @@ pub fn fmt_to(v: f64, decimals: Option<usize>) -> String {
         }
         _ => fmt(v),
     }
+}
+
+pub fn fmt_signed(v: f64, decimals: usize) -> String {
+    let s = fmt_to(v, Some(decimals));
+    if s.starts_with('-') || !v.is_finite() { s } else { format!("+{s}") }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +97,7 @@ fn read_window(ring: &Ring, r: Reading, from: i64, to: i64) -> Vec<f64> {
     match r {
         Reading::ZeroFilled => {
             let mut hold = ZeroHold::new();
-            let prime = from - ZERO_HOLD_MS.ceil() as i64 - 1;
+            let prime = from.saturating_sub(ZERO_HOLD_MS.ceil() as i64 + 1);
             ring.range(prime, to).filter_map(|(t, v)| {
                 let x = hold.apply_at(t, v);
                 (t >= from).then_some(x)
@@ -256,6 +267,54 @@ impl Health {
     pub fn is_live(self) -> bool {
         self == Health::Live
     }
+
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Health::Live => "Live",
+            Health::Stale => "Stale",
+            Health::Waiting => "Waiting",
+            Health::Refused => "Refused",
+            Health::NoReply => "No reply",
+            Health::NotConnected => "Offline",
+            Health::NotOnVc => "Not on a virtual controller",
+            Health::NoEventYet => "No event yet",
+        }
+    }
+}
+
+pub fn age_words(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}\u{a0}ms")
+    } else if ms < 120_000 {
+        format!("{:.1}\u{a0}s", ms as f64 / 1000.0)
+    } else {
+        format!("{}\u{a0}min", ms / 60_000)
+    }
+}
+
+pub fn age_of(t: Option<i64>, tl: &spy_core::timeline::Timeline) -> Option<std::time::Duration> {
+    let wall = tl.wall(t?)?;
+    Some(std::time::SystemTime::now().duration_since(wall).unwrap_or_default())
+}
+
+pub fn is_old(h: Health, has_value: bool) -> bool {
+    has_value && !h.is_live()
+}
+
+pub fn old_note(h: Health, has_value: bool, age: Option<std::time::Duration>) -> Option<String> {
+    if !has_value {
+        return (h == Health::Stale).then(|| "No sample yet".to_string());
+    }
+    if h.is_live() {
+        return None;
+    }
+    Some(match (h, age.map(age_words)) {
+        (Health::Stale, Some(a)) => format!("No sample for {a}: this is not the value now"),
+        (Health::Stale, None) => "No sample now: this is not the value now".to_string(),
+        (h, Some(a)) => format!("{}: last value {a} ago, not the value now", h.sentence()),
+        (h, None) => format!("{}: the last value received, not the value now", h.sentence()),
+    })
 }
 
 pub fn is_text(s: &Signal) -> bool {
@@ -278,7 +337,7 @@ pub fn health(st: Option<&ChannelStatus>, connected: bool, sig: Option<&Signal>,
         ChannelState::Waiting | ChannelState::Defining => Health::Waiting,
         ChannelState::Defined { .. } if event && c.last_arrival.is_none() => Health::NoEventYet,
         ChannelState::Defined { .. } if event => Health::Live,
-        ChannelState::Defined { .. } if c.stale || c.last_arrival.is_none() => {
+        ChannelState::Defined { .. } if c.stale || c.last_arrival.is_none_or(|t| t.elapsed() > c.stale_bound) => {
             if physical && loopback { Health::NotOnVc } else { Health::Stale }
         }
         ChannelState::Defined { .. } => Health::Live,
@@ -457,6 +516,7 @@ mod tests {
             rate: 0.0,
             gaps: 0,
             stale,
+            stale_bound: std::time::Duration::from_secs(1),
         }
     }
 
@@ -473,6 +533,54 @@ mod tests {
         assert_eq!(health(Some(&status(ChannelState::Waiting, 0, false, false, None)), true, torque, false), Health::Waiting);
         let dc = cat.get(5027);
         assert_eq!(health(Some(&status(def.clone(), 0, false, true, None)), true, dc, true), Health::NotOnVc);
+    }
+
+    #[test]
+    fn a_channel_the_worker_has_not_marked_stale_is_stale_once_its_bound_has_passed() {
+        let cat = Catalogue::builtin();
+        let mut s = status(ChannelState::Defined { stream: 215 }, 10, true, false, None);
+        s.stale_bound = std::time::Duration::from_millis(300);
+        assert_eq!(health(Some(&s), true, cat.get(4002), false), Health::Live);
+        s.last_arrival = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(2));
+        assert_eq!(health(Some(&s), true, cat.get(4002), false), Health::Stale, "the worker held up, the last value read as live");
+    }
+
+    #[test]
+    fn an_old_number_says_so_whatever_the_state() {
+        let two_min = Some(std::time::Duration::from_secs(150));
+        assert_eq!(old_note(Health::Live, true, two_min), None);
+        for h in [Health::Stale, Health::NotConnected, Health::Waiting, Health::Refused, Health::NoReply, Health::NotOnVc, Health::NoEventYet] {
+            assert!(is_old(h, true), "{h:?}");
+            let note = old_note(h, true, two_min).unwrap_or_default();
+            assert!(note.contains("not the value now") && note.contains("2\u{a0}min"), "{h:?}: {note}");
+            assert!(!is_old(h, false), "{h:?}: nothing to strike");
+        }
+        assert_eq!(old_note(Health::NotConnected, true, two_min).as_deref(), Some("Offline: last value 2\u{a0}min ago, not the value now"));
+        assert_eq!(old_note(Health::Stale, true, Some(std::time::Duration::from_millis(3200))).as_deref(), Some("No sample for 3.2\u{a0}s: this is not the value now"), "a number kept with its unit on one line");
+        assert_eq!(old_note(Health::Stale, false, None).as_deref(), Some("No sample yet"), "not \"No sample for never\"");
+        assert_eq!(old_note(Health::NotConnected, false, None), None);
+        assert!(!is_old(Health::Live, true));
+    }
+
+    #[test]
+    fn a_window_from_the_start_of_time_does_not_overflow() {
+        let r = ring(&[0.3, 0.0, 0.4]);
+        assert_eq!(window_stats(&r, Reading::ZeroFilled, i64::MIN, i64::MAX).n, 3);
+        assert_eq!(window_stats(&r, Reading::Plain, i64::MIN, i64::MAX).n, 3);
+    }
+
+    #[test]
+    fn a_dash_is_no_unit_and_huge_numbers_keep_their_width() {
+        let cat = Catalogue::builtin();
+        let dash = cat.signals.iter().find(|s| s.units == "-").expect("a signal measured in \"-\"");
+        assert_eq!(display(Some(dash), false).units, "", "0.942708 -");
+        assert_eq!(shown_units("-"), "");
+        assert_eq!(shown_units("V"), "V");
+        assert_eq!(fmt_to(1e300, Some(2)), "1.0000e300", "a number of 300 digits");
+        assert_eq!(fmt_to(123456.789, Some(2)), "123456.79");
+        assert_eq!(fmt_signed(-0.0001, 3), "+0.000", "minus zero");
+        assert_eq!(fmt_signed(-0.26, 3), "-0.260");
+        assert_eq!(fmt_signed(12.5, 3), "+12.500");
     }
 
     #[test]

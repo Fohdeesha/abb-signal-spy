@@ -93,6 +93,42 @@ pub fn local_stamp(t: SystemTime) -> String {
     }
 }
 
+pub fn free_memory() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        unsafe {
+            let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+            m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            (GlobalMemoryStatusEx(&mut m) != 0).then_some(m.ullAvailPageFile)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+pub fn write_whole(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot replace {}: {e}", path.display())
+    })
+}
+
 pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -108,6 +144,28 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_whole_file_is_written_in_one_go_beside_itself() {
+        let dir = crate::testdir::TestDir::new("write-whole");
+        let p = dir.join("settings.json");
+        super::write_whole(&p, b"one").unwrap();
+        super::write_whole(&p, b"two").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"two");
+        let names: Vec<String> = std::fs::read_dir(&*dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["settings.json"], "a temporary file left behind");
+        std::fs::create_dir(dir.join("taken")).unwrap();
+        assert!(super::write_whole(&dir.join("taken"), b"x").is_err());
+        let names = std::fs::read_dir(&*dir).unwrap().count();
+        assert_eq!(names, 2, "a failed write leaves its temporary file");
+    }
+
+    #[test]
+    fn the_memory_free_is_known_on_windows() {
+        if cfg!(windows) {
+            assert!(super::free_memory().is_some_and(|b| b > 0));
+        }
+    }
+
     use super::*;
     use std::time::Duration;
 

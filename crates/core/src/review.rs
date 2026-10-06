@@ -7,6 +7,7 @@ use crate::store::{ChannelKey, Column};
 
 const BLOCK: usize = 256;
 pub const MAX_FILE_BYTES: u64 = 2 << 30;
+const PEAK_PER_FILE_BYTE: f64 = 1.75;
 const RESTART_BACK_MS: i64 = 2_000;
 const MAX_CONTROLLER_MS: i64 = 1 << 40;
 
@@ -116,7 +117,15 @@ fn utc_ms(iso: &str) -> Option<i64> {
 }
 
 pub fn open(dir: &Path, hold: &[u32]) -> Result<Review, String> {
-    open_limited(dir, hold, MAX_FILE_BYTES)
+    open_limited(dir, hold, size_limit(crate::util::free_memory()))
+}
+
+pub fn size_limit(free_memory: Option<u64>) -> u64 {
+    free_memory.map_or(MAX_FILE_BYTES, |free| ((free as f64 / PEAK_PER_FILE_BYTE) as u64).min(MAX_FILE_BYTES))
+}
+
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
 }
 
 fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, String> {
@@ -125,10 +134,10 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     let path = dir.join(file);
     let size = std::fs::metadata(&path).map_err(|e| format!("cannot read {file}: {e}"))?.len();
     if size > max_bytes {
+        let why = if max_bytes < MAX_FILE_BYTES { format!("the memory this PC has free now allows about {}", gb(max_bytes)) } else { format!("this program opens at most {}", gb(MAX_FILE_BYTES)) };
         return Err(format!(
-            "{file} is {:.1} GB, more than this program opens at once ({:.1} GB). A spreadsheet or a script can read it; see the README's Recordings section.",
-            size as f64 / (1u64 << 30) as f64,
-            max_bytes as f64 / (1u64 << 30) as f64
+            "{file} is {}, more than can be opened here ({why}). Close other programs and try again, or read the file with a script: it is plain CSV, one sample a row.",
+            gb(size)
         ));
     }
     let mut notes = Vec::new();
@@ -158,7 +167,8 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     let mut mapper = Mapper { mapping, segment: 0, seg_max: None, at: 0, ran_out: false };
 
     let f = std::fs::File::open(&path).map_err(|e| format!("cannot read {file}: {e}"))?;
-    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None, strict_end: !meta.complete };
+    let whole = recording::ends_with_a_whole_row(&path);
+    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None, strict_end: !meta.complete || !whole };
     let slow = meta.kind == Kind::Slow;
     let want = if slow { 6 } else { 3 };
     let mut by_id: BTreeMap<String, ReviewChannel> = BTreeMap::new();
@@ -218,6 +228,11 @@ fn open_limited(dir: &Path, hold: &[u32], max_bytes: u64) -> Result<Review, Stri
     }
     if let Some(e) = rows.error {
         return Err(format!("{file}: {e}"));
+    }
+    if meta.complete && row < meta.rows_written {
+        notes.push(format!("{file} holds {row} of the {} rows the recording wrote: it is cut short (a copy that did not finish?).", meta.rows_written));
+    } else if meta.complete && !whole {
+        notes.push(format!("{file} does not end with a whole row: its last line was left out."));
     }
     if mapper.ran_out {
         notes.push("The controller's clock restarted more often than the recording has anchors: the times after the last one are estimates.".into());
@@ -617,7 +632,16 @@ mod tests {
     fn a_file_too_large_is_refused_with_a_reason() {
         let d = folder("big", "full", "", "", "controller_ms,channel,value\n100,4002/ROB_1/J1,1\n");
         let e = open_limited(&d, &[], 10).unwrap_err();
-        assert!(e.contains("more than this program opens"), "{e}");
+        assert!(e.contains("more than can be opened here") && e.contains("memory this PC has free"), "{e}");
+        assert!(!e.contains("README") && !e.contains("spreadsheet"), "it pointed somewhere that does not help: {e}");
+    }
+
+    #[test]
+    fn the_size_opened_follows_the_memory_free() {
+        assert_eq!(size_limit(None), MAX_FILE_BYTES, "not known: the fixed limit");
+        assert_eq!(size_limit(Some(u64::MAX)), MAX_FILE_BYTES, "never above it");
+        assert_eq!(size_limit(Some(1_750_000_000)), 1_000_000_000, "the peak of opening fits what is free");
+        assert_eq!(size_limit(Some(0)), 0);
     }
 
     #[test]
@@ -727,8 +751,23 @@ mod tests {
         let r = open(&d, &[]).unwrap();
         assert_eq!(r.channel("4002/ROB_1/J1").unwrap().v, vec![356.7], "a cut-off value read as data");
         assert_eq!(r.bad_rows, 1);
-        let d = folder("uncut", "full", anchors, "", csv);
-        assert_eq!(open(&d, &[]).unwrap().channel("4002/ROB_1/J1").unwrap().v, vec![356.7, 35.0], "a complete file's last line is its own");
+        let d = folder("whole", "full", anchors, "", &format!("{csv}6.1\n"));
+        assert_eq!(open(&d, &[]).unwrap().channel("4002/ROB_1/J1").unwrap().v, vec![356.7, 356.1], "a complete file's last whole row is its own");
+    }
+
+    #[test]
+    fn a_copy_of_a_complete_recording_cut_short_is_said_and_its_last_part_row_left_out() {
+        let anchors = r#"{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}"#;
+        let d = folder("copy-cut", "full", anchors, "", "controller_ms,channel,value\n1000,4002/ROB_1/J1,356.7\n1004,4002/ROB_1/J1,35");
+        let json = std::fs::read_to_string(d.join("recording.json")).unwrap().replace("\"rows_written\": 0", "\"rows_written\": 3");
+        std::fs::write(d.join("recording.json"), json).unwrap();
+        let r = open(&d, &[]).unwrap();
+        assert_eq!(r.channel("4002/ROB_1/J1").unwrap().v, vec![356.7], "a cut value read as 35.0");
+        assert!(r.notes.iter().any(|n| n.contains("2 of the 3 rows") && n.contains("cut short")), "{:?}", r.notes);
+        let d = folder("copy-whole", "full", anchors, "", "controller_ms,channel,value\n1000,4002/ROB_1/J1,356.7\n");
+        let json = std::fs::read_to_string(d.join("recording.json")).unwrap().replace("\"rows_written\": 0", "\"rows_written\": 1");
+        std::fs::write(d.join("recording.json"), json).unwrap();
+        assert!(open(&d, &[]).unwrap().notes.is_empty(), "nothing to say about a whole file");
     }
 
     #[test]

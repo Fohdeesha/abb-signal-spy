@@ -13,6 +13,8 @@ use crate::view::{self, Health};
 
 pub const LAG_MS: i64 = 1000;
 pub const PLATEAU_STEADY: f64 = 0.01;
+pub const ON_TARGET: &str = "ON TARGET";
+pub const TARGET_CHARS: usize = 32;
 
 pub struct DerivedView {
     pub live: Live,
@@ -82,8 +84,8 @@ pub fn decimals(d: &Derived) -> Option<usize> {
 
 pub fn value_text(def: &Derived, v: Option<f64>, live: bool) -> (String, bool) {
     match (def, v) {
-        (Derived::Turn { .. }, Some(x)) if live && x.abs() <= derived::ON_TARGET_DEG => ("ON TARGET".into(), true),
-        (Derived::Turn { .. }, Some(x)) => (format!("{x:+.3}"), false),
+        (Derived::Turn { .. }, Some(x)) if live && x.abs() <= derived::ON_TARGET_DEG => (ON_TARGET.into(), true),
+        (Derived::Turn { .. }, Some(x)) => (view::fmt_signed(x, 3), false),
         (_, Some(x)) => (view::fmt_to(x, decimals(def)), false),
         (_, None) => ("--".into(), false),
     }
@@ -256,7 +258,10 @@ impl SpyApp {
     pub fn set_target(&mut self, i: usize) {
         let text = self.derived[i].target_text.trim().trim_end_matches("deg").trim_end_matches('°').trim().replace(',', ".");
         let Ok(t) = text.parse::<f64>() else {
-            self.toast(Level::Error, format!("\"{}\" is not an angle in degrees.", self.derived[i].target_text.trim()));
+            let typed = self.derived[i].target_text.trim();
+            let shown: String = typed.chars().take(TARGET_CHARS).collect();
+            let more = if typed.chars().count() > TARGET_CHARS { "…" } else { "" };
+            self.toast(Level::Error, format!("\"{shown}{more}\" is not an angle in degrees."));
             return;
         };
         if !t.is_finite() {
@@ -343,13 +348,16 @@ impl SpyApp {
             let def = self.derived[i].live.def().clone();
             let label = self.derived_label(&def);
             let formula = self.derived_formula(&def);
-            let value = view::readout(&self.derived[i].live.lock(), reading(&def));
+            let (value, last_t) = {
+                let ring = self.derived[i].live.lock();
+                (view::readout(&ring, reading(&def)), ring.last().map(|(t, _)| t))
+            };
             let color = self.derived[i].color;
             let units = def.units();
-            let stale = h == Health::Stale;
+            let old = view::is_old(h, value.is_some());
             let s = self.derived[i].stats;
             let cursor = cursors.map(|c| c.get(&def.id()).cloned().unwrap_or_default());
-            let (r, _) = crate::channels::clickable_row(ui, &format!("Options for {label}"), stale, |ui| {
+            let (r, _) = crate::channels::clickable_row(ui, &format!("Options for {label}"), old, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     {
@@ -373,11 +381,10 @@ impl SpyApp {
                 ui.horizontal(|ui| {
                     let (text, on_target) = value_text(&def, value, h.is_live());
                     let mut rt = theme::num(text, 28.0);
-                    if !h.is_live() {
+                    if old {
+                        rt = rt.color(p.ink2).strikethrough();
+                    } else if !h.is_live() {
                         rt = rt.color(p.ink2);
-                        if stale {
-                            rt = rt.strikethrough();
-                        }
                     } else if on_target {
                         rt = rt.color(p.live);
                     }
@@ -394,6 +401,9 @@ impl SpyApp {
                     {
                         ui.label(RichText::new(sag_share(v, *pl)).size(14.0).color(p.ink2));
                     }
+                    if old {
+                        crate::channels::old_label(ui, h, view::age_of(last_t, &st.timeline));
+                    }
                 });
                 let f = |x: f64| if x.is_finite() { view::fmt_to(x, decimals(&def)) } else { "--".into() };
                 if let Some(c) = &cursor {
@@ -404,7 +414,7 @@ impl SpyApp {
                         ui.horizontal(|ui| {
                             ui.label(theme::b("target").size(14.0));
                             let hint = target_deg.map(view::fmt).unwrap_or_else(|| "deg".into());
-                            let r = fields::line(ui, &mut self.derived[i].target_text, &format!("Target of {label}"), |t| t.desired_width(80.0).hint_text(hint));
+                            let r = fields::line(ui, &mut self.derived[i].target_text, &format!("Target of {label}"), |t| t.desired_width(80.0).hint_text(hint).char_limit(TARGET_CHARS));
                             if ui.add(egui::Button::new("set").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                                 set_target = Some(i);
                             }
@@ -575,6 +585,7 @@ mod tests {
         assert_eq!(value_text(&turn, Some(-0.25), true), ("ON TARGET".into(), true), "the tolerance either way");
         assert_eq!(value_text(&turn, Some(0.2), false), ("+0.200".into(), false), "a stale turn is a number, never ON TARGET");
         assert_eq!(value_text(&turn, Some(-0.26), true), ("-0.260".into(), false));
+        assert_eq!(value_text(&turn, Some(-0.0004), false), ("+0.000".into(), false), "minus zero");
         assert_eq!(value_text(&turn, None, true), ("--".into(), false));
         let sag = Derived::Sag { link: key(5027, 1), plateau_v: Some(356.0) };
         assert_eq!(value_text(&sag, Some(0.1), true), ("0.1".into(), false), "only a turn is ever on target");

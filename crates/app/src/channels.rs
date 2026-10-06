@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 
 use spy_core::catalogue::flag;
@@ -17,16 +15,6 @@ pub fn health_color(h: Health, p: &theme::Pal) -> Color32 {
         Health::Stale | Health::NoReply | Health::Waiting | Health::NoEventYet => p.hold,
         Health::Refused | Health::NotOnVc => p.red,
         Health::NotConnected => p.ink2,
-    }
-}
-
-pub fn age_text(at: Option<Instant>) -> String {
-    match at {
-        None => "never".into(),
-        Some(t) => {
-            let ms = t.elapsed().as_millis();
-            if ms < 1000 { format!("{ms} ms") } else if ms < 120_000 { format!("{:.1} s", ms as f64 / 1000.0) } else { format!("{} min", ms / 60_000) }
-        }
     }
 }
 
@@ -69,6 +57,19 @@ pub fn status_word(ui: &mut egui::Ui, h: Health) -> egui::Response {
     })
     .response
     .on_hover_text(health_tip(h))
+}
+
+pub fn old_label(ui: &mut egui::Ui, h: Health, age: Option<std::time::Duration>) {
+    let p = theme::pal(ui);
+    let text = age.map_or_else(|| "old".to_string(), |a| format!("{} old", view::age_words(a)));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(theme::b(text).color(p.hold)).on_hover_text(view::old_note(h, true, age).unwrap_or_default());
+    });
+}
+
+pub fn count_text(streams: usize, derived: usize) -> String {
+    let base = format!("{streams} of {}", spy_core::session::MAX_CHANNELS);
+    if derived == 0 { base } else { format!("{base} · {derived} derived") }
 }
 
 pub fn clickable_row<R>(ui: &mut egui::Ui, name: &str, stale: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> (egui::Response, R) {
@@ -153,7 +154,7 @@ impl SpyApp {
     pub fn channel_table(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal(ui);
         theme::section(ui, "03", "channels", true, |ui| {
-            ui.label(RichText::new(format!("{} of {}", self.chans.len() + self.derived.len(), spy_core::session::MAX_CHANNELS)).color(p.ink2));
+            ui.label(RichText::new(count_text(self.chans.len(), self.derived.len())).color(p.ink2));
             if !self.chans.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new("click for options").size(14.0).color(p.ink3));
@@ -190,13 +191,43 @@ impl SpyApp {
                 self.reset_stats();
             }
             if ui.add(egui::Button::new("remove all").min_size(egui::vec2(0.0, theme::SMALL_H))).clicked() {
-                self.chans.clear();
-                self.options_for = None;
-                self.sync_channels();
+                self.confirm_remove_all = true;
             }
         });
         if open.is_some() {
             self.options_for = open;
+        }
+    }
+
+    pub fn remove_all_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_remove_all {
+            return;
+        }
+        let (n, d) = (self.chans.len(), self.derived.len());
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("remove-all")).show(ctx, |ui| {
+            ui.set_max_width(480.0);
+            ui.heading(format!("Remove all {n} channels?"));
+            let derived = if d == 0 { String::new() } else { format!(" and {d} derived value{}", if d == 1 { "" } else { "s" }) };
+            ui.label(format!("Every channel{derived} goes, with its options (smoothing, scale, decimals) and the charts' layout. A plateau or target set on a derived value goes too."));
+            if self.recorder.is_some() || self.slow.is_some() {
+                ui.label(RichText::new("The recording carries on, with no channels to record.").color(theme::pal(ui).hold));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if theme::red_button(ui, egui::Button::new("remove them all").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                    self.chans.clear();
+                    self.options_for = None;
+                    self.sync_channels();
+                    close = true;
+                }
+                if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || modal.should_close() {
+            self.confirm_remove_all = false;
         }
     }
 
@@ -210,22 +241,24 @@ impl SpyApp {
         let d = view::display(sig.as_ref(), self.chans[i].radians).with_decimals(self.chans[i].decimals);
         let reading = view::reading(sig.as_ref());
         let smooth = self.chans[i].smooth_ms;
-        let (value, is_text) = match self.session.store().get(&key) {
+        let (value, is_text, last_t) = match self.session.store().get(&key) {
             Some(ch) => {
                 let r = ch.lock();
+                let last_t = r.last().map(|(t, _)| t);
                 if r.kind == Some(spy_core::sample::ValueKind::String) {
-                    (r.last_text.clone(), true)
+                    (r.last_text.clone(), true, last_t)
                 } else {
-                    (view::readout_ms(&r, reading, view::readout_window(smooth)).map(|v| d.fmt(v)), false)
+                    (view::readout_ms(&r, reading, view::readout_window(smooth)).map(|v| d.fmt(v)), false, last_t)
                 }
             }
-            None => (None, sig.as_ref().is_some_and(view::is_text)),
+            None => (None, sig.as_ref().is_some_and(view::is_text), None),
         };
         let color = self.chans[i].color;
         let name = view::short_label(&self.catalogue, &key);
-        let stale = matches!(h, Health::Stale);
+        let old = view::is_old(h, value.is_some());
+        let age = cs.as_ref().and_then(|c| c.last_arrival).map(|t| t.elapsed()).or_else(|| view::age_of(last_t, &st.timeline));
         let s = self.chans[i].stats;
-        let (r, _) = clickable_row(ui, &format!("Options for {name}"), stale, |ui| {
+        let (r, _) = clickable_row(ui, &format!("Options for {name}"), old, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 22.0), Sense::hover());
@@ -249,19 +282,20 @@ impl SpyApp {
             ui.horizontal(|ui| {
                 let v = value.clone().unwrap_or_else(|| "--".into());
                 let mut text = if is_text { theme::num(v, 20.0) } else { theme::num(v, 28.0) };
-                if !h.is_live() {
+                if old {
+                    text = text.color(p.ink2).strikethrough();
+                } else if !h.is_live() {
                     text = text.color(p.ink2);
-                    if stale {
-                        text = text.strikethrough();
-                    }
                 }
                 ui.label(text).on_hover_text(readout_tip(reading, smooth));
                 if !is_text {
                     ui.label(RichText::new(&d.units).size(18.0).color(p.ink2));
                 }
-                if stale && let Some(c) = &cs {
+                if old {
+                    old_label(ui, h, age);
+                } else if h == Health::Stale {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(theme::b(format!("{} old", age_text(c.last_arrival))).color(p.hold));
+                        ui.label(theme::b("no sample yet").color(p.hold));
                     });
                 }
             });
@@ -272,7 +306,7 @@ impl SpyApp {
                 let f = |x: f64| if x.is_finite() { d.fmt(x) } else { "--".into() };
                 match cursor {
                     Some(c) => cursor_lines(ui, c, p, d.decimals),
-                    None if !stale => {
+                    None if !old => {
                         let mean = s.mean(reading).unwrap_or(f64::NAN);
                         let one = format!("min {}  max {}  mean {}", f(s.min), f(s.max), f(mean));
                         let fits = ui.fonts_mut(|fo| fo.layout_no_wrap(one.clone(), egui::FontId::monospace(14.0), p.ink2).size().x) <= ui.available_width();
@@ -442,7 +476,8 @@ impl SpyApp {
                 for (l, n) in &lanes {
                     if ui.selectable_label(*l == lane, format!("with {n}")).clicked() && *l != lane {
                         self.chans[i].lane = *l;
-                        if let Some(first) = self.chans.iter().find(|c| c.lane == *l && c.key != key) {
+                        let cat = &self.catalogue;
+                        if let Some(first) = self.chans.iter().find(|c| c.lane == *l && c.key != key && view::display(cat.get(c.key.signal), c.radians).units == units) {
                             self.chans[i].scale = first.scale;
                         }
                         changed = true;
@@ -482,10 +517,12 @@ impl SpyApp {
         let sig = self.catalogue.get(key.signal).cloned();
         let units = view::display(sig.as_ref(), self.chans[i].radians).units;
         let lane = self.chans[i].lane;
-        let first = self.chans.iter().position(|c| c.lane == lane).unwrap_or(i);
+        let cat = &self.catalogue;
+        let on_this_chart = |c: &crate::app::ChanView| c.lane == lane && view::display(cat.get(c.key.signal), c.radians).units == units;
+        let first = self.chans.iter().position(on_this_chart).unwrap_or(i);
         let scale = self.chans[first].scale;
         let unit_floor = crate::charts::min_span_for(&units, sig.as_ref());
-        let shared = self.chans.iter().filter(|c| c.lane == lane).count() > 1;
+        let shared = self.chans.iter().filter(|c| on_this_chart(c)).count() > 1;
         ui.horizontal(|ui| {
             ui.label(theme::b(if units.is_empty() { "vertical scale".to_string() } else { format!("vertical scale, in {units}") }));
             if shared {
@@ -529,10 +566,10 @@ impl SpyApp {
             && s.is_valid()
             && s != scale
         {
-            for c in self.chans.iter_mut().filter(|c| c.lane == lane) {
+            for c in self.chans.iter_mut().filter(|c| on_this_chart(c)) {
                 c.scale = s;
             }
-            self.lane_zoom.retain(|(l, _), _| *l != lane);
+            self.lane_zoom.remove(&(lane, units.clone()));
             self.mark_settings_dirty();
         }
     }

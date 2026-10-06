@@ -87,7 +87,7 @@ pub(crate) fn verdict(row: &Row, subject_samples: usize) -> String {
     match row.fit {
         None => "constant in view".into(),
         Some(Fit { r: None, .. }) => "the channel compared is constant in view".into(),
-        Some(Fit { r: Some(r), .. }) => format!("r = {r:.4}"),
+        Some(Fit { r: Some(r), .. }) => format!("r = {}", view::fmt_to(r, Some(4))),
     }
 }
 
@@ -251,5 +251,6 @@ mod tests {
         assert_eq!(verdict(&row_of("x", 50, None), 100), "the channel compared is constant in view");
         assert_eq!(verdict(&Row { fit: None, ..row_of("x", 50, None) }, 100), "constant in view");
         assert_eq!(verdict(&row_of("x", 50, Some(-0.12345)), 100), "r = -0.1235");
+        assert_eq!(verdict(&row_of("x", 50, Some(-0.00001)), 100), "r = 0.0000", "minus zero");
     }
 }

@@ -255,12 +255,36 @@ fn get_raw(host: &str, port: u16, path: &str, cookies: &str, auth: Option<&str>)
     get_raw_within(host, port, path, cookies, auth, REQUEST_DEADLINE)
 }
 
+fn connect_any(addrs: &[std::net::SocketAddr], until: std::time::Instant, each: Duration) -> Result<TcpStream, RwsError> {
+    let mut last = String::from("no address");
+    for a in addrs {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(a, each.min(left)) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = format!("{a}: {e}"),
+        }
+    }
+    Err(RwsError::Connect(last))
+}
+
+pub fn host_header(host: &str, port: u16) -> String {
+    let bare = host.trim_matches(['[', ']']);
+    if bare.contains(':') { format!("[{bare}]:{port}") } else { format!("{bare}:{port}") }
+}
+
 fn get_raw_within(host: &str, port: u16, path: &str, cookies: &str, auth: Option<&str>, deadline: Duration) -> Result<Response, RwsError> {
     let until = std::time::Instant::now() + deadline;
-    let addr = (host, port).to_socket_addrs().map_err(|e| RwsError::Connect(e.to_string()))?.next().ok_or_else(|| RwsError::Connect(format!("{host} has no address")))?;
-    let mut s = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT.min(deadline)).map_err(|e| RwsError::Connect(e.to_string()))?;
+    let bare = host.trim_matches(['[', ']']);
+    let addrs: Vec<std::net::SocketAddr> = (bare, port).to_socket_addrs().map_err(|e| RwsError::Connect(e.to_string()))?.collect();
+    if addrs.is_empty() {
+        return Err(RwsError::Connect(format!("{host} has no address")));
+    }
+    let mut s = connect_any(&addrs, until, CONNECT_TIMEOUT)?;
     s.set_write_timeout(Some(IO_TIMEOUT)).map_err(|e| RwsError::Connect(e.to_string()))?;
-    let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: application/json\r\nConnection: close\r\n");
+    let mut req = format!("GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n", host_header(host, port));
     if !cookies.is_empty() {
         req += &format!("Cookie: {cookies}\r\n");
     }
@@ -613,6 +637,24 @@ impl EventPoll {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_address_of_a_name_is_tried_and_an_ipv6_host_is_bracketed() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let good = listener.local_addr().unwrap();
+        let closed = {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            l.local_addr().unwrap()
+        };
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let s = connect_any(&[closed, good], until, Duration::from_secs(2)).expect("the second address answers");
+        assert_eq!(s.peer_addr().unwrap(), good);
+        assert!(connect_any(&[closed], until, Duration::from_secs(2)).is_err());
+        assert_eq!(host_header("192.0.2.1", 80), "192.0.2.1:80");
+        assert_eq!(host_header("controller", 80), "controller:80");
+        assert_eq!(host_header("fe80::1", 80), "[fe80::1]:80");
+        assert_eq!(host_header("[fe80::1]", 8080), "[fe80::1]:8080");
+    }
 
     #[test]
     fn md5_as_rfc_1321_gives_it() {

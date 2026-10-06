@@ -170,7 +170,7 @@ impl SpyApp {
         egui::ScrollArea::vertical().id_salt("catalogue-list").max_height((ui.available_height() - bottom).max(0.0)).auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for &(n, count) in &rows[range] {
-                let Some((name, units, frozen)) = self.catalogue.get(n).map(|s| (s.display_name(), s.units.clone(), s.has(flag::FROZEN))) else { continue };
+                let Some((name, units, frozen)) = self.catalogue.get(n).map(|s| (s.display_name(), crate::view::shown_units(&s.units).to_string(), s.has(flag::FROZEN))) else { continue };
                 let noted = self.notes.get(n).is_some();
                 let r = signal_row(ui, n, &name, &units, count, self.selected == Some(n), noted, frozen, row_h);
                 if r.double_clicked() {
@@ -276,7 +276,7 @@ impl SpyApp {
         };
         ui.horizontal_wrapped(|ui| {
             theme::badge(ui, &s.confidence.label().to_uppercase(), confidence_color(s.confidence, p), "confirmed: named by ABB or pinned exactly · strong: reproduced on 12 readings · probable: fits, not forced · open: responds, not identified · inert: returned nothing on the measured cell");
-            if !s.units.is_empty() {
+            if !crate::view::shown_units(&s.units).is_empty() {
                 theme::badge(ui, &s.units, p.ink2, "Its unit");
             }
             if let Some(ms) = s.sample_ms {
@@ -469,22 +469,28 @@ impl SpyApp {
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
-                let unit = MechUnit::new(&d.unit).unwrap_or_else(|_| MechUnit::new("ROB_1").unwrap());
+                let unit = MechUnit::new(&known_unit(&self.settings.units, &d.unit)).unwrap_or_else(|_| MechUnit::new("ROB_1").unwrap());
                 let key = |signal: u32, axis: u8| ChannelKey { signal, unit: unit.clone(), axis: Axis::new(axis).unwrap_or(Axis::new(1).unwrap()) };
+                let missing = |keys: Vec<ChannelKey>| keys.iter().filter(|k| !self.chans.iter().any(|c| &c.key == *k)).count();
                 let enabled = unit_ok && free > 0;
                 let why_not = |n: usize| if !unit_ok { "Type a mechanical unit name first (like ROB_1).".to_string() } else { format!("Needs {n} free channel(s); {free} of {MAX_CHANNELS} free. Remove a channel first.") };
                 if ui.add_enabled_ui(enabled, |ui| theme::primary(ui, "add", fields::HEIGHT)).inner.on_disabled_hover_text(why_not(1)).clicked() {
                     let axis = if select == Select::Axis { d.axis } else { 1 };
                     to_add = Some((vec![key(d.signal, axis)], false));
                 }
-                if select == Select::Axis && ui.add_enabled(unit_ok && free >= 6, egui::Button::new("add all six axes").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Six channels, overlaid in one chart").on_disabled_hover_text(why_not(6)).clicked() {
-                    to_add = Some(((1..=6).map(|a| key(d.signal, a)).collect(), true));
+                if select == Select::Axis {
+                    let need = missing((1..=6).map(|a| key(d.signal, a)).collect());
+                    if ui.add_enabled(unit_ok && need > 0 && need <= free, egui::Button::new("add all six axes").min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("Six channels, overlaid in one chart").on_disabled_hover_text(if need == 0 { "All six are there already.".to_string() } else { why_not(need) }).clicked() {
+                        to_add = Some(((1..=6).map(|a| key(d.signal, a)).collect(), true));
+                    }
                 }
                 if select == Select::Number
                     && let Some(base) = sig.as_ref().and_then(|s| s.joint).and_then(|j| d.signal.checked_sub(u32::from(j.max(1) - 1))).filter(|b| *b > 0 && b.checked_add(5).is_some())
-                    && ui.add_enabled(unit_ok && free >= 6, egui::Button::new(format!("add the block {}-{}", base, base + 5)).min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("All six joints, overlaid in one chart").on_disabled_hover_text(why_not(6)).clicked()
                 {
-                    to_add = Some(((base..base + 6).map(|n| key(n, 1)).collect(), true));
+                    let need = missing((base..base + 6).map(|n| key(n, 1)).collect());
+                    if ui.add_enabled(unit_ok && need > 0 && need <= free, egui::Button::new(format!("add the block {}-{}", base, base + 5)).min_size(egui::vec2(0.0, fields::HEIGHT))).on_hover_text("All six joints, overlaid in one chart").on_disabled_hover_text(if need == 0 { "The block is there already.".to_string() } else { why_not(need) }).clicked() {
+                        to_add = Some(((base..base + 6).map(|n| key(n, 1)).collect(), true));
+                    }
                 }
                 if ui.add(egui::Button::new("cancel").min_size(egui::vec2(0.0, fields::HEIGHT))).clicked() {
                     close = true;
@@ -494,20 +500,20 @@ impl SpyApp {
         if modal.should_close() {
             close = true;
         }
-        if let Some((keys, overlay)) = to_add {
-            if let Ok(u) = MechUnit::new(&d.unit)
-                && !self.settings.units.contains(&u.to_string()) {
-                    self.settings.units.push(u.to_string());
-                    self.mark_settings_dirty();
-                }
-            if self.add_channels(keys, overlay) {
-                close = true;
-            }
+        if let Some((keys, overlay)) = to_add
+            && self.add_channels(keys, overlay)
+        {
+            close = true;
         }
         if !close {
             self.add = Some(d);
         }
     }
+}
+
+pub fn known_unit(units: &[String], typed: &str) -> String {
+    let typed = typed.trim();
+    units.iter().find(|u| u.eq_ignore_ascii_case(typed)).cloned().unwrap_or_else(|| typed.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]

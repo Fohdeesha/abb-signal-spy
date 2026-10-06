@@ -54,7 +54,7 @@ impl SpyApp {
             (lo, hi) if hi - lo <= hi * 0.05 => format!(" · {hi:.0} /s each"),
             (lo, hi) => format!(" · {lo:.0} to {hi:.0} /s"),
         };
-        let channels = format!("{} of {}{rate}", self.chans.len() + self.derived.len(), spy_core::session::MAX_CHANNELS);
+        let channels = format!("{}{rate}", crate::channels::count_text(self.chans.len(), self.derived.len()));
         let recording = match (&self.recorder, &self.slow) {
             (Some(r), slow) => {
                 let s = r.status();

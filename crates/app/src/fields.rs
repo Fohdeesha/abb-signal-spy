@@ -3,6 +3,13 @@ use eframe::egui::{self, Margin, Response, Stroke, TextEdit, Ui};
 use crate::theme;
 
 pub const HEIGHT: f32 = 40.0;
+const MARGIN: Margin = Margin::symmetric(10, 4);
+const CURSOR_ROOM: f32 = 2.0;
+
+pub fn width_for(ui: &Ui, widest: &str) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    ui.fonts_mut(|f| f.layout_no_wrap(widest.to_string(), font, egui::Color32::WHITE).size().x) + MARGIN.sum().x + CURSOR_ROOM
+}
 
 pub fn line(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(TextEdit<'_>) -> TextEdit<'_>) -> Response {
     let edit = TextEdit::singleline(text).min_size(egui::vec2(0.0, HEIGHT)).vertical_align(egui::Align::Center);
@@ -19,7 +26,7 @@ pub fn lines(ui: &mut Ui, text: &mut String, name: &str, shape: impl FnOnce(Text
 
 fn framed(ui: &mut Ui, edit: TextEdit<'_>) -> Response {
     let under = ui.painter().add(egui::Shape::Noop);
-    let r = ui.add(edit.frame(egui::Frame::new().inner_margin(Margin::symmetric(10, 4))));
+    let r = ui.add(edit.frame(egui::Frame::new().inner_margin(MARGIN)));
     let p = theme::pal(ui);
     let rect = r.rect;
     if !r.enabled() {

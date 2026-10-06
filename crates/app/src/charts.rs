@@ -27,6 +27,13 @@ impl Src {
             Src::Derived(r) => r.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
+
+    fn identity(&self) -> usize {
+        match self {
+            Src::Stream(c) => Arc::as_ptr(c) as usize,
+            Src::Derived(r) => Arc::as_ptr(r) as usize,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -52,7 +59,7 @@ impl Member {
         let Some(src) = &self.src else { return Vec::new() };
         let ring = src.lock();
         let mut zh = view::ZeroHold::new();
-        let prime = if self.hold { from - view::ZERO_HOLD_MS.ceil() as i64 - 1 } else { from };
+        let prime = if self.hold { from.saturating_sub(view::ZERO_HOLD_MS.ceil() as i64 + 1) } else { from };
         ring.range(prime, to)
             .filter_map(|(t, v)| {
                 let v = if self.hold { zh.apply_at(t, v) } else { v };
@@ -130,6 +137,52 @@ pub fn range_stats(values: impl Iterator<Item = f64>) -> RangeStats {
     RangeStats { n, mean, min, max, sd: if n > 1 { (m2 / (n - 1) as f64).sqrt() } else { 0.0 } }
 }
 
+pub fn column_grid(from: i64, to: i64, columns: usize) -> (i64, i64, usize) {
+    let width = ((to - from).max(1) as u64).div_ceil(columns.max(1) as u64).max(1) as i64;
+    let start = from.div_euclid(width) * width;
+    let count = (to - start).max(1).div_euclid(width) as usize + 1;
+    (start, start + count as i64 * width, count)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ColumnsKey {
+    ring: usize,
+    generation: u64,
+    gap_bits: u64,
+    from: i64,
+    to: i64,
+    px: usize,
+    smooth: i64,
+    hold: bool,
+    factor_bits: u64,
+}
+
+pub(crate) type ColumnCache = HashMap<String, (ColumnsKey, Arc<Vec<Vec<Column>>>)>;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn columns_of(cache: &mut ColumnCache, id: &str, ring_id: usize, ring: &Ring, from: i64, to: i64, px: usize, smooth: i64, hold: bool, factor: f64) -> Arc<Vec<Vec<Column>>> {
+    let (grid_from, grid_to, grid_px) = column_grid(from, to, px);
+    let key = ColumnsKey { ring: ring_id, generation: ring.generation(), gap_bits: ring.gap_ms().to_bits(), from: grid_from, to: grid_to, px: grid_px, smooth, hold, factor_bits: factor.to_bits() };
+    if let Some((k, segs)) = cache.get(id)
+        && *k == key
+    {
+        return segs.clone();
+    }
+    let mut zh = view::ZeroHold::new();
+    if hold && smooth == 0 {
+        for (t, v) in ring.range(grid_from.saturating_sub(view::ZERO_HOLD_MS.ceil() as i64 + 1), grid_from) {
+            zh.apply_at(t, v);
+        }
+    }
+    let segs = Arc::new(if smooth > 0 {
+        smoothed(ring, grid_from, grid_to, grid_px, smooth, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor)
+    } else {
+        ring.decimate_at(grid_from, grid_to, grid_px, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor)
+    });
+    cache.insert(id.to_string(), (key, segs.clone()));
+    segs
+}
+
 pub(crate) fn smoothed(ring: &Ring, from: i64, to: i64, columns: usize, window_ms: i64, mut transform: impl FnMut(i64, f64) -> f64) -> Vec<Vec<Column>> {
     let mut segments: Vec<Vec<Column>> = Vec::new();
     if columns == 0 || to <= from {
@@ -203,6 +256,7 @@ struct LaneEvents {
 const TIME_STEPS: [f64; 22] = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0];
 
 pub const TIME_LABEL_PX: f64 = 92.0;
+pub const DOUBLE_CLICK_UNDO: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_plot::GridMark> {
     let (lo, hi) = input.bounds;
@@ -234,9 +288,21 @@ pub(crate) fn time_marks(input: egui_plot::GridInput, anchor: f64) -> Vec<egui_p
 
 pub const GRID_PX: f32 = 8.0;
 
-fn time_anchor(bounds: (f64, f64), live_end: Option<f64>, tl: &Timeline) -> f64 {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LiveEnd {
+    pub(crate) at: f64,
+    pub(crate) behind_s: f64,
+}
+
+pub(crate) const QUIET_BEFORE_SAID: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub(crate) fn behind(quiet: Option<std::time::Duration>) -> f64 {
+    quiet.filter(|d| *d > QUIET_BEFORE_SAID).map_or(0.0, |d| d.as_secs_f64().round())
+}
+
+fn time_anchor(bounds: (f64, f64), live_end: Option<LiveEnd>, tl: &Timeline) -> f64 {
     if let Some(end) = live_end {
-        return end;
+        return end.at;
     }
     let mid = (bounds.0 + bounds.1) / 2.0;
     let wall = tl.wall(tl.origin().unwrap_or(0) + (mid * 1000.0).round() as i64).and_then(|w| w.duration_since(std::time::UNIX_EPOCH).ok());
@@ -246,17 +312,18 @@ fn time_anchor(bounds: (f64, f64), live_end: Option<f64>, tl: &Timeline) -> f64 
     }
 }
 
-fn time_label(mark: egui_plot::GridMark, live_end: Option<f64>, tl: &Timeline) -> String {
+fn time_label(mark: egui_plot::GridMark, live_end: Option<LiveEnd>, tl: &Timeline) -> String {
     let x = mark.value;
     match live_end {
         Some(end) => {
-            let d = x - end;
+            let d = x - end.at - end.behind_s;
             if d.abs() < mark.step_size * 1e-3 { "now".into() } else { format!("{} s", view::fmt_short((d * 1000.0).round() / 1000.0)) }
         }
         None => match tl.wall(tl.origin().unwrap_or(0) + (x * 1000.0).round() as i64) {
             Some(w) if mark.step_size < 0.999 => {
                 let t = view::local_time(w);
-                t.get(..10).map_or(t.clone(), str::to_string)
+                let digits = if mark.step_size >= 0.0995 { 1 } else if mark.step_size >= 0.00995 { 2 } else { 3 };
+                t.get(..9 + digits).map_or(t.clone(), str::to_string)
             }
             Some(w) => view::local_hms(w),
             None => format!("{x:.1} s"),
@@ -388,6 +455,7 @@ impl SpyApp {
             return;
         }
         let tl = st.timeline.clone();
+        let quiet = st.channels.iter().filter_map(|c| c.last_arrival).max().map(|t| t.elapsed());
         let Some(newest) = self.session.store().newest() else {
             ui.centered_and_justified(|ui| ui.label(RichText::new(if st.phase.is_connected() { "Waiting for the first samples..." } else { "Connect to a controller to see the charts." }).color(p.ink2)));
             return;
@@ -399,6 +467,7 @@ impl SpyApp {
             });
         }
         let end_ms = self.paused_at.unwrap_or(newest);
+        let behind_by = behind(quiet.or_else(|| view::age_of(Some(newest), &tl)));
         let x_max = tl.seconds(end_ms);
         let x_min = x_max - self.window_s;
         let live = self.paused_at.is_none();
@@ -450,6 +519,8 @@ impl SpyApp {
             _ => (x_min, x_max),
         };
         let mut transforms = Vec::new();
+        let mut cache = std::mem::take(&mut self.column_cache);
+        cache.retain(|id, _| all.iter().any(|m| &m.id == id));
         let mut events_out: Vec<((u32, String), LaneEvents)> = Vec::new();
         let mut title_acts: Vec<((u32, String), TitleAct)> = Vec::new();
         egui::ScrollArea::vertical().id_salt("lanes").auto_shrink([false, false]).show(ui, |ui| {
@@ -467,12 +538,12 @@ impl SpyApp {
                 }
                 let tl2 = tl.clone();
                 let units = lane.1.clone();
-                let decimals = first.decimals;
+                let decimals: Vec<(String, Option<usize>)> = members.iter().map(|m| (m.name.clone(), m.decimals)).collect();
                 let shown = self.hover_text.clone();
                 let marks2 = marks.clone();
                 let last_lane = k + 1 == lanes.len();
                 let (tl3, tl4) = (tl.clone(), tl.clone());
-                let live_end = live.then_some(x_max);
+                let live_end = live.then_some(LiveEnd { at: x_max, behind_s: behind_by });
                 let mut plot = Plot::new(("lane", lane.0, &lane.1))
                     .height(lane_h)
                     .link_axis("x-link", [true, false])
@@ -485,7 +556,7 @@ impl SpyApp {
                     })
                     .custom_y_axes(vec![theme::value_axis(p)])
                     .show_axes([last_lane || every_axis, true])
-                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, decimals, &marks2, mark_tol)))
+                    .label_formatter(move |pos| remember(&shown, hover_label(pos, &tl2, &units, &decimals, &marks2, mark_tol)))
                     .allow_drag([true, false])
                     .allow_zoom(false)
                     .allow_scroll(false)
@@ -522,20 +593,8 @@ impl SpyApp {
                     let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
                     for m in &members {
                         let Some(src) = &m.src else { continue };
-                        let (factor, hold) = (m.factor, m.hold);
                         let ring = src.lock();
-                        let mut zh = view::ZeroHold::new();
-                        let smooth = i64::from(m.smooth_ms);
-                        if hold && smooth == 0 {
-                            for (t, v) in ring.range(from - view::ZERO_HOLD_MS.ceil() as i64 - 1, from) {
-                                zh.apply_at(t, v);
-                            }
-                        }
-                        let segs = if smooth > 0 {
-                            smoothed(&ring, from, to, px, smooth, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor)
-                        } else {
-                            ring.decimate_at(from, to, px, |t, v| (if hold { zh.apply_at(t, v) } else { v }) * factor)
-                        };
+                        let segs = columns_of(&mut cache, &m.id, src.identity(), &ring, from, to, px, i64::from(m.smooth_ms), m.hold, m.factor);
                         let last = ring.last().map(|(t, _)| t);
                         drop(ring);
                         for (si, seg) in segs.iter().enumerate() {
@@ -565,7 +624,7 @@ impl SpyApp {
                         {
                             let x = (t - origin) as f64 / 1000.0;
                             if x < vx1 {
-                                pu.span(Span::new(format!("{} stale", m.name), x..=vx1).fill(p.hold.gamma_multiply(0.10)).border_width(0.0));
+                                pu.span(Span::new("", x..=vx1).fill(p.hold.gamma_multiply(0.10)).border_width(0.0));
                             }
                         }
                     }
@@ -606,13 +665,13 @@ impl SpyApp {
                     ev.view = Some((vx0, vx1));
                     ev.y = Some((y0, y1));
                     let x_at = pu.pointer_coordinate().map(|q| q.x);
-                    if pu.response().clicked() {
+                    ev.double = pu.response().double_clicked();
+                    if pu.response().clicked() && !ev.double {
                         ev.clicked_at = x_at;
                     }
                     if pu.response().secondary_clicked() {
                         ev.secondary_at = x_at;
                     }
-                    ev.double = pu.response().double_clicked();
                     ev
                 });
                 transforms.push(resp.transform);
@@ -627,6 +686,7 @@ impl SpyApp {
             }
         });
         self.lane_transforms = transforms;
+        self.column_cache = cache;
         self.pause_fresh = false;
         let mut visible_x = (x_min, x_max);
         for (lane, ev) in events_out {
@@ -650,9 +710,15 @@ impl SpyApp {
                 if self.paused_at.is_some() {
                     self.pause_fresh = true;
                 }
+                if let Some((before, at)) = self.cursor_a_undo.take()
+                    && at.elapsed() < DOUBLE_CLICK_UNDO
+                {
+                    self.cursor_a = before;
+                }
             }
             if self.cursors_on {
                 if let Some(a) = ev.clicked_at {
+                    self.cursor_a_undo = Some((self.cursor_a, std::time::Instant::now()));
                     self.cursor_a = Some(a);
                 }
                 if let Some(b) = ev.secondary_at {
@@ -933,14 +999,15 @@ pub fn min_span_for(units: &str, sig: Option<&spy_core::catalogue::Signal>) -> f
     }
 }
 
-fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str, decimals: Option<usize>, marks: &[(f64, String)], tol: f64) -> Option<String> {
+fn hover_label(pos: &HoverPosition<'_>, tl: &Timeline, units: &str, decimals: &[(String, Option<usize>)], marks: &[(f64, String)], tol: f64) -> Option<String> {
     let (name, p) = match pos {
         HoverPosition::NearDataPoint { plot_name, position, .. } => (Some(*plot_name), *position),
         HoverPosition::Elsewhere { position } => (None, *position),
     };
-    let t = tl.origin().unwrap_or(0) + (p.x * 1000.0).round() as i64;
+    let t = tl.origin().unwrap_or(0).saturating_add((p.x * 1000.0).round() as i64);
     let wall = tl.wall(t).map(view::local_time).unwrap_or_default();
-    let value = view::fmt_to(p.y, decimals);
+    let line = name.and_then(|n| decimals.iter().find(|(m, _)| m == n)).or(decimals.first());
+    let value = view::fmt_to(p.y, line.and_then(|(_, d)| *d));
     let text = match name {
         Some(n) => format!("{n}\n{value} {units}\nt = {:.3} s   {wall}", p.x),
         None => format!("t = {:.3} s   {wall}\n{value} {units}", p.x),
@@ -968,19 +1035,84 @@ mod tests {
     fn a_hover_over_a_marks_line_names_it() {
         let marks = vec![(1.0, "marker M1".to_string()), (4.0, "controller: 10010 Motors OFF state (information)".to_string()), (4.5, "cursor A".to_string())];
         let tl = Timeline::default();
-        let at = |x: f64| hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 1.0) }, &tl, "Nm", None, &marks, 0.1).unwrap();
+        let at = |x: f64| hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 1.0) }, &tl, "Nm", &[], &marks, 0.1).unwrap();
         assert!(at(4.05).starts_with("controller: 10010 Motors OFF state (information)\nt = 4.050 s"), "{}", at(4.05));
         assert!(at(4.42).starts_with("cursor A\n"), "the nearest: {}", at(4.42));
         assert!(at(0.95).starts_with("marker M1\n"), "{}", at(0.95));
         assert!(at(2.0).starts_with("t = 2.000 s"), "no mark within reach: {}", at(2.0));
         let two = vec![(4.0, "controller: 10002 Program pointer has been reset (information)".to_string()), (4.0, "controller: 10011 Motors ON state (information)".to_string())];
-        let text = hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(4.01, 1.0) }, &tl, "Nm", None, &two, 0.1).unwrap();
+        let text = hover_label(&HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(4.01, 1.0) }, &tl, "Nm", &[], &two, 0.1).unwrap();
         assert!(text.starts_with("controller: 10002") && text.contains("\ncontroller: 10011 Motors ON state (information)\nt = "), "{text}");
         let near = HoverPosition::NearDataPoint { plot_name: "4002 · Torque", position: egui_plot::PlotPoint::new(3.95, 1.0), index: 0 };
-        let text = hover_label(&near, &tl, "Nm", None, &marks, 0.1).unwrap();
+        let text = hover_label(&near, &tl, "Nm", &[], &marks, 0.1).unwrap();
         assert!(text.starts_with("controller: 10010") && text.contains("\n4002 · Torque\n"), "{text}");
-        let text = hover_label(&near, &tl, "Nm", Some(1), &marks, 0.1).unwrap();
-        assert!(text.contains("\n1.0 Nm\n"), "the chart's decimals: {text}");
+        let one = [("4002 · Torque".to_string(), Some(1)), ("4003 · Other".to_string(), Some(3))];
+        let text = hover_label(&near, &tl, "Nm", &one, &marks, 0.1).unwrap();
+        assert!(text.contains("\n1.0 Nm\n"), "the line's decimals: {text}");
+        let second = HoverPosition::NearDataPoint { plot_name: "4003 · Other", position: egui_plot::PlotPoint::new(3.95, 1.0), index: 0 };
+        let text = hover_label(&second, &tl, "Nm", &one, &marks, 0.1).unwrap();
+        assert!(text.contains("\n1.000 Nm\n"), "read to the first line's decimals, not its own: {text}");
+    }
+
+    #[test]
+    fn columns_are_worked_out_again_only_when_their_grid_or_their_history_changes() {
+        let mut r = Ring::new(4.0);
+        for i in 0..5000 {
+            r.push(i * 4, (i % 11) as f64);
+        }
+        let mut cache = ColumnCache::new();
+        let first = columns_of(&mut cache, "a", 1, &r, 1001, 11_001, 997, 0, false, 1.0);
+        assert!(Arc::ptr_eq(&first, &columns_of(&mut cache, "a", 1, &r, 1005, 11_005, 997, 0, false, 1.0)), "a view a few ms on, inside the same columns: worked out again");
+        let (a, b, n) = column_grid(1001, 11_001, 997);
+        assert_eq!(*first, r.decimate_at(a, b, n, |_, v| v), "the kept columns are not the ones drawn from scratch");
+        assert!(!Arc::ptr_eq(&first, &columns_of(&mut cache, "a", 1, &r, 1020, 11_020, 997, 0, false, 1.0)), "a new column started: kept the old ones");
+        let now = columns_of(&mut cache, "a", 1, &r, 1020, 11_020, 997, 0, false, 1.0);
+        assert!(!Arc::ptr_eq(&now, &columns_of(&mut cache, "a", 1, &r, 1020, 11_020, 997, 0, false, 2.0)), "another factor (radians) kept the degrees");
+        assert!(!Arc::ptr_eq(&now, &columns_of(&mut cache, "a", 2, &r, 1020, 11_020, 997, 0, false, 2.0)), "another history kept the old one's");
+        let before = columns_of(&mut cache, "a", 2, &r, 1020, 11_020, 997, 0, false, 2.0);
+        r.clear();
+        for i in 0..5000 {
+            r.push(i * 4, -1.0);
+        }
+        let after = columns_of(&mut cache, "a", 2, &r, 1020, 11_020, 997, 0, false, 2.0);
+        assert!(!Arc::ptr_eq(&before, &after) && after.iter().flatten().all(|c| c.max == -2.0), "a history rewritten under the same times (a new target) kept its old drawing");
+    }
+
+    #[test]
+    fn columns_sit_on_a_grid_that_does_not_move_with_the_view() {
+        let (a, b, n) = column_grid(10_003, 20_003, 1000);
+        assert_eq!((a, n), (10_000, 1001));
+        assert!(a <= 10_003 && b >= 20_003 && (b - a) % 10 == 0);
+        let (c, _, _) = column_grid(10_007, 20_007, 1000);
+        assert_eq!(c, 10_000, "a view 4 ms on keeps its column edges");
+        let mut r = Ring::new(4.0);
+        for i in 0..5000 {
+            r.push(i * 4, (i % 7) as f64);
+        }
+        let cols = |from: i64| {
+            let (a, b, n) = column_grid(from, from + 10_000, 997);
+            r.decimate_at(a, b, n, |_, v| v).into_iter().flatten().filter(|c| c.t >= 6000 && c.t < 9000).map(|c| (c.t, c.min, c.max)).collect::<Vec<_>>()
+        };
+        assert_eq!(cols(1001), cols(1005), "the same samples drew different columns as the view moved: the trace shimmers");
+        let (a, b, n) = column_grid(0, 0, 0);
+        assert!(b > a && n >= 1, "{a} {b} {n}");
+    }
+
+    #[test]
+    fn a_zoomed_in_pause_labels_each_mark_apart_and_a_quiet_live_edge_is_not_now() {
+        let mut tl = Timeline::new();
+        tl.map(1000, std::time::Instant::now());
+        let label = |v: f64, step: f64| time_label(egui_plot::GridMark { value: v, step_size: step }, None, &tl);
+        let marks: Vec<String> = [0.0, 0.05, 0.10, 0.15].iter().map(|&v| label(v, 0.05)).collect();
+        let unique: std::collections::BTreeSet<&String> = marks.iter().collect();
+        assert_eq!(unique.len(), 4, "{marks:?}");
+        assert!(label(0.0, 0.1).ends_with(|c: char| c.is_ascii_digit()) && label(0.0, 0.1).len() == 10);
+        let now = |behind_s: f64| time_label(egui_plot::GridMark { value: 50.0, step_size: 1.0 }, Some(LiveEnd { at: 50.0, behind_s }), &tl);
+        assert_eq!(now(0.0), "now");
+        assert_eq!(now(12.0), "-12 s", "the last sample 12 s ago, labelled now");
+        assert_eq!(behind(Some(std::time::Duration::from_millis(300))), 0.0);
+        assert_eq!(behind(Some(std::time::Duration::from_millis(12_400))), 12.0);
+        assert_eq!(behind(None), 0.0);
     }
 
     fn ring(t0: i64, values: &[f64]) -> Ring {
@@ -1056,8 +1188,9 @@ mod tests {
         assert!(labelled.iter().any(|v| (v - 110.37).abs() < 1e-9), "the live edge has its tick");
         let tl = Timeline::default();
         let now = egui_plot::GridMark { value: 110.37, step_size: step };
-        assert_eq!(time_label(now, Some(110.37), &tl), "now");
-        assert_eq!(time_label(egui_plot::GridMark { value: 110.37 - 2.0 * step, step_size: step }, Some(110.37), &tl), format!("-{} s", view::fmt_short(2.0 * step)));
+        let edge = Some(LiveEnd { at: 110.37, behind_s: 0.0 });
+        assert_eq!(time_label(now, edge, &tl), "now");
+        assert_eq!(time_label(egui_plot::GridMark { value: 110.37 - 2.0 * step, step_size: step }, edge, &tl), format!("-{} s", view::fmt_short(2.0 * step)));
         assert!(marks.windows(2).all(|w| w[1].value - w[0].value > 1e-6), "two marks in one place");
         assert!(marks.iter().any(|m| m.step_size < step), "no finer grid");
         let marks = time_marks(input(100.37, 110.37), 100.0);

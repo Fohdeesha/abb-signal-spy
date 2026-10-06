@@ -28,12 +28,17 @@ pub struct Series<'a> {
     pub samples: Box<dyn Iterator<Item = (i64, Value)> + Send + 'a>,
 }
 
+fn inert(s: &str) -> String {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() }
+}
+
 fn quoted(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+    format!("\"{}\"", inert(s).replace('"', "\"\""))
 }
 
 fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\r', '\n']) || s.starts_with(['=', '+', '-', '@', '\t']) { quoted(s) } else { s.to_string() }
+    let s = inert(s);
+    if s.contains([',', '"', '\r', '\n']) { quoted(&s) } else { s }
 }
 
 fn number(v: f64) -> String {
@@ -399,8 +404,12 @@ mod tests {
         assert_eq!(text.lines().nth(1), Some(",0.000,\"x,y"), "the id's line break stays inside its quotes");
         assert!(text.contains("\"x,y\n\"\"z\"\"\",\"n\",\"\",1"), "{text}");
         let mut out = Vec::new();
-        write_rows(&mut out, 0, None, vec![Series { id: "=HYPERLINK(1)".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(0, 1.0)]) }]).unwrap();
-        assert!(String::from_utf8(out).unwrap().contains(",\"=HYPERLINK(1)\","), "a formula-like id quoted");
+        write_rows(&mut out, 0, None, vec![Series { id: "=HYPERLINK(1)".into(), name: "@SUM(A1)".into(), units: "+x".into(), samples: Box::new(vec![(0, Value::Text("=cmd|' /C calc'!A0".into())), (1, Value::Text("-5".into())), (2, Value::Number(-3.5))].into_iter()) }]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(rows[0], ",0.000,'=HYPERLINK(1),\"'@SUM(A1)\",\"'+x\",\"'=cmd|' /C calc'!A0\"", "a spreadsheet runs a cell that starts with = + - @, quoted or not");
+        assert_eq!(rows[1], ",0.001,'=HYPERLINK(1),\"'@SUM(A1)\",\"'+x\",\"'-5\"");
+        assert!(rows[2].ends_with(",-3.5"), "a number is never touched: {}", rows[2]);
         for offset in [-20_000_000_000_000i64, i64::MAX - 5, i64::MIN / 2] {
             let mut out = Vec::new();
             write_rows(&mut out, 0, Some(offset), vec![Series { id: "a".into(), name: "n".into(), units: String::new(), samples: numbers(vec![(1, 1.0)]) }]).unwrap();

@@ -87,7 +87,7 @@ fn key(signal: u32, unit: &str, axis: u8) -> ChannelKey {
 fn window(dir: &std::path::Path, dark: bool, size: (f32, f32)) -> Harness<'static, SpyApp> {
     let dir = dir.to_path_buf();
     Harness::builder().with_size(size).with_max_steps(8).with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light }).wgpu().build_eframe(move |cc| {
-        let mut app = SpyApp::with_options(cc, dir.clone(), false, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), vc_pause_patience: Duration::ZERO, ..Options::default() });
+        let mut app = SpyApp::with_options(cc, dir.clone(), crate::net::Windows::none(), Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), vc_pause_patience: Duration::ZERO, ..Options::default() });
         app.settings.record_dir = Some(dir.join("recordings"));
         app.settings.dark = dark;
         crate::theme::apply(&app.ctx, dark, 1.0);
@@ -206,6 +206,38 @@ fn readme() {
         let dir = TestDir::new("readme-light");
         let mut h = readme_window(&fake, &dir, false);
         save(&mut h, "light");
+        h.state_mut().session.disconnect();
+        settle(&mut h, 300);
+    }
+}
+
+#[test]
+#[ignore = "pictures for a person to look at: run with ABB_SIGNAL_SPY_SHOTS set"]
+fn crowded() {
+    let fake = FakeController::start(showcase()).unwrap();
+    for (name, size, log) in [("crowded-1-smallest", (900.0, 560.0), false), ("crowded-2-messages-open", FIELD_LAPTOP, true)] {
+        let dir = TestDir::new("shots-crowded");
+        let mut h = window(&dir, true, size);
+        h.state_mut().host_input = "127.0.0.1".into();
+        h.state_mut().port_input = fake.port().to_string();
+        h.state_mut().connect();
+        let end = Instant::now() + Duration::from_secs(5);
+        while h.state().session.status().phase != Phase::Streaming && Instant::now() < end {
+            settle(&mut h, 50);
+        }
+        let mut keys: Vec<ChannelKey> = (1..=6).map(|a| key(4002, "ROB_1", a)).collect();
+        keys.extend([key(5027, "ROB_1", 1), key(5005, "ROB_1", 2), key(4001, "ROB_1", 2), key(5138, "ROB_1", 3), key(5028, "ROB_1", 3), key(5020, "ROB_1", 3)]);
+        assert!(h.state_mut().add_channels(keys, false));
+        h.state_mut().show_log = log;
+        h.state_mut().dashboard = true;
+        settle(&mut h, 2_500);
+        fake.with(|b| {
+            b.mute.insert(4002);
+            b.mute.insert(5138);
+        });
+        settle(&mut h, 4_000);
+        save(&mut h, name);
+        fake.with(|b| b.mute.clear());
         h.state_mut().session.disconnect();
         settle(&mut h, 300);
     }

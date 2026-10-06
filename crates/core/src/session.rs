@@ -26,6 +26,10 @@ const OWN_CHANGE_MARGIN_MS: u64 = 1_000;
 const LEFTOVER_MARGIN_MS: u64 = 200;
 const OWN_START_SLACK: Duration = Duration::from_secs(1);
 const FIRST_SAMPLE_WALL_MARGIN: Duration = Duration::from_millis(1500);
+pub const MARK_ROOM: usize = 256;
+pub const SAMPLE_MS_USED: std::ops::RangeInclusive<f64> = 1.0..=1000.0;
+const SAMPLE_MS_TAKEN: f64 = 4.032;
+const SAMPLE_MS_LENIENT: f64 = 24.192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Target {
@@ -131,6 +135,7 @@ pub struct ChannelStatus {
     pub rate: f64,
     pub gaps: u64,
     pub stale: bool,
+    pub stale_bound: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -184,6 +189,7 @@ pub struct Status {
     pub timeline: Timeline,
     pub advice: Option<String>,
     pub moved: Option<(Target, Target)>,
+    pub moves: u64,
 }
 
 impl Default for Status {
@@ -204,6 +210,7 @@ impl Default for Status {
             timeline: Timeline::new(),
             advice: None,
             moved: None,
+            moves: 0,
         }
     }
 }
@@ -240,15 +247,57 @@ pub enum TapEvent {
 }
 
 pub struct Tap {
-    pub rx: Receiver<TapEvent>,
+    rx: Receiver<TapEvent>,
+    queued: Arc<AtomicUsize>,
     pub dropped: Arc<AtomicU64>,
     pub dropped_events: Arc<AtomicU64>,
 }
 
+impl Tap {
+    pub fn recv_timeout(&self, wait: Duration) -> Result<TapEvent, RecvTimeoutError> {
+        let r = self.rx.recv_timeout(wait);
+        if r.is_ok() {
+            self.taken();
+        }
+        r
+    }
+
+    pub fn try_recv(&self) -> Result<TapEvent, mpsc::TryRecvError> {
+        let r = self.rx.try_recv();
+        if r.is_ok() {
+            self.taken();
+        }
+        r
+    }
+
+    fn taken(&self) {
+        let _ = self.queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    }
+
+    #[cfg(feature = "fake")]
+    #[doc(hidden)]
+    pub fn by_hand(capacity: usize) -> (SyncSender<TapEvent>, Tap) {
+        let (tap, slot) = new_tap(capacity);
+        (slot.tx, tap)
+    }
+}
+
 struct TapSlot {
     tx: SyncSender<TapEvent>,
+    queued: Arc<AtomicUsize>,
+    samples_room: usize,
     dropped: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
+}
+
+fn new_tap(capacity: usize) -> (Tap, TapSlot) {
+    let samples_room = capacity.max(1);
+    let (tx, rx) = mpsc::sync_channel(samples_room + MARK_ROOM);
+    let queued = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let dropped_events = Arc::new(AtomicU64::new(0));
+    let tap = Tap { rx, queued: queued.clone(), dropped: dropped.clone(), dropped_events: dropped_events.clone() };
+    (tap, TapSlot { tx, queued, samples_room, dropped, dropped_events })
 }
 
 enum Request {
@@ -362,11 +411,9 @@ impl Session {
     }
 
     pub fn tap(&self, capacity: usize) -> Tap {
-        let (tx, rx) = mpsc::sync_channel(capacity.max(1));
-        let dropped = Arc::new(AtomicU64::new(0));
-        let dropped_events = Arc::new(AtomicU64::new(0));
-        self.taps.lock().unwrap_or_else(|e| e.into_inner()).push(TapSlot { tx, dropped: dropped.clone(), dropped_events: dropped_events.clone() });
-        Tap { rx, dropped, dropped_events }
+        let (tap, slot) = new_tap(capacity);
+        self.taps.lock().unwrap_or_else(|e| e.into_inner()).push(slot);
+        tap
     }
 
     pub fn shutdown(mut self, wait: Duration) -> bool {
@@ -560,6 +607,7 @@ struct Worker {
     leaver_retry_next: bool,
     system_id: Option<String>,
     moved: Option<(Target, Target)>,
+    moves: u64,
     followed_restart: bool,
     vc_hold_retried: bool,
     told_other_vc: bool,
@@ -652,6 +700,7 @@ impl Worker {
             leaver_retry_next: false,
             system_id: None,
             moved: None,
+            moves: 0,
             followed_restart: false,
             vc_hold_retried: false,
             told_other_vc: false,
@@ -761,6 +810,7 @@ impl Worker {
                     self.system_id = None;
                 }
                 self.target = Some(t);
+                self.moved = None;
                 self.established = false;
                 self.approved = None;
                 self.rung = 0;
@@ -977,6 +1027,7 @@ impl Worker {
                 let to = Target { host: target.host.clone(), port };
                 self.log.info(format!("The controller now answers on port {port}, not {}: a virtual controller takes a new port at every start. Connecting there.", target.port));
                 self.moved = Some((target, to.clone()));
+                self.moves += 1;
                 self.target = Some(to);
                 self.followed_restart = true;
                 self.open_once(false);
@@ -1056,7 +1107,8 @@ impl Worker {
         self.announce = None;
         self.others.clear();
         self.candidate = None;
-        self.leaver_retry = std::mem::take(&mut self.leaver_retry_next) && self.auto_reconnect;
+        self.leaver_retry = self.leaver_retry_next && self.auto_reconnect;
+        self.told_unanswered.clear();
         self.vc_paused_since = None;
         self.last_probe_at = None;
         self.timeline.session_start();
@@ -1223,7 +1275,7 @@ impl Worker {
             .filter_map(|(txn, p)| {
                 let patience = self.own_change_patience();
                 let (limit, what) = match p {
-                    Pending::Probe { .. } => (self.opt.handshake_timeout, "the liveness check"),
+                    Pending::Probe { .. } => (self.probe_patience(), "the liveness check"),
                     Pending::Start => (patience, "StartStream"),
                     Pending::Stop => (patience, "StopStream"),
                     Pending::Undefine { .. } => (patience, "StreamUndefine"),
@@ -1241,8 +1293,8 @@ impl Worker {
                 if what == "the liveness check" {
                     self.log.warn(format!(
                         "The controller did not answer the liveness check (its handshake, sent again when every stream fell silent) within {:.1} s. Another will be sent when the streams next fall silent; meanwhile a program taking InfoStream is noticed only by the {:.0} s stall.",
-                        self.opt.handshake_timeout.as_secs_f64(),
-                        self.opt.stall_after.as_secs_f64()
+                        self.probe_patience().as_secs_f64(),
+                        self.stall_bound().as_secs_f64()
                     ));
                 } else {
                     self.log.warn(format!("The controller did not answer {what} within {:.1} s; carrying on without the answer.", self.own_change_patience().as_secs_f64()));
@@ -1651,6 +1703,10 @@ impl Worker {
 
     fn stall_bound(&self) -> Duration {
         if self.vc_patient() { self.opt.vc_pause_patience.max(self.opt.stall_after) } else { self.opt.stall_after }
+    }
+
+    fn probe_patience(&self) -> Duration {
+        if self.vc_patient() { self.stall_bound().max(self.opt.handshake_timeout) } else { self.opt.handshake_timeout }
     }
 
     fn probe_bound(&self) -> Duration {
@@ -2121,7 +2177,13 @@ impl Worker {
                     self.taken_over(&msg);
                     return;
                 }
-                let sample_ms = r.sample_time_ms().unwrap_or(4.032);
+                let sample_ms = match usable_sample_ms(r.sample_time_ms()) {
+                    Ok(ms) => ms,
+                    Err((reported, taken)) => {
+                        self.log.warn(format!("{key}: the controller reported a sample time of {reported} ms, which no controller uses (an IRC5 reports 4.032 or 24.192 ms); taking {taken} ms."));
+                        taken
+                    }
+                };
                 let ch = self.store.channel(&key, sample_ms);
                 let c = &mut self.chans[idx];
                 c.state = ChannelState::Defined { stream: s };
@@ -2249,30 +2311,35 @@ impl Worker {
                 RecordValues::Int(v) => BatchValues::Number(v.iter().map(|&x| x as f64).collect()),
                 RecordValues::String(v) => BatchValues::Text(v.clone()),
             };
+            let mut accepted = false;
             if let Some(ch) = &c.store {
                 let mut ring = ch.lock();
                 ring.kind = Some(rec.kind);
                 match &values {
                     BatchValues::Number(v) => {
                         for (t, x) in tl.iter().zip(v) {
-                            ring.push(*t, *x);
+                            accepted |= ring.push(*t, *x);
                         }
                     }
                     BatchValues::Text(v) => {
-                        for t in &tl {
-                            ring.push(*t, f64::NAN);
+                        for (t, text) in tl.iter().zip(v) {
+                            if ring.push(*t, f64::NAN) {
+                                accepted = true;
+                                ring.last_text = Some(text.clone());
+                            }
                         }
-                        ring.last_text = v.last().cloned();
                     }
                 }
             }
             c.samples += n as u64;
             c.session_samples += n as u64;
-            c.last_arrival = Some(at);
-            if c.stale_reported {
-                c.stale_reported = false;
-                let k = c.key.clone();
-                self.log.info(format!("{k}: samples arriving again."));
+            if accepted {
+                c.last_arrival = Some(at);
+                if c.stale_reported {
+                    c.stale_reported = false;
+                    let k = c.key.clone();
+                    self.log.info(format!("{k}: samples arriving again."));
+                }
             }
             self.counters.samples += n as u64;
             if !self.had_samples {
@@ -2283,6 +2350,7 @@ impl Worker {
                 }
                 self.rung = 0;
                 self.leaver_retry = false;
+                self.leaver_retry_next = false;
                 self.followed_restart = false;
                 self.vc_hold_retried = false;
                 self.lost_at = None;
@@ -2346,7 +2414,7 @@ impl Worker {
                 let late = match (self.own_change_at, self.first_raw) {
                     (Some(s), _) => first > s.saturating_add(OWN_CHANGE_MARGIN_MS),
                     (None, Some(f)) => first > f.saturating_add(OWN_CHANGE_MARGIN_MS),
-                    (None, None) => c.defined_at.max(self.last_start).is_some_and(|s| at.saturating_duration_since(s) > FIRST_SAMPLE_WALL_MARGIN),
+                    (None, None) => !self.vc_patient() && c.defined_at.max(self.last_start).is_some_and(|s| at.saturating_duration_since(s) > FIRST_SAMPLE_WALL_MARGIN),
                 };
                 if settled && late {
                     return Some(format!("{} sent its first sample long after this program started it, as a stream another client has just started does", c.key));
@@ -2409,6 +2477,7 @@ impl Worker {
         s.timeline = self.timeline.clone();
         s.advice = if self.conn.is_some() { self.advice.clone() } else { None };
         s.moved = self.moved.clone();
+        s.moves = self.moves;
         s.channels = self
             .chans
             .iter()
@@ -2422,6 +2491,7 @@ impl Worker {
                 rate: c.rate,
                 gaps: c.gaps,
                 stale: c.stale_reported,
+                stale_bound: stale_bound(self.opt.stale_after, c.sample_ms),
             })
             .collect();
         drop(s);
@@ -2439,7 +2509,21 @@ fn broadcast(taps: &Mutex<Vec<TapSlot>>, ev: TapEvent, counters: &mut Counters) 
     let mut ev = Some(ev);
     while i < g.len() {
         let e = if i + 1 == n { ev.take().unwrap() } else { ev.clone().unwrap() };
-        match g[i].tx.try_send(e) {
+        let slot = &g[i];
+        if let TapEvent::Samples(b) = &e
+            && slot.queued.load(Ordering::SeqCst) >= slot.samples_room
+        {
+            slot.dropped.fetch_add(b.raw_ms.len() as u64, Ordering::Relaxed);
+            counters.dropped_to_taps += b.raw_ms.len() as u64;
+            i += 1;
+            continue;
+        }
+        slot.queued.fetch_add(1, Ordering::SeqCst);
+        let sent = slot.tx.try_send(e);
+        if sent.is_err() {
+            let _ = slot.queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        }
+        match sent {
             Ok(()) => i += 1,
             Err(TrySendError::Full(TapEvent::Samples(b))) => {
                 g[i].dropped.fetch_add(b.raw_ms.len() as u64, Ordering::Relaxed);
@@ -2456,6 +2540,15 @@ fn broadcast(taps: &Mutex<Vec<TapSlot>>, ev: TapEvent, counters: &mut Counters) 
             }
         }
     }
+}
+
+fn usable_sample_ms(reported: Option<f64>) -> Result<f64, (f64, f64)> {
+    let Some(ms) = reported else { return Ok(SAMPLE_MS_TAKEN) };
+    if SAMPLE_MS_USED.contains(&ms) {
+        return Ok(ms);
+    }
+    let scaled = [ms / 1000.0, ms * 1000.0].into_iter().find(|v| SAMPLE_MS_USED.contains(v));
+    Err((ms, scaled.unwrap_or(SAMPLE_MS_LENIENT)))
 }
 
 fn stale_bound(base: Duration, sample_ms: Option<f64>) -> Duration {
@@ -2591,6 +2684,42 @@ pub fn wire_axis(axis: Axis) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn batch(n: usize) -> TapEvent {
+        let key = ChannelKey::parse_id("4002/ROB_1/J1").unwrap();
+        TapEvent::Samples(SampleBatch { key, kind: ValueKind::Float, raw_ms: vec![0; n], timeline_ms: vec![0; n], values: BatchValues::Number(vec![1.0; n]), arrived: SystemTime::now() })
+    }
+
+    #[test]
+    fn a_recorder_too_slow_for_its_samples_still_gets_every_connection_mark() {
+        let taps = Mutex::new(Vec::new());
+        let (tap, slot) = new_tap(2);
+        taps.lock().unwrap().push(slot);
+        let mut counters = Counters::default();
+        for _ in 0..5 {
+            broadcast(&taps, batch(3), &mut counters);
+        }
+        let other = Target { host: "192.0.2.77".into(), port: 5515 };
+        broadcast(&taps, TapEvent::Mark { wall: SystemTime::now(), mark: Mark::Connected { target: other, system_id: Some("{B}".into()) } }, &mut counters);
+        assert_eq!((counters.dropped_to_taps, counters.dropped_events_to_taps), (9, 0), "three batches over the room, and no mark");
+        let got: Vec<TapEvent> = std::iter::from_fn(|| tap.try_recv().ok()).collect();
+        assert_eq!(got.len(), 3);
+        assert!(matches!(got[2], TapEvent::Mark { mark: Mark::Connected { .. }, .. }), "the mark that closes a recording was dropped");
+        broadcast(&taps, batch(3), &mut counters);
+        assert!(matches!(tap.try_recv(), Ok(TapEvent::Samples(_))), "a drained queue takes samples again");
+        assert_eq!(counters.dropped_to_taps, 9);
+    }
+
+    #[test]
+    fn only_a_sample_time_a_controller_uses_is_taken() {
+        assert_eq!(usable_sample_ms(Some(4.032)), Ok(4.032));
+        assert_eq!(usable_sample_ms(Some(24.192)), Ok(24.192));
+        assert_eq!(usable_sample_ms(None), Ok(SAMPLE_MS_TAKEN));
+        assert_eq!(usable_sample_ms(Some(1e-14)), Err((1e-14, SAMPLE_MS_LENIENT)), "a tiny one sized the history to nothing");
+        assert_eq!(usable_sample_ms(Some(f64::MAX)), Err((f64::MAX, SAMPLE_MS_LENIENT)));
+        assert_eq!(usable_sample_ms(Some(24192.0)), Err((24192.0, 24.192)), "microseconds: a huge one kept a stopped stream live for ten minutes");
+        assert!(matches!(usable_sample_ms(Some(0.004032)), Err((_, v)) if (v - 4.032).abs() < 1e-9), "seconds");
+    }
 
     #[test]
     fn with_no_samples_a_remote_controllers_advice_names_an_idle_holder_too() {

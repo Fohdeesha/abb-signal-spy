@@ -112,10 +112,27 @@ fn stamp(t: &mut Text, u: &Utc) {
     t.num(u.hour.into(), 2).push(":").num(u.minute.into(), 2).push(":").num(u.second.into(), 2).push(".").num(u.ms.into(), 3).push("Z");
 }
 
+const REFUSED: &str = " (UTC) Windows refused it ";
+
+pub fn is_memory_note(text: &str) -> bool {
+    text.starts_with("ABB Signal Spy ") && text.lines().next().is_some_and(|l| l.contains(REFUSED) && l.ends_with("bytes of memory."))
+}
+
+pub fn noted() -> bool {
+    NOTED.load(Ordering::SeqCst)
+}
+
+pub fn survived(dir: &std::path::Path, noted: bool) {
+    let crash = dir.join("crash.txt");
+    if noted && std::fs::read_to_string(&crash).is_ok_and(|t| is_memory_note(&t)) {
+        let _ = std::fs::remove_file(&crash);
+    }
+}
+
 pub fn crash_note(t: &mut Text, size: usize, at: &Utc) {
     t.push("ABB Signal Spy ").push(env!("CARGO_PKG_VERSION")).push(": at ");
     stamp(t, at);
-    t.push(" (UTC) Windows refused it ").num(size as u64, 1).push(" bytes of memory.\r\n\r\n");
+    t.push(REFUSED).num(size as u64, 1).push(" bytes of memory.\r\n\r\n");
     t.push("If the program stopped then, this is why. Usually the PC's memory is used up (its commit limit reached): ");
     t.push("other programs hold it. Close some, then start ABB Signal Spy again. A recording that was running is kept ");
     t.push("up to its last whole row, and opens for review. (A request of many gigabytes would be a defect in the ");
@@ -196,6 +213,24 @@ mod tests {
         log_line(&mut t, 0, &at());
         let s = std::str::from_utf8(t.bytes()).unwrap();
         assert!(s.starts_with("2026-09-29T04:31:27.005Z ERROR Windows refused 0 bytes") && s.ends_with("crash.txt.\n"), "{s}");
+    }
+
+    #[test]
+    fn a_refusal_the_program_lived_through_is_not_reported_as_its_end() {
+        let dir = spy_core::testdir::TestDir::new("oom-survived");
+        let mut t = Text::new();
+        crash_note(&mut t, 4096, &at());
+        let note = String::from_utf8(t.bytes().to_vec()).unwrap();
+        assert!(is_memory_note(&note), "{note}");
+        assert!(!is_memory_note("ABB Signal Spy 0.4.0 crashed at 2026-10-06T00:00:00Z\npanicked at src/app.rs"));
+        std::fs::write(dir.join("crash.txt"), &note).unwrap();
+        survived(&dir, false);
+        assert!(dir.join("crash.txt").exists(), "not noted in this run: left for the next start");
+        survived(&dir, true);
+        assert!(!dir.join("crash.txt").exists(), "a read that Windows refused and the program handled is not a crash");
+        std::fs::write(dir.join("crash.txt"), "ABB Signal Spy 0.4.0 crashed at x\npanicked").unwrap();
+        survived(&dir, true);
+        assert!(dir.join("crash.txt").exists(), "a real crash's file is never removed");
     }
 
     struct Refuses;

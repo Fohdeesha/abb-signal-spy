@@ -84,6 +84,7 @@ pub struct Toast {
 }
 
 const MAX_TOASTS: usize = 8;
+pub const CLOSE_PATIENCE: Duration = Duration::from_secs(20);
 
 pub struct AddDialog {
     pub signal: u32,
@@ -92,6 +93,7 @@ pub struct AddDialog {
 }
 
 pub const SIGNALS_WIDTH: f32 = 298.0;
+const BAR_SLACK: f32 = 24.0;
 
 pub struct SpyApp {
     pub ctx: egui::Context,
@@ -103,6 +105,8 @@ pub struct SpyApp {
     pub settings: Settings,
     pub settings_path: PathBuf,
     pub settings_dirty: Option<Instant>,
+    pub settings_base: serde_json::Map<String, serde_json::Value>,
+    pub settings_locked: Option<String>,
     pub chans: Vec<ChanView>,
     pub next_lane: u32,
     pub store_epoch: u64,
@@ -123,6 +127,7 @@ pub struct SpyApp {
     pub derived: Vec<crate::derived_view::DerivedView>,
     pub plateau_trend_ms: i64,
     pub lane_transforms: Vec<egui_plot::PlotTransform>,
+    pub column_cache: crate::charts::ColumnCache,
     pub hover_text: std::sync::Arc<std::sync::Mutex<String>>,
 
     pub rws: Option<crate::rws_view::RwsLink>,
@@ -139,6 +144,7 @@ pub struct SpyApp {
     pub cursors_on: bool,
     pub cursor_a: Option<f64>,
     pub cursor_b: Option<f64>,
+    pub cursor_a_undo: Option<(Option<f64>, Instant)>,
     pub markers: Vec<Marker>,
     pub lane_zoom: HashMap<(u32, String), (f64, f64)>,
     pub lane_ranges: HashMap<(u32, String), (f64, f64)>,
@@ -146,6 +152,7 @@ pub struct SpyApp {
 
     pub recorder: Option<Recorder>,
     pub slow: Option<Recorder>,
+    pub stopping: Vec<(&'static str, spy_core::recording::Stopping)>,
     pub snapshot_job: Option<JoinHandle<Result<(PathBuf, u64), String>>>,
     pub marker_text: String,
     pub rec_label: String,
@@ -181,6 +188,9 @@ pub struct SpyApp {
     pub show_log: bool,
 
     pub confirm_reset: bool,
+    pub confirm_remove_all: bool,
+    pub show_record_dir: bool,
+    pub record_dir_input: String,
     pub show_about: bool,
     pub show_diag: bool,
     pub show_guide: bool,
@@ -188,7 +198,12 @@ pub struct SpyApp {
     pub hostnames: Hostnames,
     pub toasts: Vec<Toast>,
     pub rates: (Instant, u64, u64, f64, f64),
-    pub another_instance: bool,
+    pub windows: crate::net::Windows,
+    pub others_open: usize,
+    pub others_checked: Option<Instant>,
+    pub moves_seen: u64,
+    pub attention_asked: bool,
+    pub bar_need: f32,
     pub log_filter_warn: bool,
     pub title: String,
 }
@@ -198,15 +213,16 @@ pub fn chan_color(i: usize, dark: bool) -> Color32 {
 }
 
 impl SpyApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, another_instance: bool) -> SpyApp {
-        SpyApp::with_options(cc, data_dir, another_instance, Options::default())
+    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, windows: crate::net::Windows) -> SpyApp {
+        SpyApp::with_options(cc, data_dir, windows, Options::default())
     }
 
-    pub fn with_options(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, another_instance: bool, opts: Options) -> SpyApp {
+    pub fn with_options(cc: &eframe::CreationContext<'_>, data_dir: PathBuf, windows: crate::net::Windows, opts: Options) -> SpyApp {
         let ctx = cc.egui_ctx.clone();
-        let settings_path = data_dir.join("settings.json");
+        let settings_path = data_dir.join(crate::settings::FILE);
         let first_run = !settings_path.exists();
-        let (settings, note) = Settings::load(&settings_path);
+        let loaded = Settings::load_full(&settings_path);
+        let (settings, note, settings_locked, settings_base) = (loaded.settings, loaded.note, loaded.locked, loaded.base);
         let (notes, notes_note) = crate::notes::Notes::load(&data_dir.join(crate::notes::FILE));
         theme::install_fonts(&ctx);
         theme::apply(&ctx, settings.dark, settings.ui_scale);
@@ -224,9 +240,14 @@ impl SpyApp {
         log.info(format!("ABB Signal Spy {} started. Settings: {}", env!("CARGO_PKG_VERSION"), settings_path.display()));
         let crash = data_dir.join("crash.txt");
         let crash_note = crash.is_file().then(|| {
+            let memory = std::fs::read_to_string(&crash).is_ok_and(|t| crate::oom::is_memory_note(&t));
             let kept = data_dir.join(format!("crash-{}.txt", spy_core::util::local_stamp(std::time::SystemTime::now())));
             let kept = if std::fs::rename(&crash, &kept).is_ok() { kept } else { crash.clone() };
-            format!("ABB Signal Spy hit an internal error last time. What happened is in {}: please include that file when reporting it.", kept.display())
+            if memory {
+                format!("ABB Signal Spy stopped last time when Windows refused it memory (the PC's memory was used up). What happened is in {}.", kept.display())
+            } else {
+                format!("ABB Signal Spy hit an internal error last time. What happened is in {}: please include that file when reporting it.", kept.display())
+            }
         });
 
         let (catalogue, cat_note) = match &settings.catalogue_file {
@@ -259,6 +280,8 @@ impl SpyApp {
             settings,
             settings_path,
             settings_dirty: None,
+            settings_base,
+            settings_locked,
             chans: Vec::new(),
             next_lane: 1,
             store_epoch: 0,
@@ -277,6 +300,7 @@ impl SpyApp {
             derived: Vec::new(),
             plateau_trend_ms: spy_core::derived::PLATEAU_TREND_MS,
             lane_transforms: Vec::new(),
+            column_cache: Default::default(),
             hover_text: Default::default(),
             rws: None,
             rws_form: crate::rws_view::RwsForm::default(),
@@ -291,12 +315,14 @@ impl SpyApp {
             cursors_on: false,
             cursor_a: None,
             cursor_b: None,
+            cursor_a_undo: None,
             markers: Vec::new(),
             lane_zoom: HashMap::new(),
             lane_ranges: HashMap::new(),
             wheel_acc: 0.0,
             recorder: None,
             slow: None,
+            stopping: Vec::new(),
             snapshot_job: None,
             marker_text: String::new(),
             rec_label: String::new(),
@@ -327,6 +353,9 @@ impl SpyApp {
             dashboard: false,
             show_log: false,
             confirm_reset: false,
+            confirm_remove_all: false,
+            show_record_dir: false,
+            record_dir_input: String::new(),
             show_about: false,
             show_diag: false,
             show_guide: false,
@@ -334,7 +363,12 @@ impl SpyApp {
             hostnames: Arc::new(Mutex::new(HashMap::new())),
             toasts: Vec::new(),
             rates: (Instant::now(), 0, 0, 0.0, 0.0),
-            another_instance,
+            windows,
+            others_open: 0,
+            others_checked: None,
+            moves_seen: 0,
+            attention_asked: false,
+            bar_need: 0.0,
             log_filter_warn: false,
             title: String::new(),
         };
@@ -428,10 +462,13 @@ impl SpyApp {
                 crate::settings::SavedDerived { def, lane: d.lane }
             })
             .collect();
-        if let Err(e) = self.settings.save(&self.settings_path) {
+        self.settings_dirty = None;
+        if self.settings_locked.is_some() {
+            return;
+        }
+        if let Err(e) = self.settings.save_changes(&self.settings_path, &mut self.settings_base) {
             self.log.warn(format!("Could not save the settings: {e}"));
         }
-        self.settings_dirty = None;
     }
 
     pub fn sync_channels(&mut self) {
@@ -496,8 +533,8 @@ impl SpyApp {
             Ok(t) => {
                 if !self.session.is_running() {
                     for r in [self.recorder.take(), self.slow.take()].into_iter().flatten() {
-                        let s = r.stop();
-                        self.toast(Level::Warn, format!("Recording finished when the connection worker was restarted: {}", s.dir.display()));
+                        self.toast(Level::Warn, format!("Recording finished when the connection worker was restarted: {}", r.status().dir.display()));
+                        self.stopping.push(("worker restarted", r.stop_in_background()));
                     }
                     self.log.warn("The connection worker had stopped after an internal error; starting a new one.");
                     let c = self.ctx.clone();
@@ -509,7 +546,8 @@ impl SpyApp {
                 if previous.as_ref().is_some_and(|p| p != &t) {
                     let mut stopped = Vec::new();
                     for r in [self.recorder.take(), self.slow.take()].into_iter().flatten() {
-                        stopped.push(r.stop().dir);
+                        stopped.push(r.status().dir);
+                        self.stopping.push(("another controller", r.stop_in_background()));
                     }
                     if !stopped.is_empty() {
                         self.toast(Level::Warn, format!("Recording finished before connecting to a different controller: {}", stopped.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")));
@@ -522,6 +560,7 @@ impl SpyApp {
                 self.settings.remember(&t);
                 self.mark_settings_dirty();
                 self.connected_to = Some(t.clone());
+                self.moves_seen = self.session.status().moves;
                 self.session.connect(t);
             }
             Err(e) => self.toast(Level::Error, e),
@@ -529,10 +568,13 @@ impl SpyApp {
     }
 
     fn follow_moved_controller(&mut self) {
-        let Some((from, to)) = self.session.status().moved.clone() else { return };
-        if self.connected_to.as_ref() != Some(&from) {
-            return;
-        }
+        let (moved, moves) = {
+            let st = self.session.status();
+            (st.moved.clone(), st.moves)
+        };
+        let follow = move_to_follow(moved, moves, self.moves_seen, self.connected_to.as_ref());
+        self.moves_seen = moves;
+        let Some((from, to)) = follow else { return };
         if self.parse_target().ok().as_ref() == Some(&from) {
             self.port_input = to.port.to_string();
         }
@@ -573,6 +615,11 @@ impl SpyApp {
                         let d = self.record_dir();
                         let _ = std::fs::create_dir_all(&d);
                         crate::paths::open_folder(&d);
+                        ui.close();
+                    }
+                    if ui.button("recordings folder...").on_hover_text("Where recordings, saved CSVs and pictures go").clicked() {
+                        self.show_record_dir = true;
+                        self.record_dir_input = self.record_dir().display().to_string();
                         ui.close();
                     }
                     if ui.button("open the settings folder").clicked() {
@@ -670,47 +717,86 @@ impl SpyApp {
     }
 
     fn controller_bar(&mut self, ui: &mut egui::Ui) {
+        theme::sheet_frame(ui).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+            let need = if ui.available_width() >= self.bar_need {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(fields::HEIGHT);
+                    let a = self.target_controls(ui);
+                    let x = ui.cursor().min.x;
+                    theme::vrule(ui, 32.0);
+                    let rule = ui.cursor().min.x - x;
+                    a + rule + self.action_controls(ui)
+                })
+                .inner
+            } else {
+                let a = ui
+                    .horizontal(|ui| {
+                        ui.set_min_height(fields::HEIGHT);
+                        self.target_controls(ui)
+                    })
+                    .inner;
+                ui.add_space(6.0);
+                let b = ui
+                    .horizontal(|ui| {
+                        ui.set_min_height(fields::HEIGHT);
+                        self.action_controls(ui)
+                    })
+                    .inner;
+                a + 2.0 * ui.spacing().item_spacing.x + b
+            };
+            self.bar_need = need + BAR_SLACK;
+        });
+    }
+
+    fn target_controls(&mut self, ui: &mut egui::Ui) -> f32 {
+        let x0 = ui.cursor().min.x;
         let p = theme::pal(ui);
         let phase = self.session.status().phase.clone();
         let active = phase.is_active();
-        theme::sheet_frame(ui).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_min_height(fields::HEIGHT);
-                ui.label(theme::b("controller").color(p.ink2));
-                ui.add_enabled_ui(!active, |ui| {
-                    fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("e.g. 192.168.125.1").desired_width(150.0))
-                        .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.")
-                        .on_disabled_hover_text("Disconnect to change the address.");
-                });
-                ui.label(theme::b("port").color(p.ink2));
-                ui.add_enabled_ui(!active, |ui| {
-                    fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(64.0))
-                        .on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.")
-                        .on_disabled_hover_text("Disconnect to change the port.");
-                    self.target_menu(ui);
-                });
-                match &phase {
-                    Phase::Idle | Phase::Stopped { .. } => {
-                        if theme::primary(ui, "connect", fields::HEIGHT).clicked() {
-                            self.connect();
-                        }
-                    }
-                    _ => {
-                        if theme::primary(ui, "disconnect", fields::HEIGHT).clicked() {
-                            self.session.disconnect();
-                        }
-                    }
-                }
-                theme::vrule(ui, 32.0);
-                self.record_controls(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (text, icon) = if self.dashboard { ("back to the charts", theme::Icon::Collapse) } else { ("live dashboard", theme::Icon::Grid) };
-                    if theme::icon_text_button(ui, icon, text, fields::HEIGHT, self.dashboard).on_hover_text("Big numbers in place of the charts, to read from a step away").clicked() {
-                        self.dashboard = !self.dashboard;
-                    }
-                });
-            });
+        ui.label(theme::b("controller").color(p.ink2));
+        ui.add_enabled_ui(!active, |ui| {
+            fields::line(ui, &mut self.host_input, "Controller address", |t| t.hint_text("e.g. 192.168.125.1").desired_width(150.0))
+                .on_hover_text("The controller's IP address or name. A real IRC5 answers on port 5515.")
+                .on_disabled_hover_text("Disconnect to change the address.");
         });
+        ui.label(theme::b("port").color(p.ink2));
+        ui.add_enabled_ui(!active, |ui| {
+            let width = fields::width_for(ui, "65535");
+            fields::line(ui, &mut self.port_input, "Controller port", |t| t.desired_width(width))
+                .on_hover_text("5515 on an IRC5. A RobotStudio virtual controller picks a new port at every start: use the list.")
+                .on_disabled_hover_text("Disconnect to change the port.");
+            self.target_menu(ui);
+        });
+        match &phase {
+            Phase::Idle | Phase::Stopped { .. } => {
+                if theme::primary(ui, "connect", fields::HEIGHT).clicked() {
+                    self.connect();
+                }
+            }
+            _ => {
+                if theme::primary(ui, "disconnect", fields::HEIGHT).clicked() {
+                    self.session.disconnect();
+                }
+            }
+        }
+        ui.cursor().min.x - x0
+    }
+
+    fn action_controls(&mut self, ui: &mut egui::Ui) -> f32 {
+        let x0 = ui.cursor().min.x;
+        self.record_controls(ui);
+        let recording = ui.cursor().min.x - x0;
+        let dash = ui
+            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (text, icon) = if self.dashboard { ("back to the charts", theme::Icon::Collapse) } else { ("live dashboard", theme::Icon::Grid) };
+                let r = theme::icon_text_button(ui, icon, text, fields::HEIGHT, self.dashboard).on_hover_text("Big numbers in place of the charts, to read from a step away");
+                if r.clicked() {
+                    self.dashboard = !self.dashboard;
+                }
+                r.rect.width()
+            })
+            .inner;
+        recording + ui.spacing().item_spacing.x + dash
     }
 
     fn target_menu(&mut self, ui: &mut egui::Ui) {
@@ -876,8 +962,9 @@ impl SpyApp {
 
     fn notices(&self, st: &spy_core::session::Status, p: &theme::Pal) -> Vec<(String, Color32)> {
         let mut lines: Vec<(String, Color32)> = Vec::new();
-        if self.another_instance {
-            lines.push(("Another ABB Signal Spy window is open. Two windows on the same controller break each other's streams: only one program at a time can stream test signals.".into(), p.hold));
+        if self.others_open > 0 {
+            let which = if self.others_open == 1 { "Another ABB Signal Spy window is open".to_string() } else { format!("{} other ABB Signal Spy windows are open", self.others_open) };
+            lines.push((format!("{which}. Two windows on the same controller break each other's streams: only one program at a time can stream test signals. The windows share the settings and your notes: each saves only what it changed."), p.hold));
         }
         if let Phase::Stopped { reason } = &st.phase {
             lines.push((reason.clone(), p.red));
@@ -983,7 +1070,15 @@ impl SpyApp {
             ui.add_space(6.0);
             ui.label("Copyright (C) 2026 Jon Sands. Free software under the GNU General Public License, version 3 or later: you may share and change it under its terms. It comes with ABSOLUTELY NO WARRANTY.");
             ui.label(RichText::new(format!("Catalogue: {} ({})", self.catalogue.title, self.catalogue.source)).weak());
-            ui.label(RichText::new("Set in Atkinson Hyperlegible Next and Mono, by the Braille Institute of America: copyright 2020-2024 The Atkinson Hyperlegible Next and Mono Project Authors, under the SIL Open Font License 1.1.").weak());
+            ui.label(RichText::new(format!("Set in {}: {}, under the SIL Open Font License 1.1.", theme::FACE, theme::face_copyright())).weak());
+            ui.label(RichText::new(format!("Characters it lacks come from the faces egui brings: {}.", theme::FALLBACK_FACES)).weak());
+            egui::CollapsingHeader::new("the font licences").show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    ui.label(RichText::new(theme::FACE_LICENCE).monospace().size(14.0));
+                    ui.separator();
+                    ui.label(RichText::new(theme::FALLBACK_LICENCES).monospace().size(14.0));
+                });
+            });
         });
         self.show_about = open;
 
@@ -992,7 +1087,7 @@ impl SpyApp {
             ui.label(theme::b("1. Connect"));
             ui.label("Real IRC5: type its address (the port is 5515) and press connect. RobotStudio virtual controller: open the list beside the port and pick it; its port changes every time it starts.");
             ui.label(theme::b("2. Only one program at a time"));
-            ui.label("A controller streams test signals to one program at a time. Close TuneMaster's signal logging or RobotStudio's signal tools first. If other programs are connected, this program lists them and asks before taking over.");
+            ui.label("A controller streams test signals to one program at a time. Close TuneMaster's signal logging or RobotStudio's signal tools first. If other programs are connected to a controller elsewhere, this program lists them and asks before taking over; a virtual controller on this PC is not asked about.");
             ui.label(theme::b("3. Add channels"));
             ui.label("Pick a signal in the list on the left, then add it. The dialog asks only what that signal needs: the robot, the axis, or nothing. 'add a set' adds a common group in one go (both DC links, one robot's torques). Up to 12 channels.");
             ui.label(theme::b("4. Read and chart"));
@@ -1040,6 +1135,42 @@ impl SpyApp {
                 }
                 Err(e) => self.toast(Level::Error, e),
             }
+        }
+
+        let mut open = self.show_record_dir;
+        let (mut use_typed, mut use_default) = (false, false);
+        egui::Window::new("Recordings folder").open(&mut open).collapsible(false).default_width(560.0).show(ctx, |ui| {
+            ui.label(format!("Recordings, saved CSVs and pictures go to {}", self.record_dir().display()));
+            ui.label(RichText::new("A change applies to the next recording: one running now carries on where it is.").weak());
+            ui.add_space(6.0);
+            fields::line(ui, &mut self.record_dir_input, "Recordings folder path", |t| t.hint_text("C:\\path\\to\\a folder").desired_width(520.0));
+            ui.horizontal(|ui| {
+                use_typed = ui.button("use this folder").clicked();
+                use_default = ui.add_enabled(self.settings.record_dir.is_some(), egui::Button::new("back to Documents\\TestSignals")).clicked();
+                if ui.button("open it").clicked() {
+                    let d = self.record_dir();
+                    let _ = std::fs::create_dir_all(&d);
+                    crate::paths::open_folder(&d);
+                }
+            });
+        });
+        self.show_record_dir = open;
+        if use_typed {
+            let p = PathBuf::from(self.record_dir_input.trim().trim_matches('"'));
+            match crate::record::usable_folder(&p) {
+                Ok(()) => {
+                    self.settings.record_dir = Some(p.clone());
+                    self.mark_settings_dirty();
+                    self.toast(Level::Info, format!("Recordings now go to {}.", p.display()));
+                }
+                Err(e) => self.toast(Level::Error, e),
+            }
+        }
+        if use_default {
+            self.settings.record_dir = None;
+            self.record_dir_input = self.record_dir().display().to_string();
+            self.mark_settings_dirty();
+            self.toast(Level::Info, format!("Recordings now go to {}.", self.record_dir().display()));
         }
 
         let mut open = self.show_diag;
@@ -1207,12 +1338,16 @@ impl SpyApp {
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
+    pub fn dialog_open(&self) -> bool {
+        self.add.is_some() || self.note_edit.is_some() || self.sets.is_some() || self.confirm_reset || self.confirm_remove_all || self.session.status().phase == Phase::AwaitingApproval
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || self.dialog_open() {
             return;
         }
         let (space, m, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::M), i.key_pressed(egui::Key::Escape)));
-        if esc && self.add.is_none() && self.note_edit.is_none() && self.sets.is_none() {
+        if esc {
             self.selected = None;
         }
         if self.review.is_some() {
@@ -1258,14 +1393,8 @@ impl SpyApp {
 
     fn update_title(&mut self, ctx: &egui::Context) {
         let st = self.session.status();
-        let state = match &st.phase {
-            Phase::Streaming if st.advice.is_some() => "NOT RECEIVING",
-            Phase::Streaming => "STREAMING",
-            Phase::Reconnecting { .. } => "RECONNECTING",
-            Phase::Stopped { .. } => "STOPPED",
-            Phase::Idle => "",
-            _ => "CONNECTING",
-        };
+        let state = title_word(&st.phase, st.advice.is_some());
+        let asking = st.phase == Phase::AwaitingApproval;
         let mut t = String::from("ABB Signal Spy");
         if !state.is_empty() {
             t.push_str(&format!(" · {state}"));
@@ -1284,6 +1413,10 @@ impl SpyApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(t.clone()));
             self.title = t;
         }
+        if asking && !self.attention_asked {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+        }
+        self.attention_asked = asking;
     }
 
     fn publish_phone(&mut self) {
@@ -1329,14 +1462,33 @@ impl SpyApp {
                 "number_units": def.units(),
             }));
         }
-        let state = match &st.phase {
-            Phase::Streaming => "Streaming".to_string(),
-            p => format!("{p:?}"),
-        };
-        let body = serde_json::json!({ "controller": st.target.map(|t| t.to_string()).unwrap_or_default(), "state": state, "channels": chans });
+        let (state, _, _) = Self::phase_word(&st, theme::pal_of(self.settings.dark));
+        let receiving = st.phase == Phase::Streaming && st.advice.is_none();
+        let body = serde_json::json!({ "controller": st.target.map(|t| t.to_string()).unwrap_or_default(), "state": state, "streaming": receiving, "channels": chans });
         let mut g = self.phone_snapshot.lock().unwrap_or_else(|e| e.into_inner());
         g.body = body.to_string();
         g.built = Some(Instant::now());
+    }
+}
+
+pub fn move_to_follow(moved: Option<(Target, Target)>, moves: u64, seen: u64, connected_to: Option<&Target>) -> Option<(Target, Target)> {
+    if moves == seen {
+        return None;
+    }
+    let (from, to) = moved?;
+    (connected_to == Some(&from)).then_some((from, to))
+}
+
+pub fn title_word(phase: &Phase, advice: bool) -> &'static str {
+    match phase {
+        Phase::Streaming if advice => "NOT RECEIVING",
+        Phase::Streaming => "STREAMING",
+        Phase::Reconnecting { .. } => "RECONNECTING",
+        Phase::Stopped { .. } => "STOPPED",
+        Phase::Idle => "",
+        Phase::AwaitingApproval => "WAITING FOR YOUR ANSWER",
+        Phase::TearingDown => "DISCONNECTING",
+        Phase::Connecting | Phase::Handshaking | Phase::SettingUp => "CONNECTING",
     }
 }
 
@@ -1348,6 +1500,9 @@ pub fn short_id(id: &str) -> String {
 impl eframe::App for SpyApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
+        self.poll_stopping();
+        self.check_other_windows();
+        self.learn_units();
         self.poll_review();
         self.poll_export();
         self.poll_rws();
@@ -1399,6 +1554,7 @@ impl eframe::App for SpyApp {
         if self.dashboard && self.review.is_none() {
             let central = egui::CentralPanel::default().frame(sheet(8, 8)).show(ui, |ui| self.dashboard_ui(ui));
             self.charts_rect = Some(central.response.rect);
+            self.follow_live_view();
         } else {
             if self.settings.signals_folded {
                 egui::Panel::left("signals-folded").frame(column).exact_size(60.0).resizable(false).show_separator_line(false).show(ui, |ui| {
@@ -1472,6 +1628,7 @@ impl eframe::App for SpyApp {
         self.sets_dialog(&ctx);
         self.approval_dialog(&ctx);
         self.reset_dialog(&ctx);
+        self.remove_all_dialog(&ctx);
         self.info_windows(&ctx);
         self.toasts(&ctx);
 
@@ -1494,14 +1651,104 @@ impl SpyApp {
         if let Some(r) = self.slow.take() {
             r.stop();
         }
+        for (_, s) in std::mem::take(&mut self.stopping) {
+            if let Some(s) = s.wait() {
+                self.log.info(format!("Recording finished: {} rows in {}", s.rows, s.dir.display()));
+            }
+        }
+        let until = Instant::now() + CLOSE_PATIENCE;
+        if let Some(job) = self.snapshot_job.take() {
+            while !job.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if job.is_finished() {
+                match job.join() {
+                    Ok(Ok((dir, rows))) => self.log.info(format!("Saved {rows} samples to {}", dir.display())),
+                    Ok(Err(e)) => self.log.warn(format!("Could not save: {e}")),
+                    Err(_) => self.log.warn("Saving failed unexpectedly."),
+                }
+            } else {
+                self.log.warn(format!("A save of the last seconds was still writing {:.0} s after the window closed: its folder keeps what was written, marked as cut short.", CLOSE_PATIENCE.as_secs_f64()));
+            }
+        }
         if let Some(job) = self.export_job.take() {
-            self.export_stop.store(true, std::sync::atomic::Ordering::SeqCst);
-            let _ = job.join();
-            self.log.info("A CSV being saved was stopped: the window closed before it was done.");
+            while !job.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !job.is_finished() {
+                self.export_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.log.info("A CSV being saved was stopped: it was still writing well after the window closed.");
+            }
+            match job.join() {
+                Ok(Ok((p, n))) => self.log.info(format!("Saved {n} samples in view to {}", p.display())),
+                Ok(Err(e)) => self.log.warn(format!("Could not save: {e}")),
+                Err(_) => self.log.warn("Saving failed unexpectedly."),
+            }
         }
         self.phone = None;
         self.save_settings();
         self.session.disconnect();
+    }
+
+    pub fn poll_stopping(&mut self) {
+        let mut done = Vec::new();
+        let mut i = 0;
+        while i < self.stopping.len() {
+            if self.stopping[i].1.is_finished() {
+                done.push(self.stopping.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        for (what, s) in done {
+            let Some(s) = s.wait() else {
+                self.toast(Level::Error, "Closing a recording failed unexpectedly.");
+                continue;
+            };
+            let slow = s.kind == spy_core::recording::Kind::Slow;
+            match &s.state {
+                spy_core::recording::RecState::Failed(e) => self.toast(Level::Error, format!("The {} ended with an error: {e}", if slow { "slow log" } else { "recording" })),
+                _ if slow => self.toast(Level::Info, format!("Slow log: {} rows in {}", s.rows, s.dir.display())),
+                _ => self.toast(Level::Info, format!("Recorded {} rows to {}", s.rows, s.dir.display())),
+            }
+            if what == "stopped" {
+                let to = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                self.rws_after_recording(s.dir.clone(), to - s.started.elapsed().as_millis() as i64, to);
+            }
+            if !slow {
+                self.last_folder = Some(s.dir);
+            }
+        }
+    }
+
+    fn learn_units(&mut self) {
+        let accepted: Vec<String> = self.session.status().channels.iter().filter(|c| matches!(c.state, spy_core::session::ChannelState::Defined { .. })).map(|c| c.key.unit.to_string()).collect();
+        for u in accepted {
+            if !self.settings.units.iter().any(|k| k.eq_ignore_ascii_case(&u)) {
+                self.settings.units.push(u);
+                self.mark_settings_dirty();
+            }
+        }
+    }
+
+    fn check_other_windows(&mut self) {
+        if self.others_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.others_checked = Some(Instant::now());
+        if let Some(n) = self.windows.others() {
+            self.others_open = n;
+        }
+    }
+
+    pub fn follow_live_view(&mut self) {
+        if self.paused_at.is_some() {
+            return;
+        }
+        if let Some(newest) = self.session.store().newest() {
+            let width = (self.window_s * 1000.0).round() as i64;
+            self.view_ms = Some((newest.saturating_sub(width), newest.saturating_add(1)));
+        }
     }
 }
 
@@ -1512,6 +1759,15 @@ impl Drop for SpyApp {
         }
         if let Some(r) = self.slow.take() {
             let _ = r.stop();
+        }
+        for (_, s) in std::mem::take(&mut self.stopping) {
+            let _ = s.wait();
+        }
+        if let Some(job) = self.snapshot_job.take() {
+            let until = Instant::now() + CLOSE_PATIENCE;
+            while !job.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }
@@ -1533,6 +1789,25 @@ mod tests {
         assert!(m < 1e-9 || std::f64::consts::TAU - m < 1e-9, "{m}");
         assert!((s.mean(view::Reading::Plain).unwrap() - std::f64::consts::PI).abs() < 1e-9);
         assert_eq!(Stats::default().mean(view::Reading::Plain), None);
+    }
+
+    #[test]
+    fn a_restart_is_followed_once_and_never_one_from_before_the_last_connect() {
+        use spy_core::session::Target;
+        let (a, b) = (Target { host: "127.0.0.1".into(), port: 61000 }, Target { host: "127.0.0.1".into(), port: 61002 });
+        assert_eq!(super::move_to_follow(Some((a.clone(), b.clone())), 1, 0, Some(&a)), Some((a.clone(), b.clone())), "a new restart of the controller connected to");
+        assert_eq!(super::move_to_follow(Some((a.clone(), b.clone())), 1, 1, Some(&a)), None, "seen already, or from before a connect by hand to the old port");
+        assert_eq!(super::move_to_follow(Some((a.clone(), b.clone())), 2, 1, Some(&b)), None, "another controller's");
+        assert_eq!(super::move_to_follow(None, 2, 1, Some(&a)), None);
+    }
+
+    #[test]
+    fn the_title_never_says_connecting_while_disconnecting_or_asking() {
+        use spy_core::session::Phase;
+        assert_eq!(super::title_word(&Phase::TearingDown, false), "DISCONNECTING");
+        assert_eq!(super::title_word(&Phase::AwaitingApproval, false), "WAITING FOR YOUR ANSWER");
+        assert_eq!(super::title_word(&Phase::Streaming, true), "NOT RECEIVING");
+        assert_eq!(super::title_word(&Phase::Handshaking, false), "CONNECTING");
     }
 
     #[test]

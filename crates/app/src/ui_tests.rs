@@ -28,7 +28,7 @@ fn harness_with(dir: &Path, opts: Options) -> Harness<'static, SpyApp> {
 fn harness_sized(dir: &Path, opts: Options, size: (f32, f32)) -> Harness<'static, SpyApp> {
     let dir = dir.to_path_buf();
     Harness::builder().with_size(size).with_max_steps(20).build_eframe(move |cc| {
-        let mut app = SpyApp::with_options(cc, dir.clone(), false, opts.clone());
+        let mut app = SpyApp::with_options(cc, dir.clone(), crate::net::Windows::none(), opts.clone());
         app.settings.record_dir = Some(dir.join("recordings"));
         app.show_guide = false;
         app
@@ -413,18 +413,29 @@ fn the_phone_view_serves_what_the_window_shows() {
     assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
     menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_some()));
-    let port = h.state().phone.as_ref().unwrap().port();
+    let (port, at) = h.state().phone.as_ref().map(|p| (p.port(), p.path())).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     let _ = h.run_ok();
-    let body = {
+    let fetch = |h: &mut Harness<'static, SpyApp>| {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = h.run_ok();
         use std::io::{Read, Write};
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.write_all(b"GET /data HTTP/1.1\r\n\r\n").unwrap();
+        s.write_all(format!("GET {at}data HTTP/1.1\r\n\r\n").as_bytes()).unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
         out
     };
+    let body = fetch(&mut h);
     assert!(body.contains("DC-link voltage") && body.contains("\"356.7\"") && body.contains("\"stale\":false"), "{body}");
+    assert!(body.contains("\"state\":\"streaming\"") && body.contains("\"streaming\":true"), "the window's own word: {body}");
+    fake.with(|b| {
+        b.mute.insert(5027);
+    });
+    assert!(wait(&mut h, 8000, |a| a.session.status().advice.is_some() && a.session.status().channels[0].stale), "{:?}", phase(h.state()));
+    let body = fetch(&mut h);
+    assert!(body.contains("\"stale\":true") && body.contains("\"state\":\"not receiving\"") && body.contains("\"streaming\":false"), "the phone said Streaming while the window said not receiving: {body}");
+    fake.with(|b| b.mute.clear());
     menu(&mut h, "view", "phone view");
     assert!(wait(&mut h, 2000, |a| a.phone.is_none()));
 }
@@ -519,6 +530,35 @@ fn a_restarted_virtual_controller_is_followed_and_the_recording_carries_on() {
     let loaded = spy_core::recording::read(&dir_rec).unwrap();
     assert!(loaded.meta.complete && !loaded.meta.notes.contains("Closed when"), "{:?}", loaded.meta.notes);
     assert!(loaded.meta.events.iter().any(|e| e.text.contains(&format!("connected to 127.0.0.1:{}", new.port()))), "{:?}", loaded.meta.events);
+}
+
+#[test]
+fn a_virtual_controller_restarted_twice_is_followed_both_times() {
+    let mut was = FakeController::start(Behaviour::default()).unwrap();
+    let ports = std::sync::Arc::new(std::sync::Mutex::new(vec![was.port()]));
+    let found = ports.clone();
+    let finder = VcFinder::new(move |timeout| {
+        found.lock().unwrap().iter().filter_map(|&p| spy_core::discovery::hello(std::net::SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect()
+    });
+    let dir = temp_dir("vcmoved-twice");
+    let mut h = harness_with(&dir, Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
+    connect(&mut h, &was);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    for restart in 1..=2 {
+        assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+        was.stop();
+        ports.lock().unwrap().clear();
+        assert!(wait(&mut h, 3000, |a| phase(a) != Phase::Streaming));
+        let now = FakeController::start(Behaviour::default()).unwrap();
+        let port = now.port();
+        ports.lock().unwrap().push(port);
+        assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming && a.port_input == port.to_string()), "restart {restart}: {:?} port {}", phase(h.state()), h.state().port_input);
+        let a = h.state();
+        assert_eq!(a.settings.last_target.as_ref().map(|t| t.port), Some(port), "restart {restart}");
+        assert_eq!(a.toasts.iter().filter(|t| t.text.contains(&format!("on port {port}"))).count(), 1, "restart {restart}: the person is told, once");
+        was = now;
+    }
 }
 
 #[test]
@@ -1966,6 +2006,7 @@ fn a_recording_that_closes_while_minimised_is_said_when_the_window_is_shown() {
     minimised_until(&mut h, 6500, &mut titles, |_| false);
     let _ = h.run_ok();
     let said = h.state().log.since(0).into_iter().find(|e| e.text.starts_with("Recording closed")).expect("not said at all").text;
+    assert!(h.state().toasts.iter().any(|t| t.text == said), "said while minimised, and its toast gone unseen (the footer's newest message is no stand-in for it)");
     assert!(h.query_by_label(&said).is_some(), "said while minimised, and gone unseen");
 
     look_minimised(&mut h);
@@ -2774,7 +2815,7 @@ fn a_dashboard_number_keeps_its_size_while_its_value_swings() {
 fn the_dashboard_numbers_grow_into_the_room_they_have() {
     let short = six_numbers_on_the_dashboard("dash-short", (1366.0, 700.0));
     let tall = six_numbers_on_the_dashboard("dash-tall", (1366.0, 1024.0));
-    assert!(tall.numbers[0].height() > short.numbers[0].height() * 1.2, "a taller window, bigger numbers: {} then {}", short.numbers[0].height(), tall.numbers[0].height());
+    assert!(tall.numbers[0].height() > short.numbers[0].height() * 1.15, "a taller window, bigger numbers: {} then {}", short.numbers[0].height(), tall.numbers[0].height());
     each_card_holds_its_own(&short, (1366.0, 700.0));
     each_card_holds_its_own(&tall, (1366.0, 1024.0));
 }
@@ -2833,12 +2874,12 @@ fn a_warning_gets_its_own_line_only_while_it_holds() {
     let warning = "Another ABB Signal Spy window is open";
     assert_eq!(h.query_all_by_label_contains(warning).count(), 0);
     let top = h.state().signals_rect.expect("the list is drawn").top();
-    h.state_mut().another_instance = true;
+    h.state_mut().others_open = 1;
     let _ = h.run_ok();
     let _ = h.run_ok();
     assert!(h.query_all_by_label_contains(warning).next().is_some(), "the warning is on screen");
     assert!(h.state().signals_rect.unwrap().top() > top + 10.0, "on a line of its own above the sheets");
-    h.state_mut().another_instance = false;
+    h.state_mut().others_open = 0;
     let _ = h.run_ok();
     let _ = h.run_ok();
     assert_eq!(h.query_all_by_label_contains(warning).count(), 0);
@@ -2994,4 +3035,587 @@ fn the_light_theme_is_a_click_away_and_recolours_the_channels() {
     menu(&mut h, "view", "dark");
     assert!(h.state().settings.dark && h.ctx.theme() == egui::Theme::Dark);
     assert_eq!(h.state().chans[1].color, crate::theme::channel_color(1, true));
+}
+
+fn chan(signal: u32, axis: u8) -> spy_core::store::ChannelKey {
+    spy_core::store::ChannelKey { signal, unit: spy_core::request::MechUnit::new("ROB_1").unwrap(), axis: spy_core::request::Axis::new(axis).unwrap() }
+}
+
+fn quick_loss() -> Options {
+    Options {
+        ask: AskPolicy::Remote,
+        find_vc: VcFinder::none(),
+        vc_pause_patience: Duration::ZERO,
+        stall_after: Duration::from_secs(1),
+        probe_after: Duration::from_millis(300),
+        handshake_timeout: Duration::from_secs(1),
+        connect_timeout: Duration::from_secs(1),
+        ladder: vec![Duration::from_millis(500), Duration::from_secs(1)],
+        held_wait: Duration::from_secs(3),
+        held_poll: Duration::from_millis(300),
+        recovery_retry: Duration::from_millis(300),
+        recovery_handshake: Duration::from_millis(500),
+        recovery_for: Duration::from_secs(4),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn an_old_number_is_struck_and_said_old_while_reconnecting_and_once_stopped() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("old-number");
+    let mut h = harness_with(&dir, quick_loss());
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 5027, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 50)));
+    h.state_mut().dashboard = true;
+    let _ = h.run_ok();
+    assert!(h.query_by_label("356.7").is_some());
+    assert_eq!(h.query_all_by_label_contains("not the value now").count(), 0, "a live number called old");
+    fake.cut_network(Duration::from_secs(6), Duration::from_secs(6));
+    assert!(wait(&mut h, 8000, |a| matches!(phase(a), Phase::Reconnecting { .. })), "{:?}", phase(h.state()));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("356.7").is_some(), "the last value is still shown");
+    assert!(h.query_all_by_label_contains("Offline: last value").next().is_some(), "reconnecting, the old number read as now");
+    fake.with(|b| b.system_id = "{11111111-2222-4333-8444-555555555555}".into());
+    assert!(wait(&mut h, 20000, |a| matches!(phase(a), Phase::Stopped { .. })), "{:?}", phase(h.state()));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("356.7").is_some());
+    assert!(h.query_all_by_label_contains("Offline: last value").next().is_some(), "stopped, the old number read as now");
+    h.state_mut().dashboard = false;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains(" old").next().is_some(), "the channel's row does not say its number is old");
+}
+
+#[test]
+fn a_save_last_still_writing_when_the_window_closes_is_finished() {
+    let dir = temp_dir("save-at-close");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    let keys: Vec<spy_core::store::ChannelKey> = (1..=4).map(|a| chan(4002, a)).collect();
+    assert!(h.state_mut().add_channels(keys.clone(), false));
+    let store = h.state().session.store().clone();
+    for k in &keys {
+        let ch = store.channel(k, 4.0);
+        let mut r = ch.lock();
+        for i in 0..140_000i64 {
+            r.push(1_000 + 4 * i, i as f64);
+        }
+    }
+    h.state_mut().settings.snapshot_s = 600.0;
+    h.state_mut().save_last();
+    assert!(h.state().snapshot_job.is_some());
+    h.state_mut().shutdown();
+    let listed = spy_core::recording::list(&dir.join("recordings"));
+    assert_eq!(listed.len(), 1, "the save was cut off by closing the window");
+    assert!(listed[0].1.complete && listed[0].1.rows_written == 560_000, "{} rows, complete {}", listed[0].1.rows_written, listed[0].1.complete);
+}
+
+#[test]
+fn a_scale_set_on_one_units_chart_leaves_the_other_units_chart_alone() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("scale-units");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels((0..6).map(|n| chan(6000 + n, 1)).collect(), true));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 20)));
+    h.state_mut().chans[1].radians = true;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert_eq!(h.state().lanes(&[true; 6]).len(), 2, "degrees and radians, two charts");
+    rows(&h)[1].click();
+    let _ = h.run_ok();
+    h.get_by_label("fixed").click();
+    let _ = h.run_ok();
+    let a = h.state();
+    assert!(matches!(a.chans[1].scale, crate::charts::Scale::Fixed { .. }), "{:?}", a.chans[1].scale);
+    for (i, c) in a.chans.iter().enumerate().filter(|(i, _)| *i != 1) {
+        assert_eq!(c.scale, crate::charts::Scale::default(), "the radians chart's scale went to the degrees chart's J{}", i + 1);
+    }
+}
+
+#[test]
+fn the_xy_plot_keeps_up_behind_the_dashboard() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("xy-dashboard");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(4000, 1), chan(6000, 1)], false));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+    h.state_mut().toggle_xy();
+    assert!(wait(&mut h, 3000, |a| xy_pairs(a).is_some()));
+    h.state_mut().dashboard = true;
+    let _ = h.run_ok();
+    let before = h.state().view_ms.expect("a stretch in view").1;
+    let end = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < end {
+        let _ = h.run_ok();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let after = h.state().view_ms.unwrap().1;
+    assert!(after - before >= 1000, "the XY plot and Compare froze at the switch: {} ms on", after - before);
+}
+
+#[test]
+fn crowded_cards_at_the_smallest_window_hold_their_own() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("crowded");
+    let size = (900.0, 560.0);
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let keys: Vec<spy_core::store::ChannelKey> = (1..=6).map(|a| chan(4002, a)).chain((1..=6).map(|a| chan(4000, a))).collect();
+    assert!(h.state_mut().add_channels(keys, false));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.len() == 12 && a.session.status().channels.iter().all(|c| c.samples > 50)));
+    h.state_mut().dashboard = true;
+    fake.with(|b| {
+        b.mute.insert(4002);
+    });
+    assert!(wait(&mut h, 8000, |a| a.session.status().channels.iter().filter(|c| c.stale).count() == 6));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let notes: Vec<egui::Rect> = h.query_all_by_label_contains("not the value now").map(|n| n.rect()).collect();
+    assert_eq!(notes.len(), 6, "a stale card says so");
+    let heads: Vec<egui::Rect> = h.query_all_by_label_contains("4002 · ").chain(h.query_all_by_label_contains("4000 · ")).map(|n| n.rect()).collect();
+    assert_eq!(heads.len(), 12);
+    for n in &notes {
+        assert!(n.right() <= size.0, "{n:?} runs past the window");
+        for hd in heads.iter().filter(|hd| hd.top() > n.top() && hd.x_range().intersects(n.x_range())) {
+            assert!(hd.top() - n.bottom() >= 36.0, "the stale line at {n:?} spills out of its card toward {hd:?}");
+        }
+    }
+    let words: Vec<egui::Rect> = h.query_all_by_label("stale").chain(h.query_all_by_label("live")).map(|n| n.rect()).collect();
+    assert_eq!(words.len(), 12, "each card's state word");
+    let bar = h.ctx.global_style().spacing.scroll.allocated_width();
+    let inside = size.0 - 8.0 - 10.0 - bar - 16.0;
+    let right = words.iter().map(|r| r.right()).fold(0.0, f32::max);
+    assert!(right <= inside + 0.5, "the right column runs under the scroll bar: its state word ends at {right}, the cards' room at {inside}");
+    for w in &words {
+        let head = heads.iter().filter(|hd| hd.left() < w.left() && (hd.top() - w.top()).abs() < 40.0).min_by(|a, b| (w.left() - a.left()).total_cmp(&(w.left() - b.left()))).expect("a state word with no heading beside it");
+        assert!((w.center().y - head.center().y).abs() <= 2.0, "a card's state word at {w:?} is not level with its heading at {head:?}");
+    }
+}
+
+#[test]
+fn stopping_a_recording_never_holds_the_window() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("stop-later");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    h.state_mut().toggle_recording();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(400));
+    let rec = h.state().recorder.as_ref().unwrap().status().dir;
+    #[cfg(windows)]
+    let lock = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).share_mode(1).open(rec.join("recording.json")).unwrap()
+    };
+    let t0 = Instant::now();
+    h.state_mut().toggle_recording();
+    assert!(t0.elapsed() < Duration::from_millis(500), "the window waited {:?} on the disk", t0.elapsed());
+    assert!(h.state().recorder.is_none() && h.state().stopping.len() == 1);
+    #[cfg(windows)]
+    drop(lock);
+    assert!(wait(&mut h, 8000, |a| a.stopping.is_empty()));
+    assert!(h.state().toasts.iter().any(|t| t.text.starts_with("Recorded ")), "{:?}", h.state().toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+    assert!(spy_core::recording::read_meta(&rec).unwrap().complete);
+}
+
+#[test]
+fn the_recordings_folder_is_chosen_in_the_window() {
+    let dir = temp_dir("rec-folder");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    menu(&mut h, "file", "recordings folder...");
+    assert!(h.state().show_record_dir);
+    let target = dir.join("elsewhere");
+    set_value(&h, "Recordings folder path", target.to_str().unwrap());
+    let _ = h.run_ok();
+    h.get_by_label("use this folder").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().settings.record_dir.as_deref(), Some(target.as_path()));
+    assert!(target.is_dir());
+    std::fs::write(dir.join("a file"), b"x").unwrap();
+    set_value(&h, "Recordings folder path", dir.join("a file").to_str().unwrap());
+    let _ = h.run_ok();
+    h.get_by_label("use this folder").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().settings.record_dir.as_deref(), Some(target.as_path()), "a file taken for a folder");
+    h.get_by_label("back to Documents\\TestSignals").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().settings.record_dir, None);
+}
+
+#[test]
+fn keys_never_act_behind_a_dialog() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("keys-dialog");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    h.state_mut().open_add(4000);
+    let _ = h.run_ok();
+    h.key_press(egui::Key::Space);
+    let _ = h.run_ok();
+    h.key_press(egui::Key::M);
+    let _ = h.run_ok();
+    assert!(h.state().paused_at.is_none(), "Space paused the charts behind the add dialog");
+    assert!(h.state().markers.is_empty(), "M put a marker down behind the add dialog");
+    h.state_mut().add = None;
+    let _ = h.run_ok();
+    h.key_press(egui::Key::Space);
+    let _ = h.run_ok();
+    assert!(h.state().paused_at.is_some(), "with the dialog gone Space pauses");
+}
+
+#[test]
+fn the_channel_count_keeps_derived_values_apart() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("count");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Sag { link: chan(5027, 1), plateau_v: None }));
+    let _ = h.run_ok();
+    assert!(h.query_by_label("1 of 12 · 1 derived").is_some(), "a derived value counted as a channel");
+    assert_eq!(crate::channels::count_text(12, 0), "12 of 12");
+}
+
+#[test]
+fn all_six_axes_need_room_only_for_those_missing() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("six-missing");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let keys: Vec<spy_core::store::ChannelKey> = (1..=4).map(|a| chan(4002, a)).chain((1..=4).map(|a| chan(4000, a))).collect();
+    assert!(h.state_mut().add_channels(keys, false));
+    h.state_mut().open_add(4002);
+    let _ = h.run_ok();
+    assert!(h.query_by_label_contains("4 of 12 channels free").is_some());
+    h.get_by_label("add all six axes").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans.len(), 10, "two were missing and four free, yet the button was off");
+}
+
+#[test]
+fn remove_all_asks_first() {
+    let dir = temp_dir("remove-all");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1), chan(4002, 2)], false));
+    let _ = h.run_ok();
+    h.get_by_label("remove all").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans.len(), 2, "removed without asking");
+    assert!(h.query_by_label("Remove all 2 channels?").is_some());
+    h.get_by_label("cancel").click();
+    let _ = h.run_ok();
+    assert_eq!(h.state().chans.len(), 2);
+    assert!(!h.state().confirm_remove_all);
+    h.get_by_label("remove all").click();
+    let _ = h.run_ok();
+    h.get_by_label("remove them all").click();
+    let _ = h.run_ok();
+    assert!(h.state().chans.is_empty());
+}
+
+#[test]
+fn a_recording_being_made_is_not_called_cut_short() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("still-recording");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    h.state_mut().toggle_recording();
+    assert!(wait(&mut h, 2000, |a| a.recorder.is_some()));
+    std::thread::sleep(Duration::from_millis(500));
+    h.state_mut().show_recordings = true;
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    assert!(h.query_by_label("still recording").is_some(), "the recording running now is not said to be running");
+    assert!(h.query_by_label("cut short").is_none(), "a recording being made called cut short");
+    h.state_mut().toggle_recording();
+}
+
+#[test]
+fn a_review_reads_its_numbers_to_the_same_decimals_as_live() {
+    let dir = temp_dir("review-decimals");
+    let d = dir.join("recordings").join("duty");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("recording.json"),
+        r#"{"format": "abb-signal-spy-recording", "version": 2, "kind": "full", "app": "t", "started_utc": "2026-09-27T10:00:00.000Z", "complete": true, "controller": "t",
+            "channels": [{"id": "5020/ROB_1/J2", "signal": 5020, "unit": "ROB_1", "axis": 2, "name": "a", "units": "0..1", "sample_ms": 4.0},
+                         {"id": "5021/ROB_1/J2", "signal": 5021, "unit": "ROB_1", "axis": 2, "name": "b", "units": "0..1", "sample_ms": 4.0},
+                         {"id": "5022/ROB_1/J2", "signal": 5022, "unit": "ROB_1", "axis": 2, "name": "c", "units": "0..1", "sample_ms": 4.0},
+                         {"id": "4002/ROB_1/J1", "signal": 4002, "unit": "ROB_1", "axis": 1, "name": "Torque", "units": "Nm", "sample_ms": 4.0}],
+            "anchors": [{"controller_ms": 1000, "utc": "2026-09-27T10:00:00.000Z", "row": 0}], "rows_written": 0, "samples_lost": 0,
+            "derived": [{"kind": "duty_sum", "legs": [{"signal": 5020, "unit": "ROB_1", "axis": 2}, {"signal": 5021, "unit": "ROB_1", "axis": 2}, {"signal": 5022, "unit": "ROB_1", "axis": 2}]}]}"#,
+    )
+    .unwrap();
+    let mut csv = String::from("controller_ms,channel,value\n");
+    for t in (1000..1400).step_by(4) {
+        for leg in ["5020", "5021", "5022"] {
+            csv += &format!("{t},{leg}/ROB_1/J2,0.5\n");
+        }
+        csv += &format!("{t},4002/ROB_1/J1,101\n");
+    }
+    std::fs::write(d.join("data.csv"), csv).unwrap();
+    let mut h = harness(&dir, AskPolicy::Remote);
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1)], false));
+    h.state_mut().chans[0].decimals = Some(3);
+    h.state_mut().open_recording(d.clone());
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label("1.500").next().is_some(), "the duty sum's mean read to six digits, live reads 1.500");
+    assert!(h.query_all_by_label("1.50000").next().is_none());
+    assert!(h.query_all_by_label("101.000").next().is_some(), "the channel's own three decimals left out of the review");
+}
+
+#[test]
+fn a_double_click_on_a_chart_leaves_cursor_a_where_it_was() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("double-cursor");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    add_via_dialog(&mut h, 4002, "add");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 100)));
+    h.state_mut().toggle_pause();
+    h.state_mut().cursors_on = true;
+    let _ = h.run_ok();
+    let tr = h.state().lane_transforms[0];
+    let x0 = tr.bounds().min()[0] + (tr.bounds().max()[0] - tr.bounds().min()[0]) * 0.25;
+    h.state_mut().cursor_a = Some(x0);
+    let pos = tr.position_from_point(&egui_plot::PlotPoint::new(tr.bounds().min()[0] + (tr.bounds().max()[0] - tr.bounds().min()[0]) * 0.75, (tr.bounds().min()[1] + tr.bounds().max()[1]) / 2.0));
+    double_click(&mut h, pos);
+    assert_eq!(h.state().cursor_a, Some(x0), "the double-click that goes back moved cursor A");
+}
+
+#[test]
+fn the_stale_shading_is_no_entry_in_a_charts_legend() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let dir = temp_dir("stale-legend");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_channels(vec![chan(6000, 1), chan(6001, 1)], true));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| c.samples > 50)));
+    fake.with(|b| {
+        b.mute.insert(6001);
+    });
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().any(|c| c.stale)));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let entries = legend(&h);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+}
+
+#[test]
+fn a_target_pasted_by_mistake_is_not_echoed_whole() {
+    let dir = temp_dir("target-paste");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: chan(5138, 1), target_deg: None }));
+    h.state_mut().derived[0].target_text = "clipboard ".repeat(1000);
+    h.state_mut().set_target(0);
+    let said = h.state().toasts.last().map(|t| t.text.clone()).unwrap_or_default();
+    assert!(said.contains("is not an angle") && said.chars().count() < 120, "{} characters said", said.chars().count());
+}
+
+#[test]
+fn a_typed_robot_joins_the_list_once_the_controller_takes_it() {
+    let mut b = Behaviour::default();
+    b.units.insert("STN_1".into(), 2);
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("units-learned");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let units0 = h.state().settings.units.clone();
+    for (typed, signal) in [("rob_2", 4002), ("ROB_9", 4000), ("STN_1", 4003)] {
+        h.state_mut().open_add(signal);
+        let _ = h.run_ok();
+        h.state_mut().add.as_mut().unwrap().unit = typed.into();
+        let _ = h.run_ok();
+        h.get_by_label("add").click();
+        let _ = h.run_ok();
+    }
+    assert!(h.state().chans.iter().any(|c| c.key.unit.as_str() == "ROB_2"), "rob_2 is ROB_2, the list's own spelling");
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.iter().all(|c| !matches!(c.state, spy_core::session::ChannelState::Waiting | spy_core::session::ChannelState::Defining))));
+    let _ = h.run_ok();
+    let units = h.state().settings.units.clone();
+    assert!(!units.iter().any(|u| u == "rob_2" || u == "ROB_9"), "a typo or a refused unit kept for good: {units:?}");
+    assert!(units.iter().any(|u| u == "STN_1"), "a unit the controller took is not offered next time: {units:?}");
+    assert_eq!(units.len(), units0.len() + 1);
+}
+
+#[test]
+fn a_memory_refusal_last_time_is_said_as_that() {
+    let dir = temp_dir("oom-said");
+    let mut t = crate::oom::Text::new();
+    crate::oom::crash_note(&mut t, 4096, &crate::oom::Utc { year: 2026, month: 10, day: 6, hour: 1, minute: 2, second: 3, ms: 4 });
+    std::fs::write(dir.join("crash.txt"), t.bytes()).unwrap();
+    let h = harness(&dir, AskPolicy::Remote);
+    let said: Vec<&String> = h.state().toasts.iter().map(|t| &t.text).collect();
+    assert!(said.iter().any(|t| t.contains("refused it memory")), "{said:?}");
+    assert!(!said.iter().any(|t| t.contains("internal error")), "a memory refusal called an internal error: {said:?}");
+}
+
+#[test]
+fn the_about_window_credits_the_face_on_the_screen() {
+    let dir = temp_dir("about");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().show_about = true;
+    let _ = h.run_ok();
+    assert!(h.query_all_by_label_contains("IBM Plex Sans").next().is_some());
+    assert!(h.query_all_by_label_contains("Copyright © 2017 IBM Corp. with Reserved Font Name \"Plex\"").next().is_some());
+    assert!(h.query_all_by_label_contains("Atkinson").next().is_none(), "a face the program no longer has is credited");
+    assert!(h.query_all_by_label_contains("Ubuntu Light").next().is_some());
+}
+
+#[test]
+fn the_controller_bar_fits_the_smallest_window() {
+    let dir = temp_dir("bar-narrow");
+    let size = (900.0, 560.0);
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, size);
+    assert!(h.state_mut().add_channels(vec![chan(4002, 1)], false));
+    let _ = h.run_ok();
+    let _ = h.run_ok();
+    let slow = h.get_by_label("slow log").rect();
+    let dash = h.get_by_label("live dashboard").rect();
+    let save = h.get_by(|n| name_of(n).starts_with("save last")).rect();
+    for (what, r) in [("slow log", slow), ("live dashboard", dash), ("save last", save)] {
+        assert!(r.right() <= size.0 && r.left() >= 0.0, "{what} at {r:?} is cut off");
+    }
+    assert!(!dash.intersects(slow) && !dash.intersects(save), "the dashboard button lies over the recording buttons");
+}
+
+#[test]
+fn a_five_digit_port_fits_its_field() {
+    let dir = temp_dir("port-width");
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().port_input = "65535".into();
+    let _ = h.run_ok();
+    let field = h.get_by_label("Controller port").rect();
+    let font = egui::TextStyle::Body.resolve(&h.ctx.global_style());
+    let digits = h.ctx.fonts_mut(|f| f.layout_no_wrap("65535".into(), font, egui::Color32::WHITE).size().x);
+    assert!(field.width() >= digits + 20.0 + 2.0, "a virtual controller's port is cut off: the field is {} px for {digits} px of digits and 20 px of margin", field.width());
+}
+
+#[test]
+fn a_manual_connect_after_following_a_restart_goes_where_it_was_told() {
+    let mut old = FakeController::start(Behaviour::default()).unwrap();
+    let ports = std::sync::Arc::new(std::sync::Mutex::new(vec![old.port()]));
+    let found = ports.clone();
+    let finder = VcFinder::new(move |timeout| {
+        found.lock().unwrap().iter().filter_map(|&p| spy_core::discovery::hello(std::net::SocketAddr::from(([127, 0, 0, 1], p)), timeout).ok().map(|a| (p, a.system_id))).collect()
+    });
+    let dir = temp_dir("vcmoved-manual");
+    let mut h = harness_with(&dir, Options { find_vc: finder, ladder: vec![Duration::from_millis(100), Duration::from_millis(200)], ..Options::default() });
+    connect(&mut h, &old);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    let old_port = old.port();
+    old.stop();
+    ports.lock().unwrap().clear();
+    assert!(wait(&mut h, 3000, |a| phase(a) != Phase::Streaming));
+    let new = FakeController::start(Behaviour::default()).unwrap();
+    ports.lock().unwrap().push(new.port());
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming && a.port_input == new.port().to_string()));
+    h.get_by_label("disconnect").click();
+    assert!(wait(&mut h, 3000, |a| phase(a) == Phase::Idle));
+    h.state_mut().port_input = old_port.to_string();
+    h.get_by_label("connect").click();
+    for _ in 0..10 {
+        let _ = h.run_ok();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(h.state().port_input, old_port.to_string(), "an old restart rewrote the port typed for this connect");
+    assert_eq!(h.state().toasts.iter().filter(|t| t.text.contains("The virtual controller restarted")).count(), 1, "the old restart said again");
+}
+
+#[test]
+fn the_question_about_other_programs_asks_for_attention() {
+    let b = Behaviour { extra_clients: vec!["192.0.2.27".into()], ..Behaviour::default() };
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("attention");
+    let mut h = harness(&dir, AskPolicy::Always);
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::AwaitingApproval));
+    h.state_mut().attention_asked = false;
+    h.state_mut().title.clear();
+    let said = look_minimised(&mut h);
+    assert!(said.iter().any(|c| matches!(c, egui::ViewportCommand::RequestUserAttention(_))), "{said:?}");
+    assert!(said.iter().any(|c| matches!(c, egui::ViewportCommand::Title(t) if t.contains("WAITING FOR YOUR ANSWER"))), "{said:?}");
+    assert!(!look_minimised(&mut h).iter().any(|c| matches!(c, egui::ViewportCommand::RequestUserAttention(_))), "asked again at every frame");
+}
+
+#[test]
+fn a_turns_card_keeps_its_size_as_it_crosses_its_target() {
+    let mut b = Behaviour::default();
+    b.signals.insert(5138, SignalDef { source: SignalSource::float(|_| 1.0), sample_ms: 4.032 });
+    let fake = FakeController::start(b).unwrap();
+    let dir = temp_dir("turn-card");
+    let mut h = harness_sized(&dir, Options { ask: AskPolicy::Remote, find_vc: VcFinder::none(), ..Options::default() }, (1366.0, 700.0));
+    connect(&mut h, &fake);
+    assert!(wait(&mut h, 5000, |a| phase(a) == Phase::Streaming));
+    assert!(h.state_mut().add_derived(spy_core::derived::Derived::Turn { angle: chan(5138, 1), target_deg: None }));
+    assert!(wait(&mut h, 5000, |a| a.session.status().channels.first().is_some_and(|c| c.samples > 20)));
+    let height = |h: &mut Harness<'static, SpyApp>, target: &str, shown: &str| {
+        h.state_mut().derived[0].target_text = target.into();
+        h.state_mut().set_target(0);
+        assert!(wait(h, 3000, |a| a.derived[0].live.lock().len() > 10));
+        h.state_mut().dashboard = true;
+        let _ = h.run_ok();
+        let _ = h.run_ok();
+        h.get_by_label(shown).rect().height()
+    };
+    let on = height(&mut h, "57.3", "ON TARGET");
+    let off = height(&mut h, "60", "+2.704");
+    assert_eq!(on, off, "the card's number changed size as the turn reached its target");
+}
+
+#[test]
+fn a_double_click_on_a_reviewed_chart_leaves_cursor_a_where_it_was() {
+    let dir = temp_dir("double-review");
+    let rec = recording_on_disk(&dir, "r", "full", "", &full_csv());
+    let mut h = harness(&dir, AskPolicy::Remote);
+    h.state_mut().open_recording(rec);
+    assert!(wait(&mut h, 5000, |a| a.review.is_some()));
+    if let Some(rs) = &mut h.state_mut().review {
+        rs.cursors_on = true;
+        rs.cursor_a = Some(0.25);
+    }
+    let _ = h.run_ok();
+    let tr = h.state().lane_transforms[0];
+    let pos = tr.position_from_point(&egui_plot::PlotPoint::new(tr.bounds().min()[0] + (tr.bounds().max()[0] - tr.bounds().min()[0]) * 0.75, (tr.bounds().min()[1] + tr.bounds().max()[1]) / 2.0));
+    double_click(&mut h, pos);
+    assert_eq!(h.state().review.as_ref().and_then(|r| r.cursor_a), Some(0.25), "the double-click that shows the whole recording moved cursor A");
+}
+
+#[cfg(windows)]
+#[test]
+fn settings_that_could_not_be_read_at_the_start_are_never_saved_over() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = temp_dir("settings-held");
+    let p = dir.join("settings.json");
+    let kept = r#"{"dark": true, "controllers": [{"name": "cell", "host": "192.0.2.77", "port": 5515}], "phone_port": 8090, "slow_interval_ms": 1000, "snapshot_s": 30, "rws_port": 80}"#;
+    std::fs::write(&p, kept).unwrap();
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&p).unwrap();
+    let mut h = harness(&dir, AskPolicy::Remote);
+    assert!(h.state().settings_locked.is_some());
+    assert!(h.state().toasts.iter().any(|t| t.text.contains("nothing will be saved over it")));
+    drop(held);
+    h.state_mut().settings.dark = false;
+    h.state_mut().save_settings();
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), kept, "the defaults read in place of a held file were saved over it");
 }

@@ -150,6 +150,18 @@ pub fn channel_color(i: usize, dark: bool) -> Color32 {
 }
 
 const PLEX: &[u8] = include_bytes!("../fonts/IBMPlexSans-Variable.ttf");
+pub const FACE: &str = "IBM Plex Sans";
+pub const FACE_LICENCE: &str = include_str!("../fonts/OFL-IBMPlexSans.txt");
+pub const FALLBACK_LICENCES: &str = include_str!("../fonts/LICENSES-egui-fonts.txt");
+pub const FALLBACK_FACES: &str = "Ubuntu Light (Copyright 2011 Canonical Ltd., Ubuntu Font Licence 1.0), Hack (Copyright 2018 Source Foundry Authors, MIT licence; from Bitstream Vera, Copyright 2003 Bitstream, Inc.), Noto Emoji (Copyright 2013 Google Inc., SIL Open Font License 1.1) and emoji-icon-font (Copyright 2014 John Slegers, MIT licence)";
+
+pub fn face_copyright() -> &'static str {
+    FACE_LICENCE.lines().next().unwrap_or_default().trim()
+}
+
+pub fn xy_point(dark: bool) -> Color32 {
+    channel_color(0, dark)
+}
 
 pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
@@ -293,6 +305,7 @@ pub enum Icon {
     Minus,
     Close,
     Grid,
+    Swap,
 }
 
 pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -325,6 +338,12 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
             let r = |x: f32, y: f32| egui::Shape::rect_stroke(Rect::from_min_size(pos2(c.x + x, c.y + y), vec2(5.0, 5.0)), 0.0, st, egui::StrokeKind::Inside);
             vec![r(-6.5, -6.5), r(1.5, -6.5), r(-6.5, 1.5), r(1.5, 1.5)]
         }
+        Icon::Swap => vec![
+            line(&[(-6.0, -2.5), (6.0, -2.5)]),
+            line(&[(3.0, -5.5), (6.0, -2.5), (3.0, 0.5)]),
+            line(&[(6.0, 2.5), (-6.0, 2.5)]),
+            line(&[(-3.0, -0.5), (-6.0, 2.5), (-3.0, 5.5)]),
+        ],
     };
     painter.extend(shapes);
 }
@@ -639,6 +658,46 @@ mod tests {
                 assert!(contrast(p.field_edge, g) >= 3.0, "{name}: a field's edge on {bg}");
                 assert!(contrast(p.off_edge, g) >= 3.0, "{name}: a dashed edge on {bg}");
             }
+        }
+    }
+
+    fn family_name(font: &[u8]) -> Option<String> {
+        let u16_at = |i: usize| Some(u16::from_be_bytes([*font.get(i)?, *font.get(i + 1)?]));
+        let u32_at = |i: usize| Some(u32::from_be_bytes(font.get(i..i + 4)?.try_into().ok()?));
+        let tables = u16_at(4)? as usize;
+        let name = (0..tables).map(|t| 12 + 16 * t).find(|&r| font.get(r..r + 4) == Some(b"name".as_slice()))?;
+        let at = u32_at(name + 8)? as usize;
+        let (count, strings) = (u16_at(at + 2)? as usize, at + u16_at(at + 4)? as usize);
+        (0..count).map(|k| at + 6 + 12 * k).find_map(|r| {
+            let (platform, id, len, off) = (u16_at(r)?, u16_at(r + 6)?, u16_at(r + 8)? as usize, u16_at(r + 10)? as usize);
+            if platform != 3 || id != 1 {
+                return None;
+            }
+            let units: Vec<u16> = font.get(strings + off..strings + off + len)?.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&units).ok()
+        })
+    }
+
+    #[test]
+    fn the_face_credited_is_the_face_embedded_with_its_notice() {
+        assert_eq!(family_name(PLEX).as_deref(), Some(FACE), "the embedded font is not the one credited");
+        assert_eq!(face_copyright(), "Copyright © 2017 IBM Corp. with Reserved Font Name \"Plex\"");
+        assert!(FACE_LICENCE.contains("SIL OPEN FONT LICENSE Version 1.1"));
+        for face in ["Ubuntu", "Hack", "Noto Emoji", "emoji-icon-font"] {
+            assert!(FALLBACK_FACES.contains(face) && FALLBACK_LICENCES.contains(face), "{face}");
+        }
+        assert!(FALLBACK_LICENCES.contains("UBUNTU FONT LICENCE") && FALLBACK_LICENCES.contains("BITSTREAM VERA LICENSE") && FALLBACK_LICENCES.contains("SIL OPEN FONT LICENSE"));
+        let fallbacks = egui::FontDefinitions::default().font_data.into_keys().collect::<Vec<_>>();
+        for name in &fallbacks {
+            let credited = [("Ubuntu", "Ubuntu"), ("Hack", "Hack"), ("NotoEmoji", "Noto Emoji"), ("emoji-icon-font", "emoji-icon-font")].iter().any(|(k, c)| name.contains(k) && FALLBACK_FACES.contains(c));
+            assert!(credited, "egui compiles in {name}, which is not credited");
+        }
+    }
+
+    #[test]
+    fn the_xy_points_stand_out_on_the_plot() {
+        for (dark, p) in [(true, DARK), (false, LIGHT)] {
+            assert!(contrast(xy_point(dark), p.plot) >= 3.0, "{:.2}:1", contrast(xy_point(dark), p.plot));
         }
     }
 

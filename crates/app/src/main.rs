@@ -96,7 +96,6 @@ fn main() {
         let p = std::hint::black_box(unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(1 << 50, 8).expect("a valid layout")) });
         std::process::exit(if p.is_null() { 3 } else { 4 });
     }
-    let another = net::another_instance();
     let connect = connect_arg();
     let review = review_arg();
 
@@ -113,7 +112,7 @@ fn main() {
             "ABB Signal Spy",
             options(renderer),
             Box::new(move |cc| {
-                let mut a = app::SpyApp::new(cc, dir, another);
+                let mut a = app::SpyApp::new(cc, dir, net::Windows::join(net::WINDOW_SLOTS));
                 if let Some(t) = connect {
                     a.host_input = t.host;
                     a.port_input = t.port.to_string();
@@ -126,7 +125,10 @@ fn main() {
             }),
         );
         match result {
-            Ok(()) => return,
+            Ok(()) => {
+                oom::survived(&data_dir, oom::noted());
+                return;
+            }
             Err(e) => errors.push(format!("{renderer:?}: {e}")),
         }
     }

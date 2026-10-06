@@ -103,19 +103,9 @@ impl Notes {
                 return (notes, Some(format!("Your notes on signals could not be read ({why}); the file was kept as {}.", aside.display())));
             }
         };
-        let mut bad: Vec<String> = Vec::new();
-        if let Some(list) = obj.get("notes").and_then(|v| v.as_object()) {
-            for (k, v) in list {
-                match (k.parse::<u32>(), serde_json::from_value::<Note>(v.clone())) {
-                    (Ok(n), Ok(note)) if n > 0 => {
-                        notes.map.insert(n, note);
-                    }
-                    (_, Err(e)) => bad.push(format!("\"{k}\" ({e})")),
-                    _ => bad.push(format!("\"{k}\" (not a signal number)")),
-                }
-            }
-        }
-        let note = (!bad.is_empty()).then(|| format!("Some of your notes on signals ({}) could not be read and were left out: {}. The file keeps them until the next save.", path.display(), bad.join("; ")));
+        let (map, bad) = parse(&obj);
+        notes.map = map;
+        let note = (!bad.is_empty()).then(|| format!("Some of your notes on signals ({}) could not be read and were left out: {}. The file keeps them.", path.display(), bad.join("; ")));
         (notes, note)
     }
 
@@ -124,28 +114,55 @@ impl Notes {
     }
 
     pub fn put(&mut self, n: u32, note: Note) -> Result<(), String> {
-        let mut map = self.map.clone();
-        if note.is_empty() {
-            map.remove(&n);
-        } else {
-            map.insert(n, note);
-        }
-        self.write(&map)?;
-        self.map = map;
-        Ok(())
-    }
-
-    fn write(&self, map: &BTreeMap<u32, Note>) -> Result<(), String> {
         if let Some(why) = &self.locked {
             return Err(why.clone());
         }
-        let notes: serde_json::Map<String, serde_json::Value> = map.iter().map(|(n, note)| (n.to_string(), serde_json::to_value(note).unwrap_or_default())).collect();
-        let body = serde_json::json!({ "format": FORMAT, "version": VERSION, "notes": notes });
-        let text = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())? + "\n";
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| format!("cannot replace {}: {e}", self.path.display()))
+        let mut doc = match std::fs::read_to_string(&self.path) {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(spy_core::util::strip_bom(&text)) {
+                Ok(serde_json::Value::Object(m)) if m.get("format").and_then(|f| f.as_str()).is_none_or(|f| f == FORMAT) => m,
+                _ => return Err(format!("{} was changed outside this window and cannot be read now; nothing was saved over it", self.path.display())),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let notes: serde_json::Map<String, serde_json::Value> = self.map.iter().map(|(n, note)| (n.to_string(), serde_json::to_value(note).unwrap_or_default())).collect();
+                serde_json::Map::from_iter([("notes".to_string(), serde_json::Value::Object(notes))])
+            }
+            Err(e) => return Err(format!("cannot read {} ({e}); nothing was saved over it", self.path.display())),
+        };
+        let notes = doc.entry("notes").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !notes.is_object() {
+            *notes = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(list) = notes.as_object_mut() {
+            if note.is_empty() {
+                list.remove(&n.to_string());
+            } else {
+                list.insert(n.to_string(), serde_json::to_value(&note).map_err(|e| e.to_string())?);
+            }
+        }
+        doc.insert("format".into(), FORMAT.into());
+        doc.insert("version".into(), VERSION.into());
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(doc.clone())).map_err(|e| e.to_string())? + "\n";
+        spy_core::util::write_whole(&self.path, text.as_bytes())?;
+        self.map = parse(&doc).0;
+        Ok(())
     }
+}
+
+fn parse(obj: &serde_json::Map<String, serde_json::Value>) -> (BTreeMap<u32, Note>, Vec<String>) {
+    let mut map = BTreeMap::new();
+    let mut bad: Vec<String> = Vec::new();
+    if let Some(list) = obj.get("notes").and_then(|v| v.as_object()) {
+        for (k, v) in list {
+            match (k.parse::<u32>(), serde_json::from_value::<Note>(v.clone())) {
+                (Ok(n), Ok(note)) if n > 0 => {
+                    map.insert(n, note);
+                }
+                (_, Err(e)) => bad.push(format!("\"{k}\" ({e})")),
+                _ => bad.push(format!("\"{k}\" (not a signal number)")),
+            }
+        }
+    }
+    (map, bad)
 }
 
 pub struct Origin<'a> {
@@ -476,6 +493,35 @@ mod tests {
         let kept: Vec<String> = std::fs::read_dir(p.parent().unwrap()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".bad-")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
         assert_eq!(kept.len(), 2, "{kept:?}");
         assert!(kept.contains(&"{ not json".to_string()), "the first file set aside was lost");
+    }
+
+    #[test]
+    fn two_windows_keep_each_others_notes() {
+        let (_dir, p) = temp("two");
+        let (mut a, _) = Notes::load(&p);
+        let (mut b, _) = Notes::load(&p);
+        a.put(1403, note("a", "seen in window A")).unwrap();
+        b.put(5007, note("b", "seen in window B")).unwrap();
+        let back = Notes::load(&p).0;
+        assert_eq!(back.map.keys().copied().collect::<Vec<_>>(), vec![1403, 5007], "a note saved in one window was lost when the other saved");
+        assert_eq!(b.map.len(), 2, "the window that saved last sees both");
+        a.put(1403, Note::default()).unwrap();
+        assert_eq!(Notes::load(&p).0.map.keys().copied().collect::<Vec<_>>(), vec![5007]);
+    }
+
+    #[test]
+    fn a_note_that_could_not_be_read_is_kept_through_a_save() {
+        let (_dir, p) = temp("keep-bad");
+        std::fs::write(&p, r#"{"format":"abb-signal-spy-notes","version":1,"notes":{"1403":{"name":"x"},"5007":{"confidence":"certain"}}}"#).unwrap();
+        let (mut notes, msg) = Notes::load(&p);
+        assert!(msg.unwrap().contains("\"5007\""));
+        notes.put(6914, note("y", "")).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(raw.contains("\"5007\"") && raw.contains("certain"), "a note this version cannot read was dropped: {raw}");
+        std::fs::write(&p, "{ broken by hand").unwrap();
+        let e = notes.put(1, note("z", "")).unwrap_err();
+        assert!(e.contains("cannot be read now"), "{e}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ broken by hand", "saved over");
     }
 
     #[test]

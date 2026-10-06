@@ -13,8 +13,6 @@ use crate::export::Picture;
 use crate::theme;
 use crate::view::{self, Health};
 
-const POINT: egui::Color32 = egui::Color32::from_rgb(0x5A, 0x9B, 0xD5);
-
 #[derive(Default)]
 pub struct XyState {
     pub x: Option<String>,
@@ -184,7 +182,7 @@ impl SpyApp {
                         }
                     });
                 }
-                if ui.button("⇄").on_hover_text("Swap X and Y").clicked() {
+                if theme::icon_button(ui, theme::Icon::Swap, "Swap X and Y", egui::vec2(36.0, 30.0)).clicked() {
                     std::mem::swap(&mut xy.x, &mut xy.y);
                 }
                 if ui.button("save png").on_hover_text("Save a picture of this window to the recordings folder: the channels, the pairs, r and the line, and the plot with its axes").clicked() {
@@ -226,6 +224,7 @@ impl SpyApp {
             let (xb, yb) = (autoscale(xr.0, xr.1, min_span(&cx.units)), autoscale(yr.0, yr.1, min_span(&cy.units)));
             let (xu, yu) = (cx.units.clone(), cy.units.clone());
             let pal = theme::pal(ui);
+            let point = theme::xy_point(ui.visuals().dark_mode);
             let resp = Plot::new("xy-plot")
                 .x_axis_label(format!("{}  [{}]", cx.title, cx.units))
                 .y_axis_label(format!("{}  [{}]", cy.title, cy.units))
@@ -257,7 +256,7 @@ impl SpyApp {
                     };
                     let size = pu.response().rect.size();
                     let pts = thin(&p.points, vx, vy, size.x as usize, size.y as usize);
-                    pu.points(Points::new("pairs", PlotPoints::from(pts)).radius(1.5).color(POINT));
+                    pu.points(Points::new("pairs", PlotPoints::from(pts)).radius(1.5).color(point));
                     if let Some(line) = p.fit.and_then(|f| line_in(f, vx, vy)) {
                         pu.line(Line::new("least-squares line", PlotPoints::from(line.to_vec())).color(pal.ink2).style(egui_plot::LineStyle::dashed_loose()));
                     }
@@ -309,7 +308,7 @@ fn pairs_text(p: &Pairs, x: &Candidate, y: &Candidate, secs: f64) -> String {
         None if n < 2 => head,
         None => format!("{head} X does not change: no line."),
         Some(f) => {
-            let r = f.r.map_or_else(|| "Y does not change".to_string(), |r| format!("r = {r:.4}"));
+            let r = f.r.map_or_else(|| "Y does not change".to_string(), |r| format!("r = {}", view::fmt_to(r, Some(4))));
             let sign = if f.offset < 0.0 { "−" } else { "+" };
             format!("{head}   {r}   line: Y = {} × X {sign} {} {}", view::fmt(f.slope), view::fmt(f.offset.abs()), y.units)
         }
@@ -323,6 +322,18 @@ fn hover_text(p: egui_plot::PlotPoint, x_units: &str, y_units: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_correlation_of_nothing_is_never_minus_zero() {
+        let c = Candidate { id: "x".into(), title: "x".into(), units: "A".into(), source: Source::Recorded(std::sync::Arc::new(empty_review()), 0, 1.0) };
+        let p = Pairs { points: vec![(0, 1.0, 2.0), (1, 2.0, 2.0)], fit: Some(Fit { slope: -0.00001, offset: 2.0, r: Some(-0.00001) }), counts: (2, 2), extent: None, at: Instant::now(), took: Duration::ZERO };
+        let text = pairs_text(&p, &c, &c, 1.0);
+        assert!(text.contains("r = 0.0000") && !text.contains("-0.0000"), "{text}");
+    }
+
+    fn empty_review() -> Review {
+        Review { dir: Default::default(), meta: serde_json::from_value(serde_json::json!({"format": "abb-signal-spy-recording", "version": 2, "kind": "full", "app": "t", "started_utc": "x", "complete": true, "channels": [], "rows_written": 0, "samples_lost": 0})).unwrap(), channels: Vec::new(), wall_clock: false, start: 0, end: 0, bad_rows: 0, bad_lines: Vec::new(), out_of_order: 0, notes: Vec::new(), marks: Vec::new() }
+    }
 
     #[test]
     fn the_hover_reads_each_axis_to_its_units_decimals() {

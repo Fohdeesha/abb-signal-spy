@@ -26,6 +26,7 @@ pub struct ReviewState {
     pub cursor_b: Option<f64>,
     pub zoom: std::collections::HashMap<(u32, String), (f64, f64)>,
     pub stats_computed: u64,
+    pub cursor_a_undo: Option<(Option<f64>, std::time::Instant)>,
     stats_cache: [Option<StatsFor>; 2],
 }
 
@@ -34,7 +35,7 @@ type StatsFor = ((i64, i64), Vec<RangeStats>);
 impl ReviewState {
     fn new(review: Review) -> ReviewState {
         let dur = ((review.end - review.start) as f64 / 1000.0).max(0.001);
-        ReviewState { review: Arc::new(review), view: (0.0, dur), fresh: true, cursors_on: false, cursor_a: None, cursor_b: None, zoom: Default::default(), stats_computed: 0, stats_cache: [None, None] }
+        ReviewState { review: Arc::new(review), view: (0.0, dur), fresh: true, cursors_on: false, cursor_a: None, cursor_b: None, zoom: Default::default(), stats_computed: 0, cursor_a_undo: None, stats_cache: [None, None] }
     }
 
     fn duration(&self) -> f64 {
@@ -74,12 +75,32 @@ fn kind_word(k: Kind) -> &'static str {
     }
 }
 
+pub const STILL_WRITTEN: Duration = Duration::from_secs(15);
+
+pub fn written_lately(dir: &Path, meta: &Meta) -> bool {
+    let data = if meta.kind == Kind::Slow { "slow.csv" } else { "data.csv" };
+    ["recording.json", data].iter().any(|f| std::fs::metadata(dir.join(f)).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e < STILL_WRITTEN)))
+}
+
 fn clock_text(secs: f64) -> String {
     let s = secs.max(0.0);
     if s < 120.0 { format!("{s:.1} s") } else if s < 7200.0 { format!("{:.1} min", s / 60.0) } else { format!("{:.1} h", s / 3600.0) }
 }
 
 impl SpyApp {
+    pub fn still_recording(&self, dir: &Path, meta: &Meta) -> bool {
+        let ours = [&self.recorder, &self.slow].into_iter().flatten().any(|r| r.status().dir == dir);
+        ours || written_lately(dir, meta)
+    }
+
+    pub fn review_decimals(&self, ch: &ReviewChannel, units: &str) -> Option<usize> {
+        if let Some(def) = &ch.derived {
+            return crate::derived_view::decimals(def);
+        }
+        let chosen = ch.key.as_ref().and_then(|k| self.chans.iter().find(|c| &c.key == k)).and_then(|c| c.decimals).map(usize::from);
+        chosen.or_else(|| view::auto_decimals(units))
+    }
+
     pub fn open_recording(&mut self, dir: PathBuf) {
         if self.review_job.is_some() {
             self.toast(Level::Warn, "A recording is already being opened.");
@@ -161,7 +182,9 @@ impl SpyApp {
                         ui.label(if meta.label.is_empty() { dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { meta.label.clone() });
                         ui.label(kind_word(meta.kind));
                         ui.label(&meta.controller);
-                        if !meta.complete {
+                        if !meta.complete && self.still_recording(dir, meta) {
+                            ui.label(RichText::new("still recording").color(theme::pal(ui).live)).on_hover_text("Being recorded now: what is written so far opens, and the rest follows when it ends.");
+                        } else if !meta.complete {
                             ui.label(RichText::new("cut short").color(theme::pal(ui).hold)).on_hover_text("Not closed properly (the program or the PC stopped while recording): the data up to then is there.");
                         } else {
                             ui.label("");
@@ -232,7 +255,10 @@ impl SpyApp {
             close = true;
         }
         let mut notes: Vec<(String, egui::Color32)> = Vec::new();
-        if !m.complete {
+        let dir = rs.review.dir.clone();
+        if !m.complete && self.still_recording(&dir, &m) {
+            notes.push(("Still recording: this is what was written when it was opened. Open it again for the rest.".into(), p.hold));
+        } else if !m.complete {
             notes.push(("Cut short: not closed properly (the program or the PC stopped while recording). The data up to then is here.".into(), p.hold));
         }
         if m.samples_lost > 0 {
@@ -350,6 +376,7 @@ impl SpyApp {
             return;
         }
         let hover_text = self.hover_text.clone();
+        let decimals_of: Vec<Option<usize>> = self.review.as_ref().map(|rs| rs.review.channels.iter().map(|ch| self.review_decimals(ch, &display(ch).0)).collect()).unwrap_or_default();
         let cat = &self.catalogue;
         let Some(rs) = &mut self.review else { return };
         let review = rs.review.clone();
@@ -412,6 +439,7 @@ impl SpyApp {
                 let u2 = units.clone();
                 let marks2 = marks.clone();
                 let shown = hover_text.clone();
+                let lane_decimals: Vec<(String, Option<usize>)> = members.iter().map(|&i| (short(cat, &review.channels[i]), decimals_of.get(i).copied().flatten())).collect();
                 let last_lane = k + 1 == lanes.len();
                 let mut plot = Plot::new(("review", *signal, units.as_str()))
                     .height(lane_h)
@@ -427,7 +455,7 @@ impl SpyApp {
                     .allow_scroll(false)
                     .allow_boxed_zoom(false)
                     .allow_double_click_reset(false)
-                    .label_formatter(move |pos| crate::charts::remember(&shown, hover(pos, start, wall, &u2, &marks2, mark_tol)));
+                    .label_formatter(move |pos| crate::charts::remember(&shown, hover(pos, start, wall, &u2, &lane_decimals, &marks2, mark_tol)));
                 if members.len() > 1 {
                     plot = plot.legend(Legend::default().position(egui_plot::Corner::LeftTop));
                 }
@@ -550,7 +578,13 @@ impl SpyApp {
                 rs.view = (0.0, rs.duration());
                 rs.fresh = true;
             }
-            if clicked_a.is_some() {
+            if back && let Some((before, at)) = rs.cursor_a_undo.take()
+                && at.elapsed() < crate::charts::DOUBLE_CLICK_UNDO
+            {
+                rs.cursor_a = before;
+            }
+            if clicked_a.is_some() && !back {
+                rs.cursor_a_undo = Some((rs.cursor_a, std::time::Instant::now()));
                 rs.cursor_a = clicked_a;
             }
             if clicked_b.is_some() {
@@ -607,7 +641,7 @@ impl SpyApp {
                         ui.label(RichText::new(format!("{} change(s) in view, {} in all", texts.len(), ch.text.len())).size(14.0).color(p.ink2));
                     } else {
                         let (units, factor) = display(ch);
-                        let decimals = view::auto_decimals(&units);
+                        let decimals = self.review_decimals(ch, &units);
                         let s = stats.get(i).copied().unwrap_or_default();
                         let f = |v: Option<f64>| v.map(|x| view::fmt_to(x, decimals)).unwrap_or_else(|| "--".into());
                         if cursors_on {
@@ -726,7 +760,7 @@ pub(crate) fn short_of(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String
 }
 
 fn display(ch: &ReviewChannel) -> (String, f64) {
-    let units = ch.entry.as_ref().map(|e| e.units.clone()).unwrap_or_default();
+    let units = ch.entry.as_ref().map(|e| view::shown_units(&e.units).to_string()).unwrap_or_default();
     match catalogue::angle_unit(&units) {
         Some((deg, k)) => (deg.to_string(), k),
         None => (units, 1.0),
@@ -762,7 +796,7 @@ fn about(cat: &catalogue::Catalogue, ch: &ReviewChannel) -> String {
     }
 }
 
-fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, marks: &[(f64, String)], tol: f64) -> Option<String> {
+fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, decimals: &[(String, Option<usize>)], marks: &[(f64, String)], tol: f64) -> Option<String> {
     let (nm, p) = match pos {
         HoverPosition::NearDataPoint { plot_name, position, .. } => (Some(*plot_name), *position),
         HoverPosition::Elsewhere { position } => (None, *position),
@@ -775,7 +809,8 @@ fn hover(pos: &HoverPosition<'_>, start: i64, wall: bool, units: &str, marks: &[
     } else {
         format!("controller {t} ms")
     };
-    let value = view::fmt_to(p.y, view::auto_decimals(units));
+    let line = nm.and_then(|n| decimals.iter().find(|(m, _)| m == n)).or(decimals.first());
+    let value = view::fmt_to(p.y, line.map_or_else(|| view::auto_decimals(units), |(_, d)| *d));
     let text = match nm {
         Some(n) => format!("{n}\n{value} {units}\nt = {:.3} s   {when}", p.x),
         None => format!("t = {:.3} s   {when}\n{value} {units}", p.x),
@@ -820,7 +855,7 @@ mod tests {
         for x in [1e16, -1e16, f64::MAX, f64::MIN, -11_644_473_700.0] {
             let _ = rs.t_of(x);
             let pos = HoverPosition::Elsewhere { position: egui_plot::PlotPoint::new(x, 0.0) };
-            assert!(hover(&pos, rs.review.start, true, "Nm", &[], 0.1).is_some(), "{x}");
+            assert!(hover(&pos, rs.review.start, true, "Nm", &[], &[], 0.1).is_some(), "{x}");
         }
     }
 

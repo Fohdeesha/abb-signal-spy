@@ -19,6 +19,7 @@ pub const VERSION: u32 = 2;
 pub const QUEUE: usize = 65_536;
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 const SIDECAR_EVERY: Duration = Duration::from_secs(5);
+pub const ANCHOR_SLACK_MS: i64 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -316,7 +317,7 @@ impl Recorder {
         let thread = std::thread::Builder::new()
             .name("recorder".into())
             .spawn(move || {
-                let mut w = Writer { dir, out, meta, infos, tap, rx, status: st2, slow: HashMap::new(), interval: interval_ms.map(i64::from), bytes: header.len() as u64, need_anchor: true, segment_break: false, ended: None, seen_lost: (0, 0) };
+                let mut w = Writer { dir, out, meta, infos, tap, rx, status: st2, slow: HashMap::new(), interval: interval_ms.map(i64::from), bytes: header.len() as u64, need_anchor: true, check_anchor: false, segment_break: false, ended: None, seen_lost: (0, 0) };
                 w.run();
             })
             .map_err(|e| format!("cannot start the recorder thread: {e}"))?;
@@ -352,6 +353,14 @@ impl Recorder {
         self.status()
     }
 
+    pub fn stop_in_background(self) -> Stopping {
+        let status = self.status.clone();
+        match std::thread::Builder::new().name("recorder-stop".into()).spawn(move || self.stop()) {
+            Ok(job) => Stopping::Running(job),
+            Err(_) => Stopping::Done(status.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+        }
+    }
+
     fn finish(&mut self) {
         let _ = self.tx.send(Cmd::Stop);
         if let Some(t) = self.thread.take() {
@@ -363,6 +372,27 @@ impl Recorder {
 impl Drop for Recorder {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+pub enum Stopping {
+    Running(JoinHandle<RecStatus>),
+    Done(RecStatus),
+}
+
+impl Stopping {
+    pub fn is_finished(&self) -> bool {
+        match self {
+            Stopping::Running(job) => job.is_finished(),
+            Stopping::Done(_) => true,
+        }
+    }
+
+    pub fn wait(self) -> Option<RecStatus> {
+        match self {
+            Stopping::Running(job) => job.join().ok(),
+            Stopping::Done(s) => Some(s),
+        }
     }
 }
 
@@ -401,6 +431,7 @@ struct Writer {
     interval: Option<i64>,
     bytes: u64,
     need_anchor: bool,
+    check_anchor: bool,
     segment_break: bool,
     ended: Option<String>,
     seen_lost: (u64, u64),
@@ -443,7 +474,7 @@ impl Writer {
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
-                match self.tap.rx.recv_timeout(Duration::from_millis(100)) {
+                match self.tap.recv_timeout(Duration::from_millis(100)) {
                     Ok(TapEvent::Samples(b)) => {
                         self.note_losses();
                         if let Some(&t) = b.raw_ms.last() {
@@ -476,7 +507,7 @@ impl Writer {
                 if self.ended.is_some() {
                     break;
                 }
-                let Ok(ev) = self.tap.rx.try_recv() else { break };
+                let Ok(ev) = self.tap.try_recv() else { break };
                 match ev {
                     TapEvent::Samples(b) => {
                         self.note_losses();
@@ -487,6 +518,7 @@ impl Writer {
             }
             self.flush_slow()?;
             self.out.flush().map_err(|e| format!("writing the recording failed: {e}"))?;
+            self.out.get_ref().sync_all().map_err(|e| format!("writing the recording failed: {e}"))?;
             Ok(())
         })();
         self.note_losses();
@@ -519,7 +551,7 @@ impl Writer {
             self.seen_lost = now;
             self.meta.samples_lost = now.0;
             self.meta.events_lost = now.1;
-            self.need_anchor = true;
+            self.check_anchor = true;
         }
     }
 
@@ -596,9 +628,13 @@ impl Writer {
             c.samples += n as u64;
             c.last_controller_ms = Some(last);
             c.first_controller_ms.get_or_insert(first);
-            if self.need_anchor {
-                self.need_anchor = false;
-                self.meta.anchors.push(Anchor { controller_ms: first, utc: wall_iso(b.arrived), row: Some(self.meta.rows_written) });
+            let anchor = Anchor { controller_ms: first, utc: wall_iso(b.arrived), row: Some(self.meta.rows_written) };
+            if std::mem::take(&mut self.check_anchor) && !self.need_anchor {
+                self.need_anchor = self.meta.anchors.last().is_none_or(|a| clock_moved(a, &anchor));
+            }
+            if std::mem::take(&mut self.need_anchor) {
+                self.meta.anchors.push(anchor);
+                self.save_meta();
             }
         }
         if let Some(interval) = self.interval {
@@ -654,6 +690,14 @@ impl Writer {
     }
 }
 
+fn clock_moved(last: &Anchor, now: &Anchor) -> bool {
+    let offset = |a: &Anchor| crate::util::parse_iso(&a.utc).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64 - a.controller_ms);
+    match (offset(last), offset(now)) {
+        (Some(a), Some(b)) => (a - b).abs() > ANCHOR_SLACK_MS,
+        _ => true,
+    }
+}
+
 fn write_bucket(out: &mut BufWriter<File>, id: &str, b: &Bucket, bytes: &mut u64, rows: &mut u64) -> Result<(), String> {
     if b.count == 0 {
         return Ok(());
@@ -705,6 +749,7 @@ pub fn write_snapshot(
     }
     rows.sort_by_key(|&(t, idx, _)| (t, idx));
     let dir = new_folder(base, label)?;
+    write_meta(&dir, &meta)?;
     let path = dir.join("data.csv");
     let file = File::create(&path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
     let mut out = BufWriter::with_capacity(256 * 1024, file);
@@ -728,6 +773,7 @@ pub fn write_snapshot(
         ch.last_controller_ms = Some(c);
     }
     out.flush().map_err(io)?;
+    out.get_ref().sync_all().map_err(io)?;
     meta.rows_written = rows.len() as u64;
     meta.complete = true;
     meta.ended_utc = Some(wall_iso(SystemTime::now()));
@@ -752,13 +798,14 @@ pub fn list(base: &Path) -> Vec<(PathBuf, Meta)> {
 
 pub fn read_meta(dir: &Path) -> Result<Meta, String> {
     let meta_text = std::fs::read_to_string(dir.join("recording.json")).map_err(|e| format!("cannot read recording.json: {e}"))?;
-    let mut meta: Meta = serde_json::from_str(crate::util::strip_bom(&meta_text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
-    if meta.format != FORMAT {
+    let doc: serde_json::Value = serde_json::from_str(crate::util::strip_bom(&meta_text)).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
+    if doc["format"] != FORMAT {
         return Err("recording.json is not an ABB Signal Spy recording".into());
     }
-    if meta.version > VERSION {
-        return Err(format!("recording format {} is newer than this program ({VERSION})", meta.version));
+    if let Some(v) = doc["version"].as_u64().filter(|&v| v > u64::from(VERSION)) {
+        return Err(format!("recording format {v} is newer than this program ({VERSION})"));
     }
+    let mut meta: Meta = serde_json::from_value(doc).map_err(|e| format!("recording.json is not a recording description ({e})"))?;
     for c in &mut meta.channels {
         c.id = ChannelKey::parse_id(&c.id).map(|k| k.id()).unwrap_or_else(|| c.id.clone());
     }
@@ -803,7 +850,8 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
     };
     let file = if meta.kind == Kind::Slow { "slow.csv" } else { "data.csv" };
     let f = File::open(dir.join(file)).map_err(|e| format!("cannot read {file}: {e}"))?;
-    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None, strict_end: !meta.complete };
+    let strict_end = !meta.complete || !ends_with_a_whole_row(&dir.join(file));
+    let mut rows = CsvRows { r: std::io::BufReader::with_capacity(256 * 1024, f), line: 0, error: None, strict_end };
     let mut data: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
     let mut text: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
     let mut bad = Vec::new();
@@ -841,6 +889,16 @@ pub fn read(dir: &Path) -> Result<Loaded, String> {
         return Err(format!("{file}: {e}"));
     }
     Ok(Loaded { meta, data, text, bad_rows: bad })
+}
+
+pub(crate) fn ends_with_a_whole_row(path: &Path) -> bool {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut f) = File::open(path) else { return false };
+    let mut last = [0u8; 1];
+    match f.seek(SeekFrom::End(-1)) {
+        Ok(_) => f.read_exact(&mut last).is_ok() && last[0] == b'\n',
+        Err(_) => f.metadata().is_ok_and(|m| m.len() == 0),
+    }
 }
 
 pub(crate) struct CsvRows<R: std::io::BufRead> {
@@ -983,8 +1041,7 @@ mod tests {
     }
 
     fn manual_tap(capacity: usize) -> (mpsc::SyncSender<TapEvent>, Tap) {
-        let (tx, rx) = mpsc::sync_channel(capacity);
-        (tx, Tap { rx, dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)), dropped_events: Arc::new(std::sync::atomic::AtomicU64::new(0)) })
+        Tap::by_hand(capacity)
     }
 
     fn batch(t: u64, n: usize) -> TapEvent {
@@ -1029,6 +1086,114 @@ mod tests {
         stopper.join().unwrap();
         feeder.join().unwrap();
         assert_eq!(st.state, RecState::Finished, "{:?}", st.state);
+    }
+
+    #[test]
+    fn a_loss_with_the_clock_unmoved_adds_no_anchor() {
+        let base = temp("loss-steady");
+        let (tx, tap) = manual_tap(16);
+        let dropped = tap.dropped.clone();
+        let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "test", None, Vec::new()).unwrap();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        let at = |t: u64, jitter_ms: u64| {
+            let mut b = batch(t, 3);
+            if let TapEvent::Samples(s) = &mut b {
+                s.arrived = t0 + Duration::from_millis(t - 1000 + jitter_ms);
+            }
+            b
+        };
+        tx.send(at(1000, 0)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        dropped.fetch_add(5, Ordering::Relaxed);
+        tx.send(at(2000, 37)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let back = read(&rec.stop().dir).unwrap();
+        assert_eq!(back.meta.samples_lost, 5);
+        let at: Vec<i64> = back.meta.anchors.iter().map(|a| a.controller_ms).collect();
+        assert_eq!(at, vec![1000], "a second anchor 37 ms off the first: the review drops samples either side of it");
+    }
+
+    #[test]
+    fn a_new_anchor_is_on_disk_at_once() {
+        let base = temp("anchor-now");
+        let (tx, tap) = manual_tap(16);
+        let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "test", None, Vec::new()).unwrap();
+        let dir = rec.status().dir;
+        tx.send(batch(900_000, 3)).unwrap();
+        tx.send(TapEvent::Mark { wall: SystemTime::now(), mark: Mark::ClockReset { from_raw: 900_008, to_raw: 5000 } }).unwrap();
+        tx.send(batch(5000, 2)).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        let on_disk = read_meta(&dir).unwrap();
+        assert_eq!(on_disk.anchors.iter().map(|a| a.controller_ms).collect::<Vec<_>>(), vec![900_000, 5000], "a crash now would map the new rows through the old anchor");
+        drop(rec);
+    }
+
+    #[test]
+    fn stopping_in_the_background_does_not_wait_for_the_disk() {
+        let base = temp("stop-later");
+        let (tx, tap) = manual_tap(64);
+        let rec = Recorder::start_with(tap, &base, "", None, &HashMap::new(), "test", None, Vec::new()).unwrap();
+        let dir = rec.status().dir;
+        tx.send(batch(1000, 3)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        #[cfg(windows)]
+        let lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().read(true).share_mode(1).open(dir.join("recording.json")).unwrap()
+        };
+        let t0 = Instant::now();
+        let stopping = rec.stop_in_background();
+        assert!(t0.elapsed() < Duration::from_millis(200), "took {:?}", t0.elapsed());
+        #[cfg(windows)]
+        {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!stopping.is_finished(), "the description file is held: the stop is still trying to write it");
+            drop(lock);
+        }
+        let st = stopping.wait().expect("the stop's own thread");
+        assert!(matches!(st.state, RecState::Finished | RecState::Failed(_)), "{:?}", st.state);
+        assert_eq!(read(&dir).unwrap().data["4002/ROB_1/J1"].len(), 3);
+    }
+
+    #[test]
+    fn a_newer_format_is_said_to_be_newer_whatever_its_shape() {
+        let dir = temp("newer");
+        std::fs::write(dir.join("recording.json"), r#"{"format": "abb-signal-spy-recording", "version": 99, "kind": "streamed", "channels": {"a": 1}}"#).unwrap();
+        let e = read_meta(&dir).unwrap_err();
+        assert!(e.contains("newer than this program"), "{e}");
+        std::fs::write(dir.join("recording.json"), r#"{"format": "something else", "version": 1}"#).unwrap();
+        assert!(read_meta(&dir).unwrap_err().contains("not an ABB Signal Spy recording"));
+    }
+
+    #[test]
+    fn a_save_last_lists_while_it_is_still_being_written() {
+        let store = Arc::new(Store::new());
+        let keys: Vec<ChannelKey> = (1..=4).map(|a| ChannelKey::parse_id(&format!("4002/ROB_1/J{a}")).unwrap()).collect();
+        let mut tl = Timeline::new();
+        let t0 = Instant::now();
+        let chans: Vec<_> = keys.iter().map(|k| store.channel(k, 4.0)).collect();
+        for i in 0..140_000u64 {
+            let (_, t, _) = tl.map(1000 + 4 * i, t0 + Duration::from_millis(4 * i));
+            for c in &chans {
+                c.lock().push(t, 1.0);
+            }
+        }
+        let base = temp("snap-early");
+        let (b2, s2, k2) = (base.to_path_buf(), store.clone(), keys.clone());
+        let job = std::thread::spawn(move || write_snapshot(&b2, "", &s2, &tl, &k2, &HashMap::new(), 600.0, "t", None, &[]));
+        let first = loop {
+            let found = std::fs::read_dir(&base).ok().and_then(|mut d| d.next()).and_then(|e| e.ok()).map(|e| e.path().join("recording.json")).filter(|p| p.is_file());
+            if let Some(m) = found.and_then(|p| std::fs::read_to_string(p).ok()).filter(|t| !t.is_empty()) {
+                break m;
+            }
+            assert!(!job.is_finished(), "finished before its description was ever seen");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let (dir, rows) = job.join().unwrap().unwrap();
+        assert!(first.contains("\"complete\": false"), "the description came only at the end: a save cut off before then is lost\n{first}");
+        assert_eq!(rows, 560_000);
+        let m = read_meta(&dir).unwrap();
+        assert!(m.complete && m.rows_written == 560_000);
     }
 
     #[test]

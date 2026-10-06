@@ -2118,3 +2118,144 @@ fn signal_sources_can_be_replaced() {
     assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
     assert_eq!(last(&s, &k), Some(20.0));
 }
+
+#[test]
+fn a_paused_vc_that_answers_slowly_still_notices_a_program_that_connects() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(Options { vc_pause_patience: Duration::from_secs(30), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    fake.with(|b| {
+        b.freeze = true;
+        b.reply_delay = Duration::from_millis(2500);
+    });
+    assert!(wait_for(9000, || s.status().advice.as_deref().is_some_and(|a| a.contains("paused"))), "an answer later than the handshake wait was dropped\n{}", log_text(&s));
+    let other = OtherTool::connect(&fake, Duration::from_millis(20));
+    assert!(wait_for(12000, || matches!(phase(&s), Phase::Stopped { .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    assert!(stopped_reason(&s).contains("connected to the controller after this program did"), "{}", stopped_reason(&s));
+    drop(other);
+}
+
+#[test]
+fn a_paused_vcs_first_sample_is_not_taken_for_another_programs() {
+    let mut b = Behaviour::default();
+    b.freeze = true;
+    let fake = FakeController::start(b).unwrap();
+    let s = spawn(Options { vc_pause_patience: Duration::from_secs(30), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || phase(&s) == Phase::Streaming && matches!(state(&s, &k), Some(ChannelState::Defined { .. }))), "{:?}\n{}", phase(&s), log_text(&s));
+    std::thread::sleep(Duration::from_millis(2500));
+    fake.with(|b| b.freeze = false);
+    assert!(wait_for(3000, || samples(&s, &k) > 50), "{:?}\n{}", phase(&s), log_text(&s));
+    assert_eq!(phase(&s), Phase::Streaming, "{}", log_text(&s));
+}
+
+#[test]
+fn a_leavers_one_reconnect_is_still_said_after_waiting_out_a_held_connection() {
+    let mut beh = Behaviour::default();
+    beh.extra_clients = vec!["192.0.2.9".into()];
+    let fake = FakeController::start(beh).unwrap();
+    let a = spawn(Options { ladder: vec![Duration::from_millis(600)], ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    a.set_channels(vec![k.clone()]);
+    a.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&a, std::slice::from_ref(&k))));
+    fake.with(|b| {
+        b.extra_clients.clear();
+        b.mute_all = true;
+    });
+    assert!(wait_for(5000, || log_text(&a).contains("connecting again, once")), "{:?}\n{}", phase(&a), log_text(&a));
+    fake.with(|b| b.extra_clients = vec!["127.0.0.1".into()]);
+    assert!(wait_for(5000, || log_text(&a).contains("still holds the connection that broke")), "{:?}\n{}", phase(&a), log_text(&a));
+    fake.with(|b| b.extra_clients.clear());
+    assert!(wait_for(8000, || matches!(phase(&a), Phase::Stopped { .. })), "{:?}\n{}", phase(&a), log_text(&a));
+    assert!(stopped_reason(&a).contains("Connected again once"), "{}", stopped_reason(&a));
+}
+
+#[test]
+fn an_unanswered_request_is_said_again_on_the_next_connection() {
+    let mut b = Behaviour::default();
+    b.unanswered.insert("StartStream".into());
+    let fake = FakeController::start(b).unwrap();
+    let s = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    let told = |s: &Session| log_text(s).matches("did not answer StartStream").count();
+    s.connect(target(&fake));
+    assert!(wait_for(8000, || told(&s) == 1), "{}", log_text(&s));
+    s.disconnect();
+    assert!(wait_for(3000, || phase(&s) == Phase::Idle));
+    s.connect(target(&fake));
+    assert!(wait_for(8000, || told(&s) == 2), "the next connection's unanswered StartStream went unsaid\n{}", log_text(&s));
+}
+
+#[test]
+fn a_sample_the_history_refuses_does_not_make_its_channel_live() {
+    let fake = FakeController::start(Behaviour::default()).unwrap();
+    let s = spawn(opts());
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let Some(ChannelState::Defined { stream }) = state(&s, &k) else { panic!("{:?}", state(&s, &k)) };
+    fake.with(|b| {
+        b.mute.insert(6000);
+    });
+    assert!(wait_for(3000, || s.status().channels[0].stale), "{}", log_text(&s));
+    let arrived = s.status().channels[0].last_arrival;
+    let before = samples(&s, &k);
+    let back = fake.clock_ms().saturating_sub(1000);
+    fake.inject_samples(&[Record { stream, kind: ValueKind::Float, stamps: vec![back], values: RecordValues::Float(vec![42.0]) }]);
+    assert!(wait_for(2000, || samples(&s, &k) > before), "the sample never came");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!log_text(&s).contains("samples arriving again"), "a sample from the past made the channel live again\n{}", log_text(&s));
+    assert_eq!(s.status().channels[0].last_arrival, arrived, "a refused sample counted as an arrival");
+    assert_ne!(last(&s, &k), Some(42.0));
+}
+
+#[test]
+fn a_sample_time_no_controller_uses_is_not_believed() {
+    let mut b = Behaviour::default();
+    b.signals.insert(4005, SignalDef { source: SignalSource::float(|_| 7.0), sample_ms: 24192.0 });
+    let fake = FakeController::start(b).unwrap();
+    let s = spawn(opts());
+    let k = key(4005, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&fake));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))), "{}", log_text(&s));
+    assert!(log_text(&s).contains("reported a sample time of 24192 ms") && log_text(&s).contains("taking 24.192 ms"), "{}", log_text(&s));
+    assert_eq!(s.status().channels[0].sample_ms, Some(24.192));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(phase(&s), Phase::Streaming, "{}", log_text(&s));
+    fake.with(|b| {
+        b.mute.insert(4005);
+    });
+    assert!(wait_for(2000, || s.status().channels[0].stale), "a stopped stream still live after 2 s: its stale bound came from the reported sample time");
+}
+
+#[test]
+fn a_connect_by_hand_forgets_a_restart_followed_before() {
+    let mut old = FakeController::start(Behaviour::default()).unwrap();
+    let ports = Arc::new(Mutex::new(vec![old.port()]));
+    let s = spawn(Options { find_vc: finder(ports.clone()), ..opts() });
+    let k = key(6000, "ROB_1", 1);
+    s.set_channels(vec![k.clone()]);
+    s.connect(target(&old));
+    assert!(wait_for(5000, || streaming_with_samples(&s, std::slice::from_ref(&k))));
+    let from = target(&old);
+    old.stop();
+    ports.lock().unwrap().clear();
+    assert!(wait_for(12000, || matches!(phase(&s), Phase::Reconnecting { attempt: 3.., .. })), "{:?}\n{}", phase(&s), log_text(&s));
+    let new = FakeController::start(Behaviour::default()).unwrap();
+    ports.lock().unwrap().push(new.port());
+    assert!(wait_for(8000, || phase(&s) == Phase::Streaming && s.status().target == Some(target(&new))), "{:?}\n{}", phase(&s), log_text(&s));
+    let st = s.status().clone();
+    assert_eq!((st.moved, st.moves), (Some((from.clone(), target(&new))), 1));
+    s.connect(from);
+    assert!(wait_for(5000, || s.status().moved.is_none()), "an old move outlived a connect by hand: {:?}", s.status().moved);
+    assert_eq!(s.status().moves, 1);
+}

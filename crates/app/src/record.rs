@@ -25,6 +25,20 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+pub fn usable_folder(p: &std::path::Path) -> Result<(), String> {
+    if p.as_os_str().is_empty() {
+        return Err("Type the folder recordings should go to.".into());
+    }
+    if !p.is_absolute() {
+        return Err(format!("\"{}\" is not a whole path (one like D:\\Recordings).", p.display()));
+    }
+    std::fs::create_dir_all(p).map_err(|e| format!("Cannot use {} for recordings: {e}", p.display()))?;
+    let probe = p.join(format!(".abb-signal-spy-{}.tmp", std::process::id()));
+    std::fs::write(&probe, b"").map_err(|e| format!("Cannot write in {}: {e}", p.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 pub fn seconds_text(s: f64) -> String {
     SAVE_LAST.iter().find(|(v, _)| (v - s).abs() < 1e-9).map(|(_, t)| t.to_string()).unwrap_or_else(|| format!("{s:.0} s"))
 }
@@ -182,14 +196,8 @@ impl SpyApp {
                 Err(e) => self.toast(Level::Error, format!("Could not start recording: {e}")),
             },
             Some(r) => {
-                let s = r.stop();
-                match s.state {
-                    RecState::Failed(e) => self.toast(Level::Error, format!("The recording ended with an error: {e}")),
-                    _ => self.toast(Level::Info, format!("Recorded {} rows to {}", s.rows, s.dir.display())),
-                }
-                let to = now_ms();
-                self.rws_after_recording(s.dir.clone(), to - s.started.elapsed().as_millis() as i64, to);
-                self.last_folder = Some(s.dir);
+                self.last_folder = Some(r.status().dir);
+                self.stopping.push(("stopped", r.stop_in_background()));
             }
         }
     }
@@ -231,15 +239,7 @@ impl SpyApp {
                     Err(e) => self.toast(Level::Error, format!("Could not start the slow log: {e}")),
                 }
             }
-            Some(r) => {
-                let s = r.stop();
-                match s.state {
-                    RecState::Failed(e) => self.toast(Level::Error, format!("The slow log ended with an error: {e}")),
-                    _ => self.toast(Level::Info, format!("Slow log: {} rows in {}", s.rows, s.dir.display())),
-                }
-                let to = now_ms();
-                self.rws_after_recording(s.dir.clone(), to - s.started.elapsed().as_millis() as i64, to);
-            }
+            Some(r) => self.stopping.push(("stopped", r.stop_in_background())),
         }
     }
 
@@ -250,7 +250,7 @@ impl SpyApp {
                 match PhoneServer::start(self.settings.phone_port, Arc::clone(&self.phone_snapshot)) {
                     Ok(s) => {
                         let moved = if self.settings.phone_port != 0 && s.port() != self.settings.phone_port { format!(" (port {} was in use by another program)", self.settings.phone_port) } else { String::new() };
-                        self.toast(Level::Info, format!("Phone view on: open {} on a phone on the same network{moved}. (Windows may ask to allow it through the firewall.)", if s.urls.is_empty() { format!("port {}", s.port()) } else { s.urls.join(" or ") }));
+                        self.toast(Level::Info, format!("Phone view on: open {} on a phone on the same network{moved}. (Windows may ask to allow it through the firewall.)", if s.urls.is_empty() { format!("port {}, {}", s.port(), s.path()) } else { s.urls.join(" or ") }));
                         self.phone = Some(s);
                     }
                     Err(e) => self.toast(Level::Error, format!("Phone view: {e}")),
@@ -288,6 +288,18 @@ impl SpyApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recordings_folder_must_be_a_whole_path_that_can_be_written() {
+        let dir = spy_core::testdir::TestDir::new("rec-folder");
+        assert!(usable_folder(&dir.join("new").join("deeper")).is_ok(), "made when it is not there yet");
+        assert!(dir.join("new").join("deeper").is_dir());
+        std::fs::write(dir.join("a file"), b"x").unwrap();
+        assert!(usable_folder(&dir.join("a file")).is_err());
+        assert!(usable_folder(std::path::Path::new("relative\\folder")).unwrap_err().contains("whole path"));
+        assert!(usable_folder(std::path::Path::new("")).is_err());
+        assert_eq!(std::fs::read_dir(dir.join("new").join("deeper")).unwrap().count(), 0, "the check left a file behind");
+    }
 
     #[test]
     fn a_running_time_reads_as_minutes_until_an_hour() {

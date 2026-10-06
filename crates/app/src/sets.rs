@@ -148,7 +148,7 @@ impl SpyApp {
                 Scope::Controller => {}
             }
             let units: Result<Vec<MechUnit>, String> = match set.scope {
-                Scope::OneRobot => MechUnit::new(&d.unit).map(|u| vec![u]).map_err(|_| "A mechanical unit name is letters, digits and _ (like ROB_1).".to_string()),
+                Scope::OneRobot => MechUnit::new(&crate::browser::known_unit(&self.settings.units, &d.unit)).map(|u| vec![u]).map_err(|_| "A mechanical unit name is letters, digits and _ (like ROB_1).".to_string()),
                 Scope::EachRobot => self.settings.units.iter().filter(|u| d.ticked.contains(u)).map(|u| MechUnit::new(u).map_err(|_| format!("{u} is not a mechanical unit name."))).collect(),
                 Scope::Controller => Ok(vec![self.settings.units.first().and_then(|u| MechUnit::new(u).ok()).unwrap_or_else(|| MechUnit::new("ROB_1").expect("a valid name"))]),
             };
@@ -197,13 +197,6 @@ impl SpyApp {
         }
         if let Some((keys, overlay, replace)) = act {
             let set = &SETS[d.set.min(SETS.len() - 1)];
-            if set.scope == Scope::OneRobot
-                && let Ok(u) = MechUnit::new(&d.unit)
-                && !self.settings.units.contains(&u.to_string())
-            {
-                self.settings.units.push(u.to_string());
-                self.mark_settings_dirty();
-            }
             let done = if replace { self.replace_channels(keys, overlay) } else { self.add_channels(keys, overlay) };
             if done {
                 close = true;

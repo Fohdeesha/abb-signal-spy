@@ -55,21 +55,95 @@ fn reverse(_ip: IpAddr) -> Option<String> {
     None
 }
 
+pub const WINDOW_SLOTS: &str = "Local\\ABB-Signal-Spy-window-";
+const SLOTS: usize = 16;
+
+pub struct Windows {
+    prefix: Option<String>,
+    mine: Option<(usize, usize)>,
+}
+
+impl Windows {
+    #[cfg(test)]
+    pub fn none() -> Windows {
+        Windows { prefix: None, mine: None }
+    }
+
+    pub fn join(prefix: &str) -> Windows {
+        let mine = (0..SLOTS).find_map(|i| slot_take(&slot_name(prefix, i)).map(|h| (i, h)));
+        Windows { prefix: Some(prefix.to_string()), mine }
+    }
+
+    pub fn others(&self) -> Option<usize> {
+        let prefix = self.prefix.as_deref()?;
+        Some((0..SLOTS).filter(|&i| self.mine.is_none_or(|(m, _)| m != i)).filter(|&i| slot_held_elsewhere(&slot_name(prefix, i))).count())
+    }
+}
+
+impl Drop for Windows {
+    fn drop(&mut self) {
+        if let Some((_, h)) = self.mine.take() {
+            slot_give_back(h);
+        }
+    }
+}
+
+fn slot_name(prefix: &str, i: usize) -> Vec<u16> {
+    format!("{prefix}{i}").encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 #[cfg(windows)]
-pub fn another_instance() -> bool {
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name: Vec<u16> = "Local\\ABB-Signal-Spy-instance".encode_utf16().chain(std::iter::once(0)).collect();
+fn slot_take(name: &[u16]) -> Option<usize> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
     unsafe {
         let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        !h.is_null() && GetLastError() == ERROR_ALREADY_EXISTS
+        if h.is_null() {
+            return None;
+        }
+        let r = WaitForSingleObject(h, 0);
+        if r == WAIT_OBJECT_0 || r == WAIT_ABANDONED {
+            Some(h as usize)
+        } else {
+            CloseHandle(h);
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn slot_held_elsewhere(name: &[u16]) -> bool {
+    match slot_take(name) {
+        Some(h) => {
+            slot_give_back(h);
+            false
+        }
+        None => true,
+    }
+}
+
+#[cfg(windows)]
+fn slot_give_back(h: usize) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::ReleaseMutex;
+    unsafe {
+        ReleaseMutex(h as windows_sys::Win32::Foundation::HANDLE);
+        CloseHandle(h as windows_sys::Win32::Foundation::HANDLE);
     }
 }
 
 #[cfg(not(windows))]
-pub fn another_instance() -> bool {
+fn slot_take(_name: &[u16]) -> Option<usize> {
+    None
+}
+
+#[cfg(not(windows))]
+fn slot_held_elsewhere(_name: &[u16]) -> bool {
     false
 }
+
+#[cfg(not(windows))]
+fn slot_give_back(_h: usize) {}
 
 #[cfg(windows)]
 pub fn fatal_box(text: &str) {
@@ -84,4 +158,34 @@ pub fn fatal_box(text: &str) {
 #[cfg(not(windows))]
 pub fn fatal_box(text: &str) {
     eprintln!("{text}");
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn each_window_knows_how_many_others_are_open_and_when_one_closes() {
+        let prefix = format!("Local\\ABB-Signal-Spy-test-{}-", std::process::id());
+        let (to_a, a_rx) = mpsc::channel::<()>();
+        let (from_a, a_said) = mpsc::channel::<Option<usize>>();
+        let p = prefix.clone();
+        let a = std::thread::spawn(move || {
+            let w = Windows::join(&p);
+            from_a.send(w.others()).unwrap();
+            a_rx.recv().unwrap();
+            from_a.send(w.others()).unwrap();
+            a_rx.recv().unwrap();
+        });
+        assert_eq!(a_said.recv().unwrap(), Some(0), "the first window alone");
+        let b = Windows::join(&prefix);
+        assert_eq!(b.others(), Some(1), "the second sees the first");
+        to_a.send(()).unwrap();
+        assert_eq!(a_said.recv().unwrap(), Some(1), "the first sees the second, which opened after it");
+        to_a.send(()).unwrap();
+        a.join().unwrap();
+        assert_eq!(b.others(), Some(0), "the first closed: the notice goes");
+        assert_eq!(Windows::none().others(), None);
+    }
 }

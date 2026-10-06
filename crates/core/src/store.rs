@@ -51,13 +51,14 @@ pub struct Ring {
     pub kind: Option<ValueKind>,
     pub out_of_order: u64,
     pub last_text: Option<String>,
+    generation: u64,
 }
 
 impl Ring {
     pub fn new(sample_ms: f64) -> Ring {
         let sample_ms = if sample_ms.is_finite() && sample_ms > 0.0 { sample_ms } else { 4.0 };
-        let cap = ((HISTORY_S * 1000.0 / sample_ms).ceil() as usize + 16).min(MAX_POINTS);
-        Ring { t: VecDeque::with_capacity(cap.min(4096)), v: VecDeque::with_capacity(cap.min(4096)), cap, sample_ms, kind: None, out_of_order: 0, last_text: None }
+        let cap = ((HISTORY_S * 1000.0 / sample_ms).ceil().min(MAX_POINTS as f64) as usize + 16).min(MAX_POINTS);
+        Ring { t: VecDeque::with_capacity(cap.min(4096)), v: VecDeque::with_capacity(cap.min(4096)), cap, sample_ms, kind: None, out_of_order: 0, last_text: None, generation: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -88,6 +89,11 @@ impl Ring {
     pub fn clear(&mut self) {
         self.t.clear();
         self.v.clear();
+        self.generation += 1;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn first_t(&self) -> Option<i64> {
@@ -218,6 +224,7 @@ impl Store {
             if (r.sample_ms - sample_ms).abs() > 1e-6 && sample_ms.is_finite() && sample_ms > 0.0 {
                 let mut fresh = Ring::new(sample_ms);
                 fresh.kind = r.kind;
+                fresh.generation = r.generation + 1;
                 for i in 0..r.t.len() {
                     fresh.push(r.t[i], r.v[i]);
                 }
@@ -303,6 +310,15 @@ mod tests {
     }
 
     #[test]
+    fn any_sample_time_gives_a_history_of_bounded_size() {
+        for ms in [1e-14, f64::MIN_POSITIVE, 0.001, 4.032, 24_192.0, 1e300, f64::INFINITY, 0.0, -4.0, f64::NAN] {
+            let r = Ring::new(ms);
+            assert!((16..=MAX_POINTS).contains(&r.capacity()), "{ms}: {}", r.capacity());
+        }
+        assert_eq!(Ring::new(1e-14).capacity(), MAX_POINTS);
+    }
+
+    #[test]
     fn mean_skips_nan_and_is_windowed() {
         let mut r = Ring::new(4.0);
         for i in 0..100 {
@@ -350,6 +366,19 @@ mod tests {
         assert_eq!(r.decimate(0, t, 1000, |v| v).len(), 1);
         r.push(t + 4, 1.0);
         assert_eq!(r.decimate(0, t + 10, 1000, |v| v).len(), 2);
+    }
+
+    #[test]
+    fn a_history_rewritten_from_the_start_is_a_new_generation() {
+        let s = Store::new();
+        let c = s.channel(&key(), 4.032);
+        let g0 = c.lock().generation();
+        c.lock().push(1, 2.0);
+        assert_eq!(c.lock().generation(), g0, "appending keeps the generation");
+        c.lock().clear();
+        assert_eq!(c.lock().generation(), g0 + 1);
+        let _ = s.channel(&key(), 24.192);
+        assert_eq!(c.lock().generation(), g0 + 2, "a resize redraws too");
     }
 
     #[test]

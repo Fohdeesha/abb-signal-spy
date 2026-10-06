@@ -11,6 +11,31 @@ const IO_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const PORT_TRIES: u16 = 10;
 const FROZEN_MS: u64 = 1000;
+const TOKEN_LEN: usize = 8;
+const TOKEN_LETTERS: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
+
+pub fn token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::new();
+    while out.len() < TOKEN_LEN {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.write_u32(std::process::id());
+        let mut v = h.finish();
+        for _ in 0..12 {
+            if out.len() == TOKEN_LEN {
+                break;
+            }
+            out.push(TOKEN_LETTERS[(v % 32) as usize] as char);
+            v /= 32;
+        }
+    }
+    out
+}
+
+fn may_try_next(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied)
+}
 
 fn frozen(body: &str) -> String {
     let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(body) else { return body.to_string() };
@@ -37,6 +62,7 @@ pub struct Snapshot {
 pub struct PhoneServer {
     pub addr: SocketAddr,
     pub urls: Vec<String>,
+    token: String,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -45,10 +71,10 @@ impl PhoneServer {
     pub fn start(port: u16, snapshot: Arc<Mutex<Snapshot>>) -> Result<PhoneServer, String> {
         let tries = if port == 0 { 1 } else { PORT_TRIES };
         let mut last = String::new();
-        for p in (0..tries).filter_map(|i| port.checked_add(i)) {
+        for p in (0..tries).filter_map(|i| port.checked_add(i)).chain(std::iter::once(0)) {
             match TcpListener::bind(("0.0.0.0", p)) {
                 Ok(l) => return PhoneServer::serve_on(l, snapshot, REQUEST_DEADLINE),
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => last = format!("ports {port} to {p} are all in use by other programs"),
+                Err(e) if may_try_next(&e) => last = format!("cannot listen on port {p}: {e}"),
                 Err(e) => return Err(format!("cannot listen on port {p}: {e}")),
             }
         }
@@ -61,16 +87,35 @@ impl PhoneServer {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let names = own_names();
+        let token = token();
+        let site = Arc::new(Site::new(&token));
         let thread = std::thread::Builder::new()
             .name("phone-view".into())
-            .spawn(move || accept_loop(listener, snapshot, stop2, names, deadline))
+            .spawn(move || accept_loop(listener, snapshot, stop2, names, site, deadline))
             .map_err(|e| format!("cannot start the phone view: {e}"))?;
-        let urls = local_addresses().iter().map(|a| format!("http://{a}:{}/", addr.port())).collect();
-        Ok(PhoneServer { addr, urls, stop, thread: Some(thread) })
+        let urls = local_addresses().iter().map(|a| format!("http://{a}:{}/{token}/", addr.port())).collect();
+        Ok(PhoneServer { addr, urls, token, stop, thread: Some(thread) })
     }
 
     pub fn port(&self) -> u16 {
         self.addr.port()
+    }
+
+    pub fn path(&self) -> String {
+        format!("/{}/", self.token)
+    }
+}
+
+struct Site {
+    page: String,
+    data: String,
+    roots: [String; 3],
+}
+
+impl Site {
+    fn new(token: &str) -> Site {
+        let root = format!("/{token}");
+        Site { page: PAGE.replace("DATA_PATH", &format!("{root}/data")), data: format!("{root}/data"), roots: [root.clone(), format!("{root}/"), format!("{root}/index.html")] }
     }
 }
 
@@ -83,7 +128,7 @@ impl Drop for PhoneServer {
     }
 }
 
-fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<AtomicBool>, names: Arc<Vec<String>>, deadline: Duration) {
+fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<AtomicBool>, names: Arc<Names>, site: Arc<Site>, deadline: Duration) {
     let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -93,9 +138,9 @@ fn accept_loop(listener: TcpListener, snapshot: Arc<Mutex<Snapshot>>, stop: Arc<
                     continue;
                 }
                 active.fetch_add(1, Ordering::SeqCst);
-                let (snap, act, names) = (snapshot.clone(), active.clone(), names.clone());
+                let (snap, act, names, site) = (snapshot.clone(), active.clone(), names.clone(), site.clone());
                 let spawned = std::thread::Builder::new().name("phone-conn".into()).spawn(move || {
-                    let _ = serve(stream, &snap, &names, deadline);
+                    let _ = serve(stream, &snap, &names, &site, deadline);
                     act.fetch_sub(1, Ordering::SeqCst);
                 });
                 if spawned.is_err() {
@@ -120,15 +165,16 @@ fn respond(s: &mut TcpStream, status: &str, ctype: &str, body: &[u8], head_only:
     s.flush()
 }
 
-fn own_names() -> Arc<Vec<String>> {
-    let mut v = vec!["localhost".to_string()];
-    if let Ok(n) = std::env::var("COMPUTERNAME") {
-        v.push(n.to_ascii_lowercase());
-    }
-    Arc::new(v)
+pub struct Names {
+    exact: Vec<String>,
+    with_domain: Vec<String>,
 }
 
-fn host_ok(host: Option<&str>, names: &[String]) -> bool {
+fn own_names() -> Arc<Names> {
+    Arc::new(Names { exact: vec!["localhost".to_string()], with_domain: std::env::var("COMPUTERNAME").map(|n| vec![n.to_ascii_lowercase()]).unwrap_or_default() })
+}
+
+fn host_ok(host: Option<&str>, names: &Names) -> bool {
     let Some(h) = host else { return true };
     let h = h.trim();
     let name = if let Some(rest) = h.strip_prefix('[') {
@@ -140,10 +186,13 @@ fn host_ok(host: Option<&str>, names: &[String]) -> bool {
         h.rsplit_once(':').map_or(h, |(n, port)| if port.bytes().all(|b| b.is_ascii_digit()) { n } else { h })
     };
     let name = name.to_ascii_lowercase();
-    name.parse::<std::net::Ipv4Addr>().is_ok() || names.iter().any(|n| name == *n || name.strip_prefix(n.as_str()).is_some_and(|rest| rest.starts_with('.')))
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    name.parse::<std::net::Ipv4Addr>().is_ok()
+        || names.exact.iter().any(|n| name == n)
+        || names.with_domain.iter().any(|n| name == n || name.strip_prefix(n.as_str()).is_some_and(|rest| rest.starts_with('.')))
 }
 
-fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &[String], deadline: Duration) -> std::io::Result<()> {
+fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &Names, site: &Site, deadline: Duration) -> std::io::Result<()> {
     s.set_nonblocking(false)?;
     s.set_write_timeout(Some(IO_TIMEOUT))?;
     let end = Instant::now() + deadline;
@@ -189,8 +238,8 @@ fn serve(mut s: TcpStream, snapshot: &Mutex<Snapshot>, names: &[String], deadlin
     }
     let path = path.split('?').next().unwrap_or("");
     match path {
-        "/" | "/index.html" => respond(&mut s, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes(), head),
-        "/data" => {
+        p if site.roots.iter().any(|r| r == p) => respond(&mut s, "200 OK", "text/html; charset=utf-8", site.page.as_bytes(), head),
+        p if p == site.data => {
             let body = {
                 let g = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                 let age = g.built.map(|b| b.elapsed().as_millis() as u64);
@@ -255,7 +304,7 @@ function show(msg){var b=document.getElementById('banner');b.style.display=msg?'
   document.getElementById('cards').style.opacity=msg?'.45':'1';}
 async function tick(){
   try{
-    var r=await fetch('data',{cache:'no-store'}); var s=await r.json();
+    var r=await fetch('DATA_PATH',{cache:'no-store'}); var s=await r.json();
     if(!s.data){show('Waiting for the program to publish data.');return;}
     var d=s.data;
     document.getElementById('sub').textContent=(d.controller||'')+'  '+(d.state||'');
@@ -267,7 +316,7 @@ async function tick(){
     if(!h)h='<div class=card><div class=name>No channels.</div></div>';
     document.getElementById('cards').innerHTML=h;
     if(s.age_ms>3000){show('The values below are frozen: the program has not updated them for '+Math.round(s.age_ms/1000)+' s.');}
-    else if(d.state!=='Streaming'){show('Not streaming ('+d.state+'): the values below are the last ones received.');}
+    else if(!d.streaming){show('Not receiving ('+d.state+'): the values below are the last ones received.');}
     else{show('');}
     lastOk=Date.now();
   }catch(e){show('Lost contact with the PC running ABB Signal Spy. The values below are frozen.');}
@@ -292,27 +341,51 @@ mod tests {
     fn serves_the_page_and_data_and_nothing_else() {
         let snap = Arc::new(Mutex::new(Snapshot::default()));
         let srv = PhoneServer::start(0, snap.clone()).unwrap();
-        let p = srv.port();
-        let page = get(p, &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n"));
-        assert!(page.starts_with("HTTP/1.1 200 OK") && page.contains("Read-only view"), "{page}");
-        let data = get(p, "GET /data HTTP/1.1\r\n\r\n");
+        let (p, at) = (srv.port(), srv.path());
+        assert!(srv.urls.iter().all(|u| u.ends_with(&at)), "{:?}", srv.urls);
+        let page = get(p, &format!("GET {at} HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n"));
+        assert!(page.starts_with("HTTP/1.1 200 OK") && page.contains("Read-only view") && page.contains(&format!("{at}data")), "{page}");
+        let data = get(p, &format!("GET {at}data HTTP/1.1\r\n\r\n"));
         assert!(data.contains("\"data\":null"), "no snapshot yet: {data}");
         {
             let mut g = snap.lock().unwrap();
-            g.body = r#"{"state":"Streaming","channels":[]}"#.into();
+            g.body = r#"{"state":"streaming","streaming":true,"channels":[]}"#.into();
             g.built = Some(Instant::now());
         }
-        let data = get(p, "GET /data?t=1 HTTP/1.1\r\n\r\n");
-        assert!(data.contains("\"age_ms\":") && data.contains("Streaming"), "{data}");
-        assert!(get(p, "POST /data HTTP/1.1\r\nContent-Length: 0\r\n\r\n").starts_with("HTTP/1.1 405"));
+        let data = get(p, &format!("GET {at}data?t=1 HTTP/1.1\r\n\r\n"));
+        assert!(data.contains("\"age_ms\":") && data.contains("streaming"), "{data}");
+        for guess in ["/", "/data", "/index.html", "/aaaaaaaa/data", &format!("{at}../data")] {
+            assert!(get(p, &format!("GET {guess} HTTP/1.1\r\n\r\n")).starts_with("HTTP/1.1 404"), "{guess} answered without the page's own path");
+        }
+        assert!(get(p, &format!("POST {at}data HTTP/1.1\r\nContent-Length: 0\r\n\r\n")).starts_with("HTTP/1.1 405"));
         assert!(get(p, "GET /../../etc/passwd HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
         assert!(get(p, "garbage\r\n\r\n").starts_with("HTTP/1.1 400"));
-        let big = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(20_000));
+        let big = format!("GET {at} HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(20_000));
         assert!(get(p, &big).starts_with("HTTP/1.1 431"));
-        let head = get(p, "HEAD / HTTP/1.1\r\n\r\n");
+        let head = get(p, &format!("HEAD {at} HTTP/1.1\r\n\r\n"));
         assert!(head.starts_with("HTTP/1.1 200") && !head.contains("<html"));
         drop(srv);
         assert!(TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], p)), Duration::from_millis(500)).is_err(), "switched off means not listening");
+    }
+
+    #[test]
+    fn each_start_has_its_own_path_and_no_one_guesses_it() {
+        let tokens: std::collections::HashSet<String> = (0..200).map(|_| token()).collect();
+        assert_eq!(tokens.len(), 200);
+        assert!(tokens.iter().all(|t| t.len() == TOKEN_LEN && t.bytes().all(|b| TOKEN_LETTERS.contains(&b))));
+    }
+
+    #[test]
+    fn ports_taken_or_reserved_end_on_one_windows_picks() {
+        assert!(may_try_next(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)), "a port Hyper-V or WSL reserved");
+        assert!(may_try_next(&std::io::Error::from(std::io::ErrorKind::AddrInUse)));
+        let start = 30_000 + (std::process::id() % 5_000) as u16 * 3;
+        let held: Vec<TcpListener> = (start..start + 2_000).step_by(PORT_TRIES as usize + 1).find_map(|p| (0..PORT_TRIES).map(|i| TcpListener::bind(("0.0.0.0", p + i)).ok()).collect::<Option<Vec<_>>>()).expect("ten free ports in a row");
+        let first = held[0].local_addr().unwrap().port();
+        let srv = PhoneServer::start(first, Arc::new(Mutex::new(Snapshot::default()))).expect("all ten taken: a port of Windows' choosing");
+        assert!(!(first..first + PORT_TRIES).contains(&srv.port()));
+        assert!(get(srv.port(), &format!("GET {} HTTP/1.1\r\n\r\n", srv.path())).starts_with("HTTP/1.1 200"));
+        drop(held);
     }
 
     #[test]
@@ -328,22 +401,24 @@ mod tests {
             .expect("no free pair of ports");
         let srv = PhoneServer::start(p, Arc::new(Mutex::new(Snapshot::default()))).unwrap();
         assert_eq!(srv.port(), p + 1);
-        assert!(get(srv.port(), "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 200"));
+        assert!(get(srv.port(), &format!("GET {} HTTP/1.1\r\n\r\n", srv.path())).starts_with("HTTP/1.1 200"));
         drop(taken);
     }
 
     #[test]
     fn only_this_pcs_names_are_answered() {
-        let names = vec!["localhost".to_string(), "mypc".to_string()];
-        for ok in [None, Some("127.0.0.1:8090"), Some("192.168.1.5"), Some("[fe80::1]:8090"), Some("localhost:8090"), Some("MYPC:8090"), Some("mypc.lan"), Some("mypc.local:8090")] {
+        let names = Names { exact: vec!["localhost".to_string()], with_domain: vec!["mypc".to_string()] };
+        for ok in [None, Some("127.0.0.1:8090"), Some("192.168.1.5"), Some("[fe80::1]:8090"), Some("localhost:8090"), Some("localhost.:8090"), Some("MYPC:8090"), Some("mypc.lan"), Some("mypc.local:8090")] {
             assert!(host_ok(ok, &names), "{ok:?}");
         }
-        for bad in [Some("evil.example"), Some("evil.example:8090"), Some("notmypc"), Some("mypcx:8090"), Some("[not-an-ip]:8090"), Some("")] {
+        for bad in [Some("evil.example"), Some("evil.example:8090"), Some("notmypc"), Some("mypcx:8090"), Some("[not-an-ip]:8090"), Some(""), Some("localhost.attacker.example"), Some("localhost.attacker.example:8090")] {
             assert!(!host_ok(bad, &names), "{bad:?}");
         }
         let srv = PhoneServer::start(0, Arc::new(Mutex::new(Snapshot::default()))).unwrap();
-        assert!(get(srv.port(), "GET /data HTTP/1.1\r\nHost: evil.example\r\n\r\n").starts_with("HTTP/1.1 421"));
-        assert!(get(srv.port(), &format!("GET /data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.port())).starts_with("HTTP/1.1 200"));
+        let at = srv.path();
+        assert!(get(srv.port(), &format!("GET {at}data HTTP/1.1\r\nHost: evil.example\r\n\r\n")).starts_with("HTTP/1.1 421"));
+        assert!(get(srv.port(), &format!("GET {at}data HTTP/1.1\r\nHost: localhost.attacker.example\r\n\r\n")).starts_with("HTTP/1.1 421"), "DNS rebinding through a name that starts with localhost");
+        assert!(get(srv.port(), &format!("GET {at}data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.port())).starts_with("HTTP/1.1 200"));
     }
 
     #[test]
@@ -357,7 +432,7 @@ mod tests {
                 g.body = body.into();
                 g.built = Instant::now().checked_sub(Duration::from_millis(age_ms));
             }
-            let data = get(srv.port(), &format!("GET /data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.port()));
+            let data = get(srv.port(), &format!("GET {}data HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", srv.path(), srv.port()));
             let json = data.split("\r\n\r\n").nth(1).unwrap().to_string();
             serde_json::from_str::<serde_json::Value>(&json).unwrap()
         };
@@ -409,7 +484,7 @@ mod tests {
         let srv = PhoneServer::start(0, snap).unwrap();
         let _idle: Vec<TcpStream> = (0..4).map(|_| TcpStream::connect(("127.0.0.1", srv.port())).unwrap()).collect();
         let t0 = Instant::now();
-        assert!(get(srv.port(), "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 200"));
+        assert!(get(srv.port(), &format!("GET {} HTTP/1.1\r\n\r\n", srv.path())).starts_with("HTTP/1.1 200"));
         assert!(t0.elapsed() < Duration::from_secs(2));
     }
 }
