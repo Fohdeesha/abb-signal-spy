@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency: release
 
@@ -16,16 +16,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
       new: ${{ steps.version.outputs.new }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - id: version
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          version=$(awk '/^\[workspace.package\]/ { inside = 1; next } /^\[/ { inside = 0 } inside && /^version *=/ { gsub(/^version *= *"|"$/, ""); print; exit }' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "no version in [workspace.package]" >&2
+            exit 1
+          fi
+          sha=$(git log -n 1 --format=%H -G '^version = ' -- Cargo.toml)
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh release view "v$version" > /dev/null 2>&1; then
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          draft=$(gh release view "v$version" --json isDraft -q .isDraft 2>/dev/null || echo none)
+          if [ "$draft" = "false" ]; then
             echo "new=false" >> "$GITHUB_OUTPUT"
           else
             echo "new=true" >> "$GITHUB_OUTPUT"
@@ -35,12 +45,16 @@ jobs:
     needs: check
     if: needs.check.outputs.new == 'true'
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.check.outputs.sha }}
           fetch-depth: 0
       - run: rustup toolchain install 1.96 --profile minimal
-      - run: cargo +1.96 build --release --locked -p abb-signal-spy -p signal-spy-probe
+      - run: cargo +1.96 build --release --locked -p abb-signal-spy
+      - run: cargo +1.96 build --release --locked -p signal-spy-probe
       - run: rustup toolchain install nightly-2026-09-25 --profile minimal --component rust-src
       - run: cargo +nightly-2026-09-25 build --release --locked -Z build-std=std,panic_unwind --target x86_64-win7-windows-msvc -p abb-signal-spy --no-default-features
       - name: windows 7 imports
@@ -52,16 +66,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.check.outputs.version }}
+          SHA: ${{ needs.check.outputs.sha }}
         run: |
           mkdir dist
           cp target/release/abb-signal-spy.exe "dist/abb-signal-spy-$VERSION.exe"
           cp target/release/signal-spy-probe.exe "dist/signal-spy-probe-$VERSION.exe"
           cp target/x86_64-win7-windows-msvc/release/abb-signal-spy.exe "dist/abb-signal-spy-$VERSION-win7.exe"
           (cd dist && sha256sum *.exe > SHA256SUMS.txt)
-          previous=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
           if [ -n "$previous" ]; then
-            git log --no-merges --format='- %s' "$previous..HEAD" > notes.md
+            git log --no-merges --format='- %s' "$previous..HEAD" | grep -v -x -F -- "- Version $VERSION" > notes.md || true
           else
             echo "First release." > notes.md
           fi
-          gh release create "v$VERSION" dist/* --title "ABB Signal Spy $VERSION" --notes-file notes.md --target "$GITHUB_SHA"
+          {
+            echo
+            echo "---"
+            echo
+            echo "**Which exe to download**"
+            echo
+            echo "- **Windows 10 or 11:** \`abb-signal-spy-$VERSION.exe\`"
+            echo "- **Windows 7, 8 or 8.1 (64-bit):** \`abb-signal-spy-$VERSION-win7.exe\`. This is a reduced build made for those older systems (OpenGL drawing only, no screen-reader support). On Windows 10 or 11, use the regular exe instead."
+          } >> notes.md
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            gh release delete "v$VERSION" --yes
+          fi
+          gh release create "v$VERSION" dist/* --title "ABB Signal Spy $VERSION" --notes-file notes.md --target "$SHA"

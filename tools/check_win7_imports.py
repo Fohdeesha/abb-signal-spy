@@ -54,6 +54,15 @@ def imports(exe):
     return table
 
 
+def value_of(args, flag):
+    if flag not in args:
+        return None
+    i = args.index(flag) + 1
+    if i >= len(args) or args[i].startswith("--"):
+        raise SystemExit("%s needs a file\n%s" % (flag, USAGE))
+    return args[i]
+
+
 def main():
     args = sys.argv[1:]
     if not args or not os.path.isfile(args[0]):
@@ -61,9 +70,10 @@ def main():
         return 2
     exe = args[0]
     verified = None
-    if "--verified" in args:
-        path = args[args.index("--verified") + 1]
-        verified = {l.strip() for l in open(path, encoding="utf-8") if l.strip() and not l.startswith("#")}
+    verified_path = value_of(args, "--verified")
+    write_path = value_of(args, "--write-verified")
+    if verified_path is not None:
+        verified = {l.strip() for l in open(verified_path, encoding="utf-8") if l.strip() and not l.startswith("#")}
     table = imports(exe)
     if not table:
         print("no imports read from", exe)
@@ -82,9 +92,9 @@ def main():
     print("%s: %d functions from %d DLLs" % (exe, total, len(table)))
     for dll, funcs in sorted(table.items()):
         print("  %-28s %d" % (dll, len(funcs)))
-    if "--write-verified" in args:
-        path = args[args.index("--write-verified") + 1]
-        with open(path, "w", encoding="utf-8") as f:
+    if write_path is not None:
+        path = write_path
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write("# Imports of a build seen running on Windows 7 SP1 x64; one DLL!function per line.\n")
             for dll, funcs in sorted(table.items()):
                 for fn in sorted(funcs):
