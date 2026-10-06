@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abb-signal-spy"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui_kittest",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "signal-spy-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "signal-spy-probe"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "signal-spy-core",
  "windows-sys 0.61.2",
