@@ -26,7 +26,7 @@ The core reason I built this: It exposes more than 150 diagnostic signals that T
 
 ## Get it
 
-Grab the latest `.exe` from [Releases](../../releases). No installer, just run it. Windows 10 or 11; for Windows 7 (64-bit), take the one ending in `-win7`.
+Grab the latest `.exe` from [Releases](../../releases). No installer, just run it - Windows 10 or 11. If you have a *really* shitty field laptop (Windows 7) grab the exe with `-win7` in the filename.
 
 ## Use it
 
@@ -45,7 +45,7 @@ Or switch to the **live dashboard** for big numbers you can read from across the
 
 ![Live dashboard](screenshots/dashboard.png)
 
-Light theme also available: uncheck **dark** under **view**.
+Light theme also available if you're insane: uncheck **dark** under **view**:
 
 ![Light theme](screenshots/light.png)
 
